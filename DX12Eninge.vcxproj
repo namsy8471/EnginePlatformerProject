@@ -129,13 +129,14 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="Src\WindowsCore\DX12Eninge.h" />
+    <ClInclude Include="Src\Engine\GameApp.h" />
     <ClInclude Include="Src\WindowsCore\framework.h" />
     <ClInclude Include="Src\WindowsCore\Resource.h" />
     <ClInclude Include="Src\WindowsCore\targetver.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Src\WindowsCore\DX12Eninge.cpp" />
+    <ClCompile Include="Src\Engine\GameApp.cpp" />
+    <ClCompile Include="Src\WindowsCore\main.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Src\WindowsCore\DX12Eninge.rc" />

@@ -15,9 +15,6 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="Src\WindowsCore\DX12Eninge.h">
-      <Filter>헤더 파일</Filter>
-    </ClInclude>
     <ClInclude Include="Src\WindowsCore\framework.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
@@ -27,9 +24,15 @@
     <ClInclude Include="Src\WindowsCore\targetver.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
+    <ClInclude Include="Src\Engine\GameApp.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Src\WindowsCore\DX12Eninge.cpp">
+    <ClCompile Include="Src\WindowsCore\main.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Engine\GameApp.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
   </ItemGroup>
