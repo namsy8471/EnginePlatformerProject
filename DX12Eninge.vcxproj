@@ -129,13 +129,20 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="Src\Engine\GameApp.h" />
+    <ClInclude Include="Src\EngineCore\GameApp.h" />
+    <ClInclude Include="Src\Platform\DirectX12\DX12Device.h" />
+    <ClInclude Include="Src\RHI\GraphicsCommon.h" />
+    <ClInclude Include="Src\RHI\IBuffer.h" />
+    <ClInclude Include="Src\RHI\ICommandList.h" />
+    <ClInclude Include="Src\RHI\IGpuResource.h" />
+    <ClInclude Include="Src\RHI\IGraphicsDevice.h" />
     <ClInclude Include="Src\WindowsCore\framework.h" />
     <ClInclude Include="Src\WindowsCore\Resource.h" />
     <ClInclude Include="Src\WindowsCore\targetver.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Src\Engine\GameApp.cpp" />
+    <ClCompile Include="Src\EngineCore\GameApp.cpp" />
+    <ClCompile Include="Src\Platform\DirectX12\DX12Device.cpp" />
     <ClCompile Include="Src\WindowsCore\main.cpp" />
   </ItemGroup>
   <ItemGroup>
