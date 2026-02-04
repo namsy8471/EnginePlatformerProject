@@ -1,6 +1,6 @@
 ﻿// main.cpp : 애플리케이션에 대한 진입점을 정의합니다.
 
-#include "Engine/GameApp.h"
+#include "EngineCore/GameApp.h"
 
 // 나중에는 별도 파일(Engine.h/cpp)로 분리될 테스트용 클래스
 class TestEngine : public GameApp
@@ -39,6 +39,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 {
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
+	UNREFERENCED_PARAMETER(nCmdShow);
 
     // 디버그 모드에서 메모리 누수 감지 켜기
 #if defined(DEBUG) | defined(_DEBUG)

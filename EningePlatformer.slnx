@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="DX12Eninge.vcxproj" />
+  <Project Path="DX12Eninge.vcxproj" Id="089d1b26-c0f5-44db-b296-7f20a558ec59" />
 </Solution>

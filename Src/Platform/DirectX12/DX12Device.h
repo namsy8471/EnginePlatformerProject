@@ -54,7 +54,7 @@ private:
 	int m_Height;
 
 	// DX12 Core
-	ComPtr<IDXGIFactory1> m_dxgiFactory;
+	ComPtr<IDXGIFactory4> m_dxgiFactory;
 	ComPtr<ID3D12Device> m_d3dDevice;
 	ComPtr<ID3D12CommandQueue> m_commandQueue;
 	ComPtr<IDXGISwapChain3> m_swapChain;
@@ -72,5 +72,5 @@ private:
 	ComPtr<ID3D12Fence> m_fence;
 	HANDLE m_fenceEvent = nullptr;
 	uint64_t m_fenceValues[FrameCount] = {};
-	uint64_t m_currentFenceValue = 0;
+	uint64_t m_frameIndex = 0;
 };
