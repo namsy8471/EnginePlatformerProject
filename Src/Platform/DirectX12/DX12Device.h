@@ -11,6 +11,10 @@
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
 
+#include "DX12Resource.h"
+#include <vector>
+#include <memory>
+
 using Microsoft::WRL::ComPtr;
 
 class DX12Device : public IGraphicsDevice
@@ -42,6 +46,8 @@ public:
 
 private:
 	void GetHardwareAdapter(IDXGIFactory1* pFactory, IDXGIAdapter1** ppAdapter);
+	DX12Resource* GetBackBufferResource() const { return m_renderTargets[m_frameIndex].get(); }
+
 	void CreateRtvAndDsvHeaps();
 	void CreateRenderTargetViews();
 	void CreateDepthStencilView();
@@ -65,7 +71,7 @@ private:
 	uint32_t m_rtvDescriptorSize = 0;
 
 	// Render Targets
-	ComPtr<ID3D12Resource> m_renderTargets[FrameCount];
+	std::unique_ptr<DX12Resource> m_renderTargets[FrameCount];
 	ComPtr<ID3D12Resource> m_depthStencil;
 
 	// Synchronization

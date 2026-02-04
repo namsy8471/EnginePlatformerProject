@@ -224,8 +224,17 @@ void DX12Device::CreateRenderTargetViews()
 
 	for (UINT i = 0; i < FrameCount; i++)
 	{
-		ThrowIfFailed(m_swapChain->GetBuffer(i, IID_PPV_ARGS(&m_renderTargets[i])));
-		m_d3dDevice->CreateRenderTargetView(m_renderTargets[i].Get(), nullptr, rtvHandle);
+		ComPtr<ID3D12Resource> backBuffer;
+		ThrowIfFailed(m_swapChain->GetBuffer(i, IID_PPV_ARGS(&backBuffer)));
+		
+		m_renderTargets[i] = std::make_unique<DX12Resource>(backBuffer);
+
+		m_d3dDevice->CreateRenderTargetView(
+			m_renderTargets[i]->GetD3D12Resource(),
+			nullptr, 
+			rtvHandle
+		);
+		
 		rtvHandle.Offset(1, m_rtvDescriptorSize);
 	}
 }

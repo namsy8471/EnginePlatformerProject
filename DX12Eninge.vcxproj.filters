@@ -54,6 +54,9 @@
     <ClInclude Include="Src\Utils\Utils.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
+    <ClInclude Include="Src\Platform\DirectX12\DX12Resource.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Src\WindowsCore\main.cpp">

@@ -134,6 +134,7 @@
     <ClInclude Include="Src\EngineCore\GameApp.h" />
     <ClInclude Include="Src\Platform\DirectX12\d3dx12.h" />
     <ClInclude Include="Src\Platform\DirectX12\DX12Device.h" />
+    <ClInclude Include="Src\Platform\DirectX12\DX12Resource.h" />
     <ClInclude Include="Src\RHI\GraphicsCommon.h" />
     <ClInclude Include="Src\RHI\IBuffer.h" />
     <ClInclude Include="Src\RHI\ICommandList.h" />
