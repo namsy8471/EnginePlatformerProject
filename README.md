@@ -1,1 +1,3 @@
-# DX12Eninge
+# Engine Platformer Proeject
+
+Making RHI(Render Hardware Interface)!
