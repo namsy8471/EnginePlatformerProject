@@ -4,7 +4,7 @@
 
 enum class GraphicsAPI : std::uint8_t
 {
-	Direct3D12,
+	DirectX12,
 	Vulkan
 };
 

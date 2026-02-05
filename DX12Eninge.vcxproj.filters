@@ -71,6 +71,9 @@
     <ClCompile Include="Src\Platform\DirectX12\DX12CommandList.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
+    <ClCompile Include="Src\RHI\IGraphicsDevice.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Src\WindowsCore\DX12Eninge.rc">

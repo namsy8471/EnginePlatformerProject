@@ -35,6 +35,12 @@ public:
 	ICommandList* CreateCommandList() override;
 	IBuffer* CreateBuffer(const BufferDesc& desc) override;
 
+	// 명령 리스트 제출
+	void ExecuteCommandList(ICommandList* cmdList) override;
+	
+	// 현재 백버퍼 리소스 접근
+	IGpuResource* GetBackBufferResource() override;
+
 	// 뷰 접근
 	void* GetCurrentBackBufferRTV() override;
 	void* GetDepthStencilView() override;

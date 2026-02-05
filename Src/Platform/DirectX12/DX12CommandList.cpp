@@ -36,7 +36,7 @@ DX12CommandList::~DX12CommandList()
 
 void* DX12CommandList::GetNativeResource() const
 {
-	return nullptr;
+	return m_commandList.Get();
 }
 
 void DX12CommandList::Reset()

@@ -3,6 +3,7 @@
 
 class ICommandList;
 class IBuffer;
+class IGpuResource;
 
 struct BufferDesc
 {
@@ -37,6 +38,12 @@ public:
 	// 현재 백버퍼의 RTV 핸들을 얻어오는 함수 (추상화 레벨 조절 필요)
 	virtual void* GetCurrentBackBufferRTV() = 0;
 	virtual void* GetDepthStencilView() = 0;
+
+	// 명령 리스트 제출 함수
+	virtual void ExecuteCommandList(ICommandList* cmdList) = 0;
+
+	// 현재 백버퍼 리소스를 가져오는 함수 (Barrier용)
+	virtual IGpuResource* GetBackBufferResource() = 0;
 
 	// 팩토리 메서드
 	// windowHandle은 플랫폼별 윈도우 핸들 (예: HWND)

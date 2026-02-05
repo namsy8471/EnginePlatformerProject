@@ -32,21 +32,29 @@ void DX12Device::Shutdown()
 
 bool DX12Device::Init()
 {
+	UINT dxgiFactoryFlags = 0;
+
 	// 디버그 레이어 활성화
 #if defined(_DEBUG)
 	ComPtr<ID3D12Debug> debugController;
 	if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
     {
         debugController->EnableDebugLayer();
+		dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
     }
 #endif
 
 	// DXGI 팩토리 생성
-	ThrowIfFailed(CreateDXGIFactory2(DXGI_CREATE_FACTORY_DEBUG, IID_PPV_ARGS(&m_dxgiFactory)));
+	ThrowIfFailed(CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&m_dxgiFactory)));
 
 	// 하드웨어 어댑터 선택
 	ComPtr<IDXGIAdapter1> hardwareAdapter;
 	GetHardwareAdapter(m_dxgiFactory.Get(), &hardwareAdapter);
+
+	if (!hardwareAdapter)
+	{
+		throw std::runtime_error("Failed to find a D3D12 compatible GPU adapter.");
+	}
 
     ThrowIfFailed(D3D12CreateDevice(
         hardwareAdapter.Get(),
@@ -154,6 +162,26 @@ IBuffer* DX12Device::CreateBuffer(const BufferDesc& desc)
     return nullptr;
 }
 
+void DX12Device::ExecuteCommandList(ICommandList* cmdList)
+{
+	// 추상 인터페이스를 DX12 구현체로 캐스팅
+	// CommandList가 하나뿐이라 배열로 만들지 않고 바로 주소로 넘김
+
+	auto native = static_cast<ID3D12CommandList*>(cmdList->GetNativeResource());
+	if(!native){
+		throw std::runtime_error("Invalid command list native resource.");
+	}
+		
+	ID3D12CommandList* ppCommandLists[] = { native };
+
+	m_commandQueue->ExecuteCommandLists(1, ppCommandLists);
+}
+
+IGpuResource* DX12Device::GetBackBufferResource()
+{
+	return m_renderTargets[m_frameIndex].get();
+}
+
 void DX12Device::Present()
 {
 	ThrowIfFailed(m_swapChain->Present(1, 0));
@@ -174,30 +202,61 @@ void* DX12Device::GetDepthStencilView()
 void DX12Device::GetHardwareAdapter(IDXGIFactory1* pFactory, IDXGIAdapter1** ppAdapter)
 {
 	*ppAdapter = nullptr;
-	ComPtr<IDXGIAdapter1> adapter;
-	for (UINT adapterIndex = 0; DXGI_ERROR_NOT_FOUND != pFactory->EnumAdapters1(adapterIndex, &adapter); ++adapterIndex)
+
+	ComPtr<IDXGIFactory6> factory6;
+	if (SUCCEEDED(pFactory->QueryInterface(IID_PPV_ARGS(&factory6))))
 	{
-		DXGI_ADAPTER_DESC1 desc;
-		adapter->GetDesc1(&desc);
-
-		if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
+		// IDXGIFactory6 사용 가능 시 고성능 GPU 우선 선택
+		ComPtr<IDXGIAdapter1> adapter;
+		for (UINT adapterIndex = 0;
+			SUCCEEDED(factory6->EnumAdapterByGpuPreference(
+				adapterIndex,
+				DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+				IID_PPV_ARGS(adapter.ReleaseAndGetAddressOf())));
+			++adapterIndex)
 		{
-			// 소프트웨어 어댑터는 건너뜀
-			continue;
-		}
+			DXGI_ADAPTER_DESC1 desc;
+			adapter->GetDesc1(&desc);
 
-		// D3D12 디바이스 생성 가능 여부 확인
-		if (SUCCEEDED(D3D12CreateDevice(
-			adapter.Get(),
-			D3D_FEATURE_LEVEL_11_0,
-			_uuidof(ID3D12Device),
-			nullptr)))
-		{
-			break; // 적합한 어댑터 발견
+			if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
+				continue;
+
+			if (SUCCEEDED(D3D12CreateDevice(
+				adapter.Get(),
+				D3D_FEATURE_LEVEL_11_0,
+				_uuidof(ID3D12Device),
+				nullptr)))
+			{
+				*ppAdapter = adapter.Detach();
+				return;
+			}
 		}
 	}
+	else {
+		ComPtr<IDXGIAdapter1> adapter;
+		for (UINT adapterIndex = 0; DXGI_ERROR_NOT_FOUND != pFactory->EnumAdapters1(adapterIndex, &adapter); ++adapterIndex)
+		{
+			DXGI_ADAPTER_DESC1 desc;
+			adapter->GetDesc1(&desc);
 
-	*ppAdapter = adapter.Detach();
+			if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
+			{
+				// 소프트웨어 어댑터는 건너뜀
+				continue;
+			}
+
+			// D3D12 디바이스 생성 가능 여부 확인
+			if (SUCCEEDED(D3D12CreateDevice(
+				adapter.Get(),
+				D3D_FEATURE_LEVEL_11_0,
+				_uuidof(ID3D12Device),
+				nullptr)))
+			{
+				*ppAdapter = adapter.Detach();
+				return; // 적합한 어댑터 발견
+			}
+		}
+	}
 }
 
 void DX12Device::CreateRtvAndDsvHeaps()
