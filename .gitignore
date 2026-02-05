@@ -37,10 +37,31 @@
 *.out
 *.app
 
-# debug information files
-*.dwo
-/DX12Eninge/x64/Debug
-/.vs/DX12Eninge.slnx
-/.vs/DX12Eninge/CopilotIndices/18.0.988.22099
-/.vs/EningePlatformer.slnx/v18
-/.vs/EningePlatformer/CopilotIndices/18.0.988.22099
+# [Build Artifacts] - 빌드 결과물 및 중간 생성 파일
+Debug/
+Release/
+x64/
+x86/
+build/
+bin/
+obj/
+
+# [Visual Studio] - IDE가 생성하는 개인 설정 및 데이터베이스
+.vs/
+*.user
+*.suo
+*.sln.docstates
+
+# [C++ Intermediate Files] - 컴파일 과정에서 생기는 파일
+*.obj
+*.pch
+*.tlog
+*.lastbuildstate
+*.idb
+*.pdb
+*.ilk
+*.exp
+*.res
+
+# [External / Library] - 외부 패키지 매니저 결과물
+vcpkg_installed/
