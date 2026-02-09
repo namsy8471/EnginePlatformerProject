@@ -50,8 +50,12 @@ private:
 	// 디바이스 참조 (Alloc 및 기타 작업에 필요)
 	DX12Device* m_device;
 
+	// 커맨드 리스트
 	ComPtr<ID3D12GraphicsCommandList> m_commandList;
-	ComPtr<ID3D12CommandAllocator> m_commandAllocator;
+
+	// 커맨드 할당자
+	ComPtr<ID3D12CommandAllocator> m_commandAllocator[2];
+	UINT m_currentCommandListIndex = 0;
 
 };
 

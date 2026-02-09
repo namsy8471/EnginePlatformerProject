@@ -11,20 +11,21 @@ DX12CommandList::DX12CommandList(DX12Device* device) : m_device(device)
 
 	// 커맨드 할당자 생성
 	// 매 프레임 리셋해야 하므로 가장 중요함
-	ThrowIfFailed(d3dDevice->CreateCommandAllocator(
-		D3D12_COMMAND_LIST_TYPE_DIRECT,
-		IID_PPV_ARGS(&m_commandAllocator)
-	));
+	for (UINT i = 0; i < 2; ++i) {
+		ThrowIfFailed(d3dDevice->CreateCommandAllocator(
+			D3D12_COMMAND_LIST_TYPE_DIRECT,
+			IID_PPV_ARGS(&m_commandAllocator[i])
+		));
 
-	// 커맨드 리스트 생성
-	ThrowIfFailed(d3dDevice->CreateCommandList(
-		0,
-		D3D12_COMMAND_LIST_TYPE_DIRECT,
-		m_commandAllocator.Get(),
-		nullptr,
-		IID_PPV_ARGS(&m_commandList)
-	));
-
+		// 커맨드 리스트 생성
+		ThrowIfFailed(d3dDevice->CreateCommandList(
+			0,
+			D3D12_COMMAND_LIST_TYPE_DIRECT,
+			m_commandAllocator[i].Get(),
+			nullptr,
+			IID_PPV_ARGS(&m_commandList)
+		));
+	}
 	// 커맨드 리스트는 생성 직후에 열려 있으므로 닫아줌
 	ThrowIfFailed(m_commandList->Close());
 }
@@ -41,9 +42,15 @@ void* DX12CommandList::GetNativeResource() const
 
 void DX12CommandList::Reset()
 {
+	// 현재 커맨드 리스트 인덱스 토글
+	m_currentCommandListIndex = (m_currentCommandListIndex + 1) % 2;
+
+	// 현재 커맨드 할당자 가져오기
+	auto currentAllocator = m_commandAllocator[m_currentCommandListIndex];
+	
 	// 커맨드 할당자 및 리스트 리셋
-	ThrowIfFailed(m_commandAllocator->Reset());
-	ThrowIfFailed(m_commandList->Reset(m_commandAllocator.Get(), nullptr));
+	ThrowIfFailed(currentAllocator->Reset());
+	ThrowIfFailed(m_commandList->Reset(currentAllocator.Get(), nullptr));
 }
 
 void DX12CommandList::Close()

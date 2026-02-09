@@ -36,6 +36,7 @@ bool DX12Device::Init()
 
 	// 디버그 레이어 활성화
 #if defined(_DEBUG)
+	
 	ComPtr<ID3D12Debug> debugController;
 	if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
     {
@@ -81,9 +82,6 @@ bool DX12Device::Init()
 	swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD; // Win10/11 표준
 	swapChainDesc.SampleDesc.Count = 1;
 
-	// 윈도우와의 연관 설정
-	ThrowIfFailed(m_dxgiFactory->MakeWindowAssociation(static_cast<HWND>(m_hWnd), DXGI_MWA_NO_ALT_ENTER));
-
 	// 스왑 체인 생성
 	ComPtr<IDXGISwapChain1> swapChain1;
 	ThrowIfFailed(m_dxgiFactory->CreateSwapChainForHwnd(
@@ -98,6 +96,9 @@ bool DX12Device::Init()
 	// IDXGISwapChain3 인터페이스로 변환
 	ThrowIfFailed(swapChain1.As(&m_swapChain));
 	m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
+
+	// 윈도우와의 연관 설정
+	ThrowIfFailed(m_dxgiFactory->MakeWindowAssociation(static_cast<HWND>(m_hWnd), DXGI_MWA_NO_ALT_ENTER));
 
 	// RTV 및 DSV 힙 생성
 	CreateRtvAndDsvHeaps();
@@ -123,11 +124,22 @@ bool DX12Device::Init()
 
 void DX12Device::WaitForGPU()
 {
-	// 현재 프레임의 펜스 값으로 시그널 및 대기
-	ThrowIfFailed(m_commandQueue->Signal(m_fence.Get(), m_fenceValues[m_frameIndex]));
-	ThrowIfFailed(m_fence->SetEventOnCompletion(m_fenceValues[m_frameIndex], m_fenceEvent));
-	WaitForSingleObjectEx(m_fenceEvent, INFINITE, FALSE);
-	m_fenceValues[m_frameIndex]++;
+	// 현재 프레임의 펜스 값 가져오기
+	UINT64 fenceValueToSignal = m_fenceValues[m_frameIndex] + 1;
+
+	// 2. GPU한테 명령: "일 다 하면 이 번호표(fenceValueToSignal) 찍어!"
+	ThrowIfFailed(m_commandQueue->Signal(m_fence.Get(), fenceValueToSignal));
+
+	// 3. CPU는 그 번호표가 찍힐 때까지 무한 대기
+	if (m_fence->GetCompletedValue() < fenceValueToSignal)
+	{
+		ThrowIfFailed(m_fence->SetEventOnCompletion(fenceValueToSignal, m_fenceEvent));
+		WaitForSingleObject(m_fenceEvent, INFINITE);
+	}
+
+	// 4. 다음 프레임을 위해 펜스 값 증가
+	m_fenceValues[m_frameIndex] = fenceValueToSignal;
+	m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
 }
 
 void DX12Device::MoveToNextFrame()

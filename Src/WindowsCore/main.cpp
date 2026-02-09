@@ -7,6 +7,9 @@
 #include "RHI/IBuffer.h"        // 나중에 쓸 테니 미리 넣어둬도 됨
 #include "RHI/GraphicsCommon.h" // GraphicsAPI Enum 때문에 필요
 
+extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 618; } // 614 이상 (SDK 버전에 따라 다름, 보통 600번대)
+extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = reinterpret_cast < const char*>(u8".\\D3D12\\"); }
+
 // 나중에는 별도 파일(Engine.h/cpp)로 분리될 테스트용 클래스
 class TestEngine : public GameApp
 {
@@ -88,8 +91,10 @@ public:
 		// 화면 출력
 		m_Device->Present();
 
-		// 다음 프레임으로 이동
-		m_Device->MoveToNextFrame();
+		m_Device->WaitForGPU();
+
+		//다음 프레임으로 이동
+		//m_Device->MoveToNextFrame();
     }
 };
 
