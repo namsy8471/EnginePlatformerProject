@@ -57,6 +57,24 @@
     <ClInclude Include="Src\Platform\DirectX12\DX12Resource.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
+    <ClInclude Include="Src\Platform\Vulkan\VulkanDevice.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Platform\Vulkan\VulkanCommon.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Platform\Vulkan\VulkanResource.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Platform\Vulkan\VulkanCommandList.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Platform\Vulkan\VulkanBuffer.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Platform\DirectX12\DX12Buffer.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Src\WindowsCore\main.cpp">
@@ -74,6 +92,18 @@
     <ClCompile Include="Src\RHI\IGraphicsDevice.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
+    <ClCompile Include="Src\Platform\Vulkan\VulkanCommandList.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Platform\Vulkan\VulkanDevice.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Platform\Vulkan\VulkanBuffer.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Platform\DirectX12\DX12Buffer.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Src\WindowsCore\DX12Eninge.rc">
@@ -89,6 +119,9 @@
     </Image>
   </ItemGroup>
   <ItemGroup>
-    <None Include="packages.config" />
+    <None Include="Directory.Build.props" />
+    <None Include=".github\copilot-instructions.md" />
+    <None Include="Directory.Build.targets" />
+    <None Include="vcpkg.json" />
   </ItemGroup>
 </Project>

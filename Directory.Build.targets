@@ -1,0 +1,6 @@
+<Project>
+  <!--
+    현재 C++ 소스 파일들은 DX12Eninge.vcxproj에 직접 등록되어 있으므로
+    여기서 ClCompile 항목을 추가하면 중복 포함과 필터 충돌이 발생합니다.
+  -->
+</Project>

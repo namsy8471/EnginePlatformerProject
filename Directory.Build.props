@@ -1,0 +1,29 @@
+<Project>
+  <!--
+    vcpkg로 설치된 라이브러리를 모든 C++ 프로젝트에서 공통으로 참조하기 위한 설정입니다.
+    VCPKG_ROOT 환경 변수를 기준으로 include/lib 경로를 자동 연결합니다.
+  -->
+  <PropertyGroup>
+    <VcpkgRoot>$([System.Environment]::GetEnvironmentVariable('VCPKG_ROOT'))</VcpkgRoot>
+    <VcpkgTriplet Condition="'$(Platform)' == 'x64'">x64-windows</VcpkgTriplet>
+    <VcpkgTriplet Condition="'$(Platform)' == 'Win32'">x86-windows</VcpkgTriplet>
+    <VcpkgInstalledDir>$(VcpkgRoot)\installed\$(VcpkgTriplet)</VcpkgInstalledDir>
+    <LocalVcpkgInstalledDir>$(MSBuildThisFileDirectory)vcpkg_installed\$(VcpkgTriplet)</LocalVcpkgInstalledDir>
+    <ResolvedVcpkgInstalledDir Condition="Exists('$(LocalVcpkgInstalledDir)')">$(LocalVcpkgInstalledDir)</ResolvedVcpkgInstalledDir>
+    <ResolvedVcpkgInstalledDir Condition="'$(ResolvedVcpkgInstalledDir)' == '' and Exists('$(VcpkgInstalledDir)')">$(VcpkgInstalledDir)</ResolvedVcpkgInstalledDir>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup Condition="'$(ResolvedVcpkgInstalledDir)' != ''">
+    <ClCompile>
+      <!-- 로컬 manifest 모드(vcpkg_installed)와 전역 classic 모드(VCPKG_ROOT\installed) 중 실제로 존재하는 경로를 사용합니다. -->
+      <AdditionalIncludeDirectories>$(ResolvedVcpkgInstalledDir)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <!-- 실제로 선택된 vcpkg 설치 경로의 라이브러리만 연결합니다. -->
+      <AdditionalLibraryDirectories Condition="'$(Configuration)' == 'Debug'">$(ResolvedVcpkgInstalledDir)\debug\lib;$(ResolvedVcpkgInstalledDir)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories Condition="'$(Configuration)' != 'Debug'">$(ResolvedVcpkgInstalledDir)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies Condition="'$(Configuration)' == 'Debug'">glslangd.lib;SPIRVd.lib;glslang-default-resource-limitsd.lib;MachineIndependentd.lib;GenericCodeGend.lib;OSDependentd.lib;vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies Condition="'$(Configuration)' != 'Debug'">glslang.lib;SPIRV.lib;glslang-default-resource-limits.lib;MachineIndependent.lib;GenericCodeGen.lib;OSDependent.lib;vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+</Project>

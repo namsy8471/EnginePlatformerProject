@@ -1,4 +1,4 @@
-#pragma once
+ï»¿#pragma once
 
 #include "RHI/ICommandList.h"
 #include <d3d12.h>
@@ -14,46 +14,46 @@ public:
 	DX12CommandList(DX12Device* device);
 	virtual ~DX12CommandList();
 
-	// ICommandListÀ»(¸¦) ÅëÇØ »ó¼ÓµÊ
+	// ICommandList êµ¬í˜„
 	void* GetNativeResource() const override;
 
-	// ±âº» Á¦¾î
+	// ê¸°ë³¸ ì œì–´
 	void Reset() override;
 	void Close() override;
 
-	// »óÅÂ ¼³Á¤
+	// ìƒíƒœ ì„¤ì •
 	void SetViewport(float x, float y, float width, float height) override;
 	void SetScissorRect(long left, long top, long right, long bottom) override;
 
-	// ·»´õÅ¸°Ù ¼³Á¤
+	// ë Œë”íƒ€ê²Ÿ ì„¤ì •
 	void SetRenderTargets(void* rtvHandle, void* dsvHandle) override;
 	
-	// È­¸é Áö¿ì±â
+	// í™”ë©´ í´ë¦¬ì–´
 	void ClearRenderTarget(void* rtvHandle, const float color[4]) override;
 	void ClearDepthStencil(void* dsvHandle, float depth, uint8_t stencil) override;
 	
-	// ¸®¼Ò½º ¹ÙÀÎµù
+	// ë¦¬ì†ŒìŠ¤ ë°”ì¸ë”©
 	void SetVertexBuffer(IBuffer* buffer) override;
 	void SetIndexBuffer(IBuffer* buffer) override;
 	
-	// ±×¸®±â ¸í·É
+	// ê·¸ë¦¬ê¸° í˜¸ì¶œ
 	void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
 	void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t startIndex, uint32_t baseVertex, uint32_t startInstance) override;
 	
-	// µ¿±âÈ­
+	// ë™ê¸°í™”
 	void ResourceBarrier(IGpuResource* resource, ResourceState before, ResourceState after) override;
 
 private:
 	D3D12_RESOURCE_STATES TranslateResourceState(ResourceState state);
 
 private:
-	// µğ¹ÙÀÌ½º ÂüÁ¶ (Alloc ¹× ±âÅ¸ ÀÛ¾÷¿¡ ÇÊ¿ä)
+	// ï¿½ï¿½ï¿½ï¿½Ì½ï¿½ ï¿½ï¿½ï¿½ï¿½ (Alloc ï¿½ï¿½ ï¿½ï¿½Å¸ ï¿½Û¾ï¿½ï¿½ï¿½ ï¿½Ê¿ï¿½)
 	DX12Device* m_device;
 
-	// Ä¿¸Çµå ¸®½ºÆ®
+	// Ä¿ï¿½Çµï¿½ ï¿½ï¿½ï¿½ï¿½Æ®
 	ComPtr<ID3D12GraphicsCommandList> m_commandList;
 
-	// Ä¿¸Çµå ÇÒ´çÀÚ
+	// Ä¿ï¿½Çµï¿½ ï¿½Ò´ï¿½ï¿½ï¿½
 	ComPtr<ID3D12CommandAllocator> m_commandAllocator[2];
 	UINT m_currentCommandListIndex = 0;
 

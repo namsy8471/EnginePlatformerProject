@@ -1,12 +1,12 @@
 #pragma once
 #include "RHI/IGraphicsDevice.h"
 
-// DirectX 12 Çì´õ
+// DirectX 12 ê´€ë ¨
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <wrl.h>
 
-// ¶óÀÌºê·¯¸® ¸µÅ©
+// ë¼ì´ë¸ŒëŸ¬ë¦¬ ë§í¬
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
@@ -23,25 +23,26 @@ public:
 	DX12Device(void* windowHandle, int width, int height);
 	virtual ~DX12Device();
 	
-	// IGraphicsDeviceÀ»(¸¦) ÅëÇØ »ó¼ÓµÊ
+	// IGraphicsDevice êµ¬í˜„
 	bool Init() override;
 	void Shutdown() override;
 
 	void WaitForGPU() override;
 	void MoveToNextFrame() override;
 	void Present() override;
+	void Resize(int width, int height) override;
 
-	// »ı¼º
+	// ìƒì„±
 	ICommandList* CreateCommandList() override;
 	IBuffer* CreateBuffer(const BufferDesc& desc) override;
 
-	// ¸í·É ¸®½ºÆ® Á¦Ãâ
+	// ëª…ë ¹ ë¦¬ìŠ¤íŠ¸ ì‹¤í–‰
 	void ExecuteCommandList(ICommandList* cmdList) override;
 	
-	// ÇöÀç ¹é¹öÆÛ ¸®¼Ò½º Á¢±Ù
+	// í˜„ì¬ ë°±ë²„í¼ ë¦¬ì†ŒìŠ¤ ë°˜í™˜
 	IGpuResource* GetBackBufferResource() override;
 
-	// ºä Á¢±Ù
+	// ë·° ë°˜í™˜
 	void* GetCurrentBackBufferRTV() override;
 	void* GetDepthStencilView() override;
 
@@ -59,7 +60,7 @@ private:
 	void CreateDepthStencilView();
 
 private:
-	static const uint8_t FrameCount = 2; // ÀÌÁß ¹öÆÛ¸µ
+	static const uint8_t FrameCount = 2; // ë”ë¸” ë²„í¼ë§
 
 	void* m_hWnd;
 	int m_Width;

@@ -1,5 +1,6 @@
 #include "IGraphicsDevice.h"
 #include "Platform/DirectX12/DX12Device.h"
+#include "Platform/Vulkan/VulkanDevice.h"
 
 IGraphicsDevice* IGraphicsDevice::Create(GraphicsAPI api, void* windowHandle, int width, int height)
 {
@@ -9,7 +10,7 @@ IGraphicsDevice* IGraphicsDevice::Create(GraphicsAPI api, void* windowHandle, in
 		return new DX12Device(windowHandle, width, height);
 	
 	case GraphicsAPI::Vulkan:
-		return nullptr; // 아직 구현되지 않음
+		return new VulkanDevice(windowHandle, width, height);
 
 	}
 
