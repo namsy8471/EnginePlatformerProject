@@ -54,12 +54,13 @@ void VulkanCommandList::Reset()
 
 void VulkanCommandList::SetViewport(float x, float y, float width, float height)
 {
-	// Vulkan은 viewport를 명령 버퍼에 기록해 현재 프레임 렌더 상태로 적용합니다.
+	// Vulkan NDC는 Y축이 아래로 향하므로 DirectXMath 프로젝션과 호환하려면
+	// viewport를 Y 반전합니다 (negative height, Vulkan 1.1+ / VK_KHR_maintenance1).
 	VkViewport viewport = {};
 	viewport.x = x;
-	viewport.y = y;
+	viewport.y = height;
 	viewport.width = width;
-	viewport.height = height;
+	viewport.height = -height;
 	viewport.minDepth = 0.0f;
 	viewport.maxDepth = 1.0f;
 	vkCmdSetViewport(m_commandBuffer, 0, 1, &viewport);

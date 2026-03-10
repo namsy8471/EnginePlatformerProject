@@ -116,7 +116,7 @@ void Camera::Update(float deltaTime, HWND hwnd)
 	{
 		input.LockCursor(hwnd, true);
 		Yaw(input.GetMouseDeltaX() * m_MouseSensitivity);
-		Pitch(-input.GetMouseDeltaY() * m_MouseSensitivity);
+		Pitch(input.GetMouseDeltaY() * m_MouseSensitivity);
 	}
 	else
 	{

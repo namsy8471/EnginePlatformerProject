@@ -1671,7 +1671,17 @@ void Engine::DestroyVulkanTriangleResources()
 	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Device);
 	if (!vulkanDevice)
 	{
+		const VkImage savedDiffuseImage = m_VulkanTriangle.DiffuseImage;
+		const VkDeviceMemory savedDiffuseImageMemory = m_VulkanTriangle.DiffuseImageMemory;
+		const VkImageView savedDiffuseImageView = m_VulkanTriangle.DiffuseImageView;
+		const VkSampler savedDiffuseSampler = m_VulkanTriangle.DiffuseSampler;
+
 		m_VulkanTriangle = {};
+
+		m_VulkanTriangle.DiffuseImage = savedDiffuseImage;
+		m_VulkanTriangle.DiffuseImageMemory = savedDiffuseImageMemory;
+		m_VulkanTriangle.DiffuseImageView = savedDiffuseImageView;
+		m_VulkanTriangle.DiffuseSampler = savedDiffuseSampler;
 		return;
 	}
 
@@ -1705,7 +1715,20 @@ void Engine::DestroyVulkanTriangleResources()
 		vkDestroyShaderModule(vulkanDevice->GetVkDevice(), m_VulkanTriangle.PixelShader, nullptr);
 	}
 
+	// 파이프라인 관련 핸들만 초기화합니다.
+	// 텍스처 핸들(DiffuseImage/Memory/View/Sampler)은 DestroyTextureResources()가 담당하므로
+	// 여기서 보존해야 리사이즈 시 descriptor set 재생성이 정상 동작합니다.
+	const VkImage savedDiffuseImage = m_VulkanTriangle.DiffuseImage;
+	const VkDeviceMemory savedDiffuseImageMemory = m_VulkanTriangle.DiffuseImageMemory;
+	const VkImageView savedDiffuseImageView = m_VulkanTriangle.DiffuseImageView;
+	const VkSampler savedDiffuseSampler = m_VulkanTriangle.DiffuseSampler;
+
 	m_VulkanTriangle = {};
+
+	m_VulkanTriangle.DiffuseImage = savedDiffuseImage;
+	m_VulkanTriangle.DiffuseImageMemory = savedDiffuseImageMemory;
+	m_VulkanTriangle.DiffuseImageView = savedDiffuseImageView;
+	m_VulkanTriangle.DiffuseSampler = savedDiffuseSampler;
 }
 
 void Engine::DrawVulkanTriangle()
@@ -1723,7 +1746,7 @@ void Engine::DrawVulkanTriangle()
 
 	// Vulkan은 현재 열린 render pass 안에서 그래픽 파이프라인을 바인딩하고 draw를 기록합니다.
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_VulkanTriangle.Pipeline);
-	// Vulkan 경로는 descriptor set으로 카메라 uniform buffer를 바인딩해 정점 셰이더에서 ViewProjection 행렬을 읽습니다.
+	// Vulkan 경로는 descriptor set으로 카메라 uniform buffer와 diffuse texture sampler를 바인딩합니다.
 	vkCmdBindDescriptorSets(
 		commandBuffer,
 		VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1733,7 +1756,8 @@ void Engine::DrawVulkanTriangle()
 		&m_VulkanTriangle.DescriptorSet,
 		0,
 		nullptr);
-	m_CmdList->DrawInstanced(3, 1, 0, 0);
+	// Vulkan 경로도 DX12와 동일하게 인덱스 버퍼를 사용해 전체 메시를 그립니다.
+	m_CmdList->DrawIndexedInstanced(static_cast<uint32_t>(m_StaticMeshAsset ? m_StaticMeshAsset->Indices.size() : 0), 1, 0, 0, 0);
 }
 
 bool Engine::CreateTriangleVertexBuffer()
