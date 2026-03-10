@@ -11,6 +11,12 @@
     <LocalVcpkgInstalledDir>$(MSBuildThisFileDirectory)vcpkg_installed\$(VcpkgTriplet)</LocalVcpkgInstalledDir>
     <ResolvedVcpkgInstalledDir Condition="Exists('$(LocalVcpkgInstalledDir)')">$(LocalVcpkgInstalledDir)</ResolvedVcpkgInstalledDir>
     <ResolvedVcpkgInstalledDir Condition="'$(ResolvedVcpkgInstalledDir)' == '' and Exists('$(VcpkgInstalledDir)')">$(VcpkgInstalledDir)</ResolvedVcpkgInstalledDir>
+    <AssimpDebugLib Condition="Exists('$(ResolvedVcpkgInstalledDir)\debug\lib\assimp-vc145-mtd.lib')">assimp-vc145-mtd.lib</AssimpDebugLib>
+    <AssimpDebugLib Condition="Exists('$(ResolvedVcpkgInstalledDir)\debug\lib\assimp-vc143-mtd.lib')">assimp-vc143-mtd.lib</AssimpDebugLib>
+    <AssimpDebugLib Condition="'$(AssimpDebugLib)' == '' and Exists('$(ResolvedVcpkgInstalledDir)\debug\lib\assimpd.lib')">assimpd.lib</AssimpDebugLib>
+    <AssimpReleaseLib Condition="Exists('$(ResolvedVcpkgInstalledDir)\lib\assimp-vc145-mt.lib')">assimp-vc145-mt.lib</AssimpReleaseLib>
+    <AssimpReleaseLib Condition="Exists('$(ResolvedVcpkgInstalledDir)\lib\assimp-vc143-mt.lib')">assimp-vc143-mt.lib</AssimpReleaseLib>
+    <AssimpReleaseLib Condition="'$(AssimpReleaseLib)' == '' and Exists('$(ResolvedVcpkgInstalledDir)\lib\assimp.lib')">assimp.lib</AssimpReleaseLib>
   </PropertyGroup>
 
   <ItemDefinitionGroup Condition="'$(ResolvedVcpkgInstalledDir)' != ''">
@@ -22,8 +28,8 @@
       <!-- 실제로 선택된 vcpkg 설치 경로의 라이브러리만 연결합니다. -->
       <AdditionalLibraryDirectories Condition="'$(Configuration)' == 'Debug'">$(ResolvedVcpkgInstalledDir)\debug\lib;$(ResolvedVcpkgInstalledDir)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalLibraryDirectories Condition="'$(Configuration)' != 'Debug'">$(ResolvedVcpkgInstalledDir)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies Condition="'$(Configuration)' == 'Debug'">glslangd.lib;SPIRVd.lib;glslang-default-resource-limitsd.lib;MachineIndependentd.lib;GenericCodeGend.lib;OSDependentd.lib;vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalDependencies Condition="'$(Configuration)' != 'Debug'">glslang.lib;SPIRV.lib;glslang-default-resource-limits.lib;MachineIndependent.lib;GenericCodeGen.lib;OSDependent.lib;vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies Condition="'$(Configuration)' == 'Debug'">$(AssimpDebugLib);glslangd.lib;SPIRVd.lib;glslang-default-resource-limitsd.lib;MachineIndependentd.lib;GenericCodeGend.lib;OSDependentd.lib;vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies Condition="'$(Configuration)' != 'Debug'">$(AssimpReleaseLib);glslang.lib;SPIRV.lib;glslang-default-resource-limits.lib;MachineIndependent.lib;GenericCodeGen.lib;OSDependent.lib;vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 </Project>

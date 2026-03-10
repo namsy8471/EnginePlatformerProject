@@ -52,12 +52,12 @@ void* DX12Buffer::GetNativeResource() const
 	return m_resource.Get();
 }
 
-uint64_t DX12Buffer::GetSize() const
+uint64_t DX12Buffer::GetSize() const noexcept
 {
 	return m_size;
 }
 
-uint32_t DX12Buffer::GetStride() const
+uint32_t DX12Buffer::GetStride() const noexcept
 {
 	return m_stride;
 }
@@ -92,5 +92,14 @@ D3D12_VERTEX_BUFFER_VIEW DX12Buffer::GetVertexBufferView() const
 	view.BufferLocation = m_resource->GetGPUVirtualAddress();
 	view.SizeInBytes = static_cast<UINT>(m_size);
 	view.StrideInBytes = m_stride;
+	return view;
+}
+
+D3D12_INDEX_BUFFER_VIEW DX12Buffer::GetIndexBufferView() const
+{
+	D3D12_INDEX_BUFFER_VIEW view = {};
+	view.BufferLocation = m_resource->GetGPUVirtualAddress();
+	view.SizeInBytes = static_cast<UINT>(m_size);
+	view.Format = DXGI_FORMAT_R32_UINT;
 	return view;
 }

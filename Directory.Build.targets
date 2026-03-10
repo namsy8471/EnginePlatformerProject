@@ -3,4 +3,21 @@
     현재 C++ 소스 파일들은 DX12Eninge.vcxproj에 직접 등록되어 있으므로
     여기서 ClCompile 항목을 추가하면 중복 포함과 필터 충돌이 발생합니다.
   -->
+
+  <Target Name="CopyVcpkgRuntimeBinaries" AfterTargets="Build" Condition="'$(ResolvedVcpkgInstalledDir)' != ''">
+    <PropertyGroup>
+      <VcpkgRuntimeBinDir Condition="'$(Configuration)' == 'Debug' and Exists('$(ResolvedVcpkgInstalledDir)\debug\bin')">$(ResolvedVcpkgInstalledDir)\debug\bin</VcpkgRuntimeBinDir>
+      <VcpkgRuntimeBinDir Condition="'$(VcpkgRuntimeBinDir)' == '' and Exists('$(ResolvedVcpkgInstalledDir)\bin')">$(ResolvedVcpkgInstalledDir)\bin</VcpkgRuntimeBinDir>
+    </PropertyGroup>
+
+    <ItemGroup Condition="'$(VcpkgRuntimeBinDir)' != ''">
+      <!-- Assimp는 poly2tri, pugixml, zlib 등 추가 런타임 DLL을 끌고 올 수 있으므로 bin 폴더의 DLL을 함께 배포합니다. -->
+      <VcpkgRuntimeDlls Include="$(VcpkgRuntimeBinDir)\*.dll" />
+    </ItemGroup>
+
+    <Copy SourceFiles="@(VcpkgRuntimeDlls)"
+          DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true"
+          Condition="'@(VcpkgRuntimeDlls)' != ''" />
+  </Target>
 </Project>

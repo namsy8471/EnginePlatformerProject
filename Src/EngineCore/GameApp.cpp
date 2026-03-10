@@ -1,7 +1,9 @@
 #include "GameApp.h"
+#include "Input/InputSystem.h"
 #include "framework.h"
 #include "resource.h"
 #include <cassert>
+#include <chrono>
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
@@ -112,6 +114,7 @@ bool GameApp::InitMainWindow()
 int GameApp::Run()
 {
 	MSG msg = { 0 };
+	auto previousTick = std::chrono::steady_clock::now();
     while (msg.message != WM_QUIT)
     {
         if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
@@ -123,13 +126,18 @@ int GameApp::Run()
         {
             if (!m_AppPaused)
             {
-				// TODO: Timer.Tick 추가
-                Update(0.0f); // TODO: deltaTime ����
+				const auto currentTick = std::chrono::steady_clock::now();
+				const std::chrono::duration<float> deltaTime = currentTick - previousTick;
+				previousTick = currentTick;
+
+				Update(deltaTime.count());
                 Render();
+				InputSystem::Get().Update();
 
             }
             else
             {
+				previousTick = std::chrono::steady_clock::now();
                 Sleep(100);
             }
         }
@@ -140,6 +148,8 @@ int GameApp::Run()
 
 LRESULT GameApp::MsgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+	InputSystem::Get().ProcessMessage(msg, wParam, lParam);
+
     switch (msg)
     {
     case WM_ACTIVATE:

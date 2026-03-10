@@ -120,7 +120,14 @@ void VulkanCommandList::SetVertexBuffer(IBuffer* buffer)
 
 void VulkanCommandList::SetIndexBuffer(IBuffer* buffer)
 {
-	// vkCmdBindIndexBuffer는 실제 Vulkan 버퍼 구현 후 연결합니다.
+	auto vkBuffer = dynamic_cast<VulkanBuffer*>(buffer);
+	if (!vkBuffer)
+	{
+		return;
+	}
+
+	// Vulkan은 정적 메시 인덱스를 uint32 형식으로 사용하므로 R32_UINT에 대응하는 VK_INDEX_TYPE_UINT32를 바인딩합니다.
+	vkCmdBindIndexBuffer(m_commandBuffer, vkBuffer->GetVkBuffer(), 0, VK_INDEX_TYPE_UINT32);
 }
 
 void VulkanCommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance)
@@ -130,7 +137,8 @@ void VulkanCommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCou
 
 void VulkanCommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t startIndex, uint32_t baseVertex, uint32_t startInstance)
 {
-	// 파이프라인 상태가 아직 없으므로 실제 DrawIndexed도 연결하지 않습니다.
+	// Vulkan 정적 메시 경로는 인덱스 버퍼를 바인딩한 뒤 indexed draw를 기록합니다.
+	vkCmdDrawIndexed(m_commandBuffer, indexCount, instanceCount, startIndex, static_cast<int32_t>(baseVertex), startInstance);
 }
 
 void VulkanCommandList::ResourceBarrier(IGpuResource* resource, ResourceState before, ResourceState after)

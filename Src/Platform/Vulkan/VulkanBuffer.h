@@ -14,8 +14,8 @@ public:
 	virtual ~VulkanBuffer();
 
 	void* GetNativeResource() const override;
-	uint64_t GetSize() const override;
-	uint32_t GetStride() const override;
+		uint64_t GetSize() const noexcept override;
+		uint32_t GetStride() const noexcept override;
 	void Map(void** ppData) override;
 	void Unmap() override;
 

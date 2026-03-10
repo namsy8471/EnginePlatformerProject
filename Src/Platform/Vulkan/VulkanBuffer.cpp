@@ -77,12 +77,12 @@ void* VulkanBuffer::GetNativeResource() const
 	return nullptr;
 }
 
-uint64_t VulkanBuffer::GetSize() const
+uint64_t VulkanBuffer::GetSize() const noexcept
 {
 	return m_size;
 }
 
-uint32_t VulkanBuffer::GetStride() const
+uint32_t VulkanBuffer::GetStride() const noexcept
 {
 	return m_stride;
 }

@@ -141,7 +141,14 @@ void DX12CommandList::SetVertexBuffer(IBuffer* buffer)
 
 void DX12CommandList::SetIndexBuffer(IBuffer* buffer)
 {
-	//TODO: 구현 필요
+	auto dx12Buffer = dynamic_cast<DX12Buffer*>(buffer);
+	if (!dx12Buffer)
+	{
+		return;
+	}
+
+	const D3D12_INDEX_BUFFER_VIEW indexBufferView = dx12Buffer->GetIndexBufferView();
+	m_commandList->IASetIndexBuffer(&indexBufferView);
 }
 
 void DX12CommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance)

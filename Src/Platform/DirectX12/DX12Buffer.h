@@ -14,12 +14,13 @@ public:
 	virtual ~DX12Buffer();
 
 	void* GetNativeResource() const override;
-	uint64_t GetSize() const override;
-	uint32_t GetStride() const override;
+	uint64_t GetSize() const noexcept override;
+	uint32_t GetStride() const noexcept override;
 	void Map(void** ppData) override;
 	void Unmap() override;
 
 	D3D12_VERTEX_BUFFER_VIEW GetVertexBufferView() const;
+	D3D12_INDEX_BUFFER_VIEW GetIndexBufferView() const;
 
 private:
 	DX12Device* m_device = nullptr;

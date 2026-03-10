@@ -10,7 +10,7 @@ public:
 
 	int Run();
 
-	virtual bool Init();
+	[[nodiscard]] virtual bool Init();
 
 	virtual LRESULT MsgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -19,7 +19,7 @@ protected:
 	virtual void Render() = 0;
 	virtual void OnResize() = 0;
 
-	bool InitMainWindow();
+	[[nodiscard]] bool InitMainWindow();
 
 protected:
 	HINSTANCE m_hAppInst = nullptr;	// 애플리케이션 인스턴스 핸들

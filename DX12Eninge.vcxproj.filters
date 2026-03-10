@@ -75,6 +75,24 @@
     <ClInclude Include="Src\Platform\DirectX12\DX12Buffer.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
+    <ClInclude Include="Src\EngineCore\Engine.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Input\InputSystem.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Math\Camera.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Utilities\ShaderUtils.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Asset\StaticMesh.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Asset\AssimpModelLoader.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Src\WindowsCore\main.cpp">
@@ -104,6 +122,21 @@
     <ClCompile Include="Src\Platform\DirectX12\DX12Buffer.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
+    <ClCompile Include="Src\EngineCore\Engine.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Input\InputSystem.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Math\Camera.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Utilities\ShaderUtils.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Asset\AssimpModelLoader.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Src\WindowsCore\DX12Eninge.rc">
@@ -123,5 +156,8 @@
     <None Include=".github\copilot-instructions.md" />
     <None Include="Directory.Build.targets" />
     <None Include="vcpkg.json" />
+    <None Include="Src\Platform\Vulkan\Shaders\Triangle.frag" />
+    <None Include="Src\Platform\Vulkan\Shaders\Triangle.vert" />
+    <None Include="Src\Platform\DirectX12\Shaders\Triangle.hlsl" />
   </ItemGroup>
 </Project>

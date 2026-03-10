@@ -37,6 +37,11 @@ public:
 	VkPhysicalDevice GetVkPhysicalDevice() const { return m_physicalDevice; }
 	VkRenderPass GetVkRenderPass() const { return m_renderPass; }
 	VkExtent2D GetVkSwapchainExtent() const { return m_swapchainExtent; }
+	// Vulkan 텍스처 업로드 시 일회성 복사 커맨드를 제출하려면 graphics queue와 command pool 접근이 필요합니다.
+	VkQueue GetVkGraphicsQueue() const { return m_graphicsQueue; }
+	VkCommandPool GetVkCommandPool() const { return m_commandPool; }
+	// Vulkan 텍스처 이미지 메모리 할당 시 기존 디바이스 메모리 선택 로직을 재사용합니다.
+	uint32_t FindMemoryTypeForTexture(uint32_t typeFilter, VkMemoryPropertyFlags properties) const { return FindMemoryType(typeFilter, properties); }
 
 private:
 	friend class VulkanCommandList;

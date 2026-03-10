@@ -130,6 +130,11 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="Src\Asset\AssimpModelLoader.h" />
+    <ClInclude Include="Src\Asset\StaticMesh.h" />
+    <ClInclude Include="Src\EngineCore\Engine.h" />
+    <ClInclude Include="Src\Input\InputSystem.h" />
+    <ClInclude Include="Src\Math\Camera.h" />
     <ClInclude Include="Src\Platform\DirectX12\DX12Buffer.h" />
     <ClInclude Include="Src\Platform\DirectX12\DX12CommandList.h" />
     <ClInclude Include="Src\EngineCore\GameApp.h" />
@@ -146,12 +151,17 @@
     <ClInclude Include="Src\RHI\ICommandList.h" />
     <ClInclude Include="Src\RHI\IGpuResource.h" />
     <ClInclude Include="Src\RHI\IGraphicsDevice.h" />
+    <ClInclude Include="Src\Utilities\ShaderUtils.h" />
     <ClInclude Include="Src\Utils\Utils.h" />
     <ClInclude Include="Src\WindowsCore\framework.h" />
     <ClInclude Include="Src\WindowsCore\Resource.h" />
     <ClInclude Include="Src\WindowsCore\targetver.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="Src\Asset\AssimpModelLoader.cpp" />
+    <ClCompile Include="Src\EngineCore\Engine.cpp" />
+    <ClCompile Include="Src\Input\InputSystem.cpp" />
+    <ClCompile Include="Src\Math\Camera.cpp" />
     <ClCompile Include="Src\Platform\DirectX12\DX12Buffer.cpp" />
     <ClCompile Include="Src\Platform\DirectX12\DX12CommandList.cpp" />
     <ClCompile Include="Src\EngineCore\GameApp.cpp" />
@@ -160,6 +170,7 @@
     <ClCompile Include="Src\Platform\Vulkan\VulkanCommandList.cpp" />
     <ClCompile Include="Src\Platform\Vulkan\VulkanDevice.cpp" />
     <ClCompile Include="Src\RHI\IGraphicsDevice.cpp" />
+    <ClCompile Include="Src\Utilities\ShaderUtils.cpp" />
     <ClCompile Include="Src\WindowsCore\main.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -173,7 +184,12 @@
     <None Include=".github\copilot-instructions.md" />
     <None Include="Directory.Build.props" />
     <None Include="Directory.Build.targets" />
+    <None Include="Src\Platform\Vulkan\Shaders\Triangle.frag" />
+    <None Include="Src\Platform\Vulkan\Shaders\Triangle.vert" />
     <None Include="vcpkg.json" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Src\Platform\DirectX12\Shaders\Triangle.hlsl" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
