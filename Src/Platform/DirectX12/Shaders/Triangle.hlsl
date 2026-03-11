@@ -5,6 +5,7 @@ cbuffer CameraConstants : register(b0)
 {
     row_major float4x4 ViewProjection;
     float4 CameraPosition;
+    float4 DebugOptions;
 };
 
 Texture2D DiffuseTexture : register(t0);
@@ -37,6 +38,17 @@ VSOutput VSMain(VSInput input)
 float4 PSMain(VSOutput input) : SV_Target
 {
     const float4 sampledColor = DiffuseTexture.Sample(DiffuseSampler, input.TexCoord);
-    const float sampledLuminance = dot(sampledColor.rgb, float3(0.2126f, 0.7152f, 0.0722f));
-    return sampledLuminance < 0.001f ? input.Color : sampledColor;
+    if (sampledColor.a < 0.5f)
+    {
+        discard;
+    }
+
+    if (DebugOptions.x > 0.5f)
+    {
+        const float2 wrappedUv = frac(input.TexCoord);
+        const bool isOutOfRange = input.TexCoord.x < 0.0f || input.TexCoord.x > 1.0f || input.TexCoord.y < 0.0f || input.TexCoord.y > 1.0f;
+        return float4(wrappedUv.x, wrappedUv.y, isOutOfRange ? 1.0f : 0.0f, 1.0f);
+    }
+
+    return sampledColor * input.Color;
 }

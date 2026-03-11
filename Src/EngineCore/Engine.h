@@ -70,7 +70,7 @@ private:
 	[[nodiscard]] bool CreateTriangleVertexBuffer();
 	[[nodiscard]] bool CreateIndexBuffer();
 	[[nodiscard]] bool CreateCameraBuffer();
-	[[nodiscard]] bool LoadDiffuseTextureImage();
+	[[nodiscard]] bool LoadMaterialTextures();
 	[[nodiscard]] bool CreateTextureResources();
 	void DestroyTextureResources();
 	void UpdateCameraBuffer();
@@ -82,6 +82,14 @@ private:
 	void UpdateWindowTitleWithFps();
 
 private:
+	struct CpuMaterialTexture
+	{
+		std::filesystem::path Path;
+		std::vector<unsigned char> Pixels = { 255, 255, 255, 255 };
+		int Width = 1;
+		int Height = 1;
+	};
+
 	// 렌더링 리소스
 	IGraphicsDevice* m_Device = nullptr;
 	ICommandList* m_CmdList = nullptr;
@@ -92,10 +100,8 @@ private:
 	Camera m_Camera;
 	std::unique_ptr<Asset::StaticMeshAsset> m_StaticMeshAsset;
 	float m_AnimationTimeSeconds = 0.0f;
-	std::filesystem::path m_DiffuseTexturePath;
-	std::vector<unsigned char> m_DiffuseTexturePixels;
-	int m_DiffuseTextureWidth = 1;
-	int m_DiffuseTextureHeight = 1;
+	std::vector<CpuMaterialTexture> m_MaterialTextures;
+	bool m_IsUvDebugViewEnabled = false;
 
 	// 현재 API 상태
 	GraphicsAPI m_CurrentApi = GraphicsAPI::Vulkan;
@@ -109,25 +115,35 @@ private:
 	// DirectX12 전용 리소스
 	struct Dx12TriangleResources
 	{
+		struct MaterialTexture
+		{
+			Microsoft::WRL::ComPtr<ID3D12Resource> Texture;
+			Microsoft::WRL::ComPtr<ID3D12Resource> TextureUpload;
+		};
+
 		Microsoft::WRL::ComPtr<ID3D12RootSignature> RootSignature;
 		Microsoft::WRL::ComPtr<ID3D12PipelineState> PipelineState;
-		Microsoft::WRL::ComPtr<ID3D12Resource> DiffuseTexture;
-		Microsoft::WRL::ComPtr<ID3D12Resource> DiffuseTextureUpload;
 		Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> ShaderResourceHeap;
+		std::vector<MaterialTexture> MaterialTextures;
 	} m_Dx12Triangle;
 
 	// Vulkan 전용 리소스
 	struct VulkanTriangleResources
 	{
+		struct MaterialTexture
+		{
+			VkImage Image = nullptr;
+			VkDeviceMemory ImageMemory = nullptr;
+			VkImageView ImageView = nullptr;
+			VkSampler Sampler = nullptr;
+		};
+
 		VkShaderModule VertexShader = nullptr;
 		VkShaderModule PixelShader = nullptr;
 		VkDescriptorSetLayout DescriptorSetLayout = nullptr;
 		VkDescriptorPool DescriptorPool = nullptr;
-		VkDescriptorSet DescriptorSet = nullptr;
-		VkImage DiffuseImage = nullptr;
-		VkDeviceMemory DiffuseImageMemory = nullptr;
-		VkImageView DiffuseImageView = nullptr;
-		VkSampler DiffuseSampler = nullptr;
+		std::vector<VkDescriptorSet> DescriptorSets;
+		std::vector<MaterialTexture> MaterialTextures;
 		VkPipelineLayout PipelineLayout = nullptr;
 		VkPipeline Pipeline = nullptr;
 		bool IsValid = false;

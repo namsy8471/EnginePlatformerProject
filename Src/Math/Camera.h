@@ -69,7 +69,7 @@ private:
 	float m_FarZ = 1000.0f;
 
 	// 이동 속도
-	float m_MoveSpeed = 5.0f;
+	float m_MoveSpeed = 400.0f;
 	float m_MouseSensitivity = 0.002f;
 
 	// 행렬 캐시

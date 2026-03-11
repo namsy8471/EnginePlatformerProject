@@ -37,6 +37,9 @@ namespace Asset
 	{
 		std::string Name;
 		std::filesystem::path DiffuseTexturePath;
+		std::vector<unsigned char> EmbeddedDiffuseTexturePixels;
+		int EmbeddedDiffuseTextureWidth = 0;
+		int EmbeddedDiffuseTextureHeight = 0;
 		std::filesystem::path NormalTexturePath;
 		std::filesystem::path MetallicRoughnessTexturePath;
 	};

@@ -67,6 +67,11 @@ namespace Asset
 				return {};
 			}
 
+			if (texturePath.length > 0 && texturePath.C_Str()[0] == '*')
+			{
+				return {};
+			}
+
 			const std::filesystem::path importedPath(texturePath.C_Str());
 			if (importedPath.is_absolute())
 			{
@@ -74,6 +79,74 @@ namespace Asset
 			}
 
 			return sourcePath.parent_path() / importedPath;
+		}
+
+		[[nodiscard]] LoadedTextureImage LoadEmbeddedTextureImage(const aiScene& scene, const aiMaterial& material, aiTextureType textureType)
+		{
+			LoadedTextureImage image = {};
+			aiString texturePath;
+			if (material.GetTexture(textureType, 0, &texturePath) != aiReturn_SUCCESS || texturePath.length == 0 || texturePath.C_Str()[0] != '*')
+			{
+				return image;
+			}
+
+			const aiTexture* embeddedTexture = scene.GetEmbeddedTexture(texturePath.C_Str());
+			if (!embeddedTexture)
+			{
+				return image;
+			}
+
+			if (embeddedTexture->mHeight == 0)
+			{
+				int width = 0;
+				int height = 0;
+				int channels = 0;
+				const auto* encodedBytes = reinterpret_cast<const stbi_uc*>(embeddedTexture->pcData);
+				stbi_uc* pixels = stbi_load_from_memory(encodedBytes, static_cast<int>(embeddedTexture->mWidth), &width, &height, &channels, STBI_rgb_alpha);
+				if (!pixels)
+				{
+					return image;
+				}
+
+				image.Width = width;
+				image.Height = height;
+				image.Channels = 4;
+				image.Pixels.assign(pixels, pixels + static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
+				stbi_image_free(pixels);
+				return image;
+			}
+
+			image.Width = static_cast<int>(embeddedTexture->mWidth);
+			image.Height = static_cast<int>(embeddedTexture->mHeight);
+			image.Channels = 4;
+			image.Pixels.resize(static_cast<size_t>(image.Width) * static_cast<size_t>(image.Height) * 4);
+			for (int y = 0; y < image.Height; ++y)
+			{
+				for (int x = 0; x < image.Width; ++x)
+				{
+					const aiTexel& texel = embeddedTexture->pcData[static_cast<size_t>(y) * static_cast<size_t>(image.Width) + static_cast<size_t>(x)];
+					const size_t pixelIndex = (static_cast<size_t>(y) * static_cast<size_t>(image.Width) + static_cast<size_t>(x)) * 4;
+					image.Pixels[pixelIndex + 0] = texel.r;
+					image.Pixels[pixelIndex + 1] = texel.g;
+					image.Pixels[pixelIndex + 2] = texel.b;
+					image.Pixels[pixelIndex + 3] = texel.a;
+				}
+			}
+
+			return image;
+		}
+
+		[[nodiscard]] int32_t FindPreferredUvChannel(const aiMesh& mesh) noexcept
+		{
+			for (uint32_t uvChannel = 0; uvChannel < AI_MAX_NUMBER_OF_TEXTURECOORDS; ++uvChannel)
+			{
+				if (mesh.HasTextureCoords(uvChannel))
+				{
+					return static_cast<int32_t>(uvChannel);
+				}
+			}
+
+			return -1;
 		}
 
 		[[nodiscard]] LoadedTextureImage LoadTextureImage(const std::filesystem::path& texturePath)
@@ -280,8 +353,6 @@ namespace Asset
 			BuildNodeHierarchy(*scene.mRootNode, -1, *meshAsset, meshNodeIndices);
 
 			meshAsset->Materials.reserve(scene.mNumMaterials);
-			std::vector<LoadedTextureImage> diffuseTextures;
-			diffuseTextures.reserve(scene.mNumMaterials);
 			for (uint32_t materialIndex = 0; materialIndex < scene.mNumMaterials; ++materialIndex)
 			{
 				StaticMeshMaterial material = {};
@@ -297,7 +368,27 @@ namespace Asset
 					material.DiffuseTexturePath = ResolveTexturePath(*aiMaterialPtr, aiTextureType_BASE_COLOR, meshAsset->SourcePath);
 					if (material.DiffuseTexturePath.empty())
 					{
-						material.DiffuseTexturePath = ResolveTexturePath(*aiMaterialPtr, aiTextureType_DIFFUSE, meshAsset->SourcePath);
+						const LoadedTextureImage embeddedBaseColorTexture = LoadEmbeddedTextureImage(scene, *aiMaterialPtr, aiTextureType_BASE_COLOR);
+						if (embeddedBaseColorTexture.IsValid())
+						{
+							material.EmbeddedDiffuseTexturePixels = embeddedBaseColorTexture.Pixels;
+							material.EmbeddedDiffuseTextureWidth = embeddedBaseColorTexture.Width;
+							material.EmbeddedDiffuseTextureHeight = embeddedBaseColorTexture.Height;
+						}
+						else
+						{
+							material.DiffuseTexturePath = ResolveTexturePath(*aiMaterialPtr, aiTextureType_DIFFUSE, meshAsset->SourcePath);
+							if (material.DiffuseTexturePath.empty())
+							{
+								const LoadedTextureImage embeddedDiffuseTexture = LoadEmbeddedTextureImage(scene, *aiMaterialPtr, aiTextureType_DIFFUSE);
+								if (embeddedDiffuseTexture.IsValid())
+								{
+									material.EmbeddedDiffuseTexturePixels = embeddedDiffuseTexture.Pixels;
+									material.EmbeddedDiffuseTextureWidth = embeddedDiffuseTexture.Width;
+									material.EmbeddedDiffuseTextureHeight = embeddedDiffuseTexture.Height;
+								}
+							}
+						}
 					}
 
 					material.NormalTexturePath = ResolveTexturePath(*aiMaterialPtr, aiTextureType_NORMAL_CAMERA, meshAsset->SourcePath);
@@ -309,7 +400,6 @@ namespace Asset
 					material.MetallicRoughnessTexturePath = ResolveTexturePath(*aiMaterialPtr, aiTextureType_UNKNOWN, meshAsset->SourcePath);
 				}
 
-				diffuseTextures.push_back(LoadTextureImage(material.DiffuseTexturePath));
 				meshAsset->Materials.push_back(std::move(material));
 			}
 
@@ -328,8 +418,20 @@ namespace Asset
 				submesh.MaterialIndex = mesh->mMaterialIndex;
 				submesh.Name = mesh->mName.C_Str();
 				submesh.NodeIndex = meshIndex < meshNodeIndices.size() ? meshNodeIndices[meshIndex] : 0;
+				const int32_t preferredUvChannel = FindPreferredUvChannel(*mesh);
 
-				const LoadedTextureImage* diffuseTexture = submesh.MaterialIndex < diffuseTextures.size() ? &diffuseTextures[submesh.MaterialIndex] : nullptr;
+				std::string uvDiagnosticMessage = "mesh[";
+				uvDiagnosticMessage.append(std::to_string(meshIndex));
+				uvDiagnosticMessage.append("] name='");
+				uvDiagnosticMessage.append(submesh.Name);
+				uvDiagnosticMessage.append("' preferredUV=");
+				uvDiagnosticMessage.append(std::to_string(preferredUvChannel));
+				uvDiagnosticMessage.append(" hasUV0=");
+				uvDiagnosticMessage.append(mesh->HasTextureCoords(0) ? "true" : "false");
+				uvDiagnosticMessage.append(" hasUV1=");
+				uvDiagnosticMessage.append(mesh->HasTextureCoords(1) ? "true" : "false");
+				LogAssimpMessage(uvDiagnosticMessage);
+
 				meshAsset->Vertices.reserve(meshAsset->Vertices.size() + mesh->mNumVertices);
 				for (uint32_t vertexIndex = 0; vertexIndex < mesh->mNumVertices; ++vertexIndex)
 				{
@@ -341,11 +443,11 @@ namespace Asset
 						vertex.Normal = ToFloat3(mesh->mNormals[vertexIndex]);
 					}
 
-					if (mesh->HasTextureCoords(0))
+					if (preferredUvChannel >= 0)
 					{
 						vertex.TexCoord = {
-							mesh->mTextureCoords[0][vertexIndex].x,
-							mesh->mTextureCoords[0][vertexIndex].y };
+							mesh->mTextureCoords[preferredUvChannel][vertexIndex].x,
+							mesh->mTextureCoords[preferredUvChannel][vertexIndex].y };
 					}
 
 					if (mesh->HasTangentsAndBitangents())
@@ -353,13 +455,23 @@ namespace Asset
 						vertex.Tangent = ToFloat3(mesh->mTangents[vertexIndex]);
 					}
 
-					vertex.Color = diffuseTexture && diffuseTexture->IsValid()
-						? SampleTextureColor(*diffuseTexture, vertex.TexCoord)
-						: DirectX::XMFLOAT4(
+					if (mesh->HasVertexColors(0))
+					{
+						const aiColor4D& color = mesh->mColors[0][vertexIndex];
+						vertex.Color = { color.r, color.g, color.b, color.a };
+					}
+					else if (submesh.MaterialIndex < meshAsset->Materials.size() && !meshAsset->Materials[submesh.MaterialIndex].DiffuseTexturePath.empty())
+					{
+						vertex.Color = { 1.0f, 1.0f, 1.0f, 1.0f };
+					}
+					else
+					{
+						vertex.Color = DirectX::XMFLOAT4(
 							vertex.Normal.x * 0.5f + 0.5f,
 							vertex.Normal.y * 0.5f + 0.5f,
 							vertex.Normal.z * 0.5f + 0.5f,
 							1.0f);
+					}
 
 					meshAsset->Vertices.push_back(vertex);
 				}

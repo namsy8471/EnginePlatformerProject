@@ -92,6 +92,7 @@ namespace
 	{
 		DirectX::XMFLOAT4X4 ViewProjection = {};
 		DirectX::XMFLOAT4 CameraPosition = {};
+		DirectX::XMFLOAT4 DebugOptions = {};
 	};
 
 	constexpr std::array<TriangleVertex, 3> kDx12TriangleVertices = {{
@@ -306,6 +307,12 @@ LRESULT Engine::MsgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 					SwitchGraphicsAPI(previousApi);
 				}
 			}
+			return 0;
+
+		case IDM_VIEW_UV_DEBUG:
+			m_IsUvDebugViewEnabled = !m_IsUvDebugViewEnabled;
+			UpdateRendererMenuState();
+			UpdateWindowTitleWithFps();
 			return 0;
 		}
 	}
@@ -677,7 +684,62 @@ bool Engine::LoadSpiderStaticMesh()
 	uvLogMessage.append(std::to_string(outOfRangeUvCount));
 	LogEngineTrace(uvLogMessage);
 
-	if (!LoadDiffuseTextureImage())
+	const std::filesystem::path spiderTextureDirectory = spiderDirectory / "textures";
+	std::filesystem::path preferredSpiderDiffuseTexturePath;
+	std::filesystem::path preferredSpiderNormalTexturePath;
+	if (std::filesystem::exists(spiderTextureDirectory))
+	{
+		for (const auto& entry : std::filesystem::directory_iterator(spiderTextureDirectory))
+		{
+			if (!entry.is_regular_file())
+			{
+				continue;
+			}
+
+			std::wstring fileName = entry.path().filename().wstring();
+			std::transform(fileName.begin(), fileName.end(), fileName.begin(), [](wchar_t ch) { return static_cast<wchar_t>(::towlower(ch)); });
+
+			if (fileName.find(L"color") != std::wstring::npos)
+			{
+				const bool isPng = entry.path().extension() == L".png" || entry.path().extension() == L".PNG";
+				if (preferredSpiderDiffuseTexturePath.empty() || isPng)
+				{
+					preferredSpiderDiffuseTexturePath = entry.path();
+				}
+			}
+
+			if (preferredSpiderNormalTexturePath.empty() && (fileName.find(L"nrm") != std::wstring::npos || fileName.find(L"normal") != std::wstring::npos))
+			{
+				preferredSpiderNormalTexturePath = entry.path();
+			}
+		}
+	}
+
+	if (!preferredSpiderDiffuseTexturePath.empty())
+	{
+		for (auto& material : m_StaticMeshAsset->Materials)
+		{
+			material.DiffuseTexturePath = preferredSpiderDiffuseTexturePath;
+			material.EmbeddedDiffuseTexturePixels.clear();
+			material.EmbeddedDiffuseTextureWidth = 0;
+			material.EmbeddedDiffuseTextureHeight = 0;
+			if (!preferredSpiderNormalTexturePath.empty())
+			{
+				material.NormalTexturePath = preferredSpiderNormalTexturePath;
+			}
+		}
+
+		std::string spiderTextureOverrideLogMessage = "Spider texture override - Diffuse=";
+		spiderTextureOverrideLogMessage.append(preferredSpiderDiffuseTexturePath.string());
+		if (!preferredSpiderNormalTexturePath.empty())
+		{
+			spiderTextureOverrideLogMessage.append(" Normal=");
+			spiderTextureOverrideLogMessage.append(preferredSpiderNormalTexturePath.string());
+		}
+		LogEngineTrace(spiderTextureOverrideLogMessage);
+	}
+
+	if (!LoadMaterialTextures())
 	{
 		return false;
 	}
@@ -722,153 +784,100 @@ bool Engine::LoadSpiderStaticMesh()
 	return true;
 }
 
-bool Engine::LoadDiffuseTextureImage()
+bool Engine::LoadMaterialTextures()
 {
-	auto toLowerString = [](std::wstring text)
-	{
-		std::transform(text.begin(), text.end(), text.begin(), [](wchar_t ch) { return static_cast<wchar_t>(::towlower(ch)); });
-		return text;
-	};
-
-	auto isLikelyNormalLikeTexture = [&](const std::filesystem::path& texturePath)
-	{
-		const std::wstring lowerName = toLowerString(texturePath.filename().wstring());
-		return lowerName.find(L"nrm") != std::wstring::npos ||
-			lowerName.find(L"normal") != std::wstring::npos ||
-			lowerName.find(L"_n") != std::wstring::npos;
-	};
-
-	auto isLikelyColorTexture = [&](const std::filesystem::path& texturePath)
-	{
-		const std::wstring lowerName = toLowerString(texturePath.filename().wstring());
-		return lowerName.find(L"color") != std::wstring::npos ||
-			lowerName.find(L"albedo") != std::wstring::npos ||
-			lowerName.find(L"diff") != std::wstring::npos ||
-			lowerName.find(L"basecolor") != std::wstring::npos ||
-			lowerName.find(L"base_color") != std::wstring::npos;
-	};
-
-	auto isWeakGenericTextureName = [&](const std::filesystem::path& texturePath)
-	{
-		const std::wstring lowerName = toLowerString(texturePath.filename().wstring());
-		return lowerName.find(L"sh") != std::wstring::npos ||
-			lowerName.find(L"detail") != std::wstring::npos ||
-			lowerName.find(L"mask") != std::wstring::npos;
-	};
-
-	m_DiffuseTexturePath.clear();
-	m_DiffuseTexturePixels = { 255, 255, 255, 255 };
-	m_DiffuseTextureWidth = 1;
-	m_DiffuseTextureHeight = 1;
+	m_MaterialTextures.clear();
 
 	if (!m_StaticMeshAsset)
 	{
 		return true;
 	}
 
-	for (const auto& material : m_StaticMeshAsset->Materials)
+	const size_t textureCount = (std::max)(static_cast<size_t>(1), m_StaticMeshAsset->Materials.size());
+	m_MaterialTextures.resize(textureCount);
+
+	for (size_t materialIndex = 0; materialIndex < textureCount; ++materialIndex)
 	{
-		if (!material.DiffuseTexturePath.empty() &&
-			std::filesystem::exists(material.DiffuseTexturePath) &&
-			!isLikelyNormalLikeTexture(material.DiffuseTexturePath) &&
-			!isWeakGenericTextureName(material.DiffuseTexturePath))
+		auto& materialTexture = m_MaterialTextures[materialIndex];
+		materialTexture.Path.clear();
+		materialTexture.Pixels = { 255, 255, 255, 255 };
+		materialTexture.Width = 1;
+		materialTexture.Height = 1;
+
+		if (materialIndex >= m_StaticMeshAsset->Materials.size())
 		{
-			m_DiffuseTexturePath = material.DiffuseTexturePath;
-			if (isLikelyColorTexture(m_DiffuseTexturePath))
-			{
-				break;
-			}
+			continue;
 		}
 
-		if (m_DiffuseTexturePath.empty() &&
-			!material.NormalTexturePath.empty() &&
-			std::filesystem::exists(material.NormalTexturePath) &&
-			isLikelyColorTexture(material.NormalTexturePath))
+		const auto& material = m_StaticMeshAsset->Materials[materialIndex];
+		if (!material.DiffuseTexturePath.empty() && std::filesystem::exists(material.DiffuseTexturePath))
 		{
-			m_DiffuseTexturePath = material.NormalTexturePath;
-			break;
+			int width = 0;
+			int height = 0;
+			int channels = 0;
+			stbi_uc* pixels = stbi_load(material.DiffuseTexturePath.string().c_str(), &width, &height, &channels, STBI_rgb_alpha);
+			if (!pixels)
+			{
+				std::string failureLogMessage = "Material texture load failed - MaterialIndex=";
+				failureLogMessage.append(std::to_string(materialIndex));
+				failureLogMessage.append(" Path=");
+				failureLogMessage.append(material.DiffuseTexturePath.string());
+				failureLogMessage.append(" SelectedPath=<fallback white>");
+				LogEngineTrace(failureLogMessage);
+				continue;
+			}
+
+			materialTexture.Path = material.DiffuseTexturePath;
+			materialTexture.Width = width;
+			materialTexture.Height = height;
+			materialTexture.Pixels.assign(pixels, pixels + static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
+			stbi_image_free(pixels);
+
+			std::string loadedTextureLogMessage = "Material texture loaded - MaterialIndex=";
+			loadedTextureLogMessage.append(std::to_string(materialIndex));
+			loadedTextureLogMessage.append(" Path=");
+			loadedTextureLogMessage.append(materialTexture.Path.string());
+			loadedTextureLogMessage.append(" | SourceChannels=");
+			loadedTextureLogMessage.append(std::to_string(channels));
+			loadedTextureLogMessage.append(" | UploadedAs=sRGB RGBA8");
+			LogEngineTrace(loadedTextureLogMessage);
+			continue;
+		}
+
+		if (!material.EmbeddedDiffuseTexturePixels.empty() && material.EmbeddedDiffuseTextureWidth > 0 && material.EmbeddedDiffuseTextureHeight > 0)
+		{
+			materialTexture.Width = material.EmbeddedDiffuseTextureWidth;
+			materialTexture.Height = material.EmbeddedDiffuseTextureHeight;
+			materialTexture.Pixels = material.EmbeddedDiffuseTexturePixels;
+
+			std::string embeddedTextureLogMessage = "Material embedded texture loaded - MaterialIndex=";
+			embeddedTextureLogMessage.append(std::to_string(materialIndex));
+			embeddedTextureLogMessage.append(" Path=<embedded>");
+			embeddedTextureLogMessage.append(" | UploadedAs=sRGB RGBA8");
+			LogEngineTrace(embeddedTextureLogMessage);
+			continue;
+		}
+
+		if (material.DiffuseTexturePath.empty() || !std::filesystem::exists(material.DiffuseTexturePath))
+		{
+			std::string fallbackLogMessage = "Material texture fallback - MaterialIndex=";
+			fallbackLogMessage.append(std::to_string(materialIndex));
+			fallbackLogMessage.append(" SelectedPath=<fallback white>");
+			LogEngineTrace(fallbackLogMessage);
+			continue;
 		}
 	}
 
-	if (!m_DiffuseTexturePath.empty() && isLikelyNormalLikeTexture(m_DiffuseTexturePath))
-	{
-		m_DiffuseTexturePath.clear();
-	}
-
-	if (m_DiffuseTexturePath.empty() && !m_StaticMeshAsset->Materials.empty())
-	{
-		const std::filesystem::path textureDirectory = m_StaticMeshAsset->Materials.front().DiffuseTexturePath.empty()
-			? m_StaticMeshAsset->SourcePath.parent_path() / "textures"
-			: m_StaticMeshAsset->Materials.front().DiffuseTexturePath.parent_path();
-
-		if (std::filesystem::exists(textureDirectory))
-		{
-			std::filesystem::path fallbackTexturePath;
-			for (const auto& entry : std::filesystem::directory_iterator(textureDirectory))
-			{
-				if (!entry.is_regular_file())
-				{
-					continue;
-				}
-
-				if (isLikelyColorTexture(entry.path()))
-				{
-					m_DiffuseTexturePath = entry.path();
-					break;
-				}
-
-				if (fallbackTexturePath.empty() && !isLikelyNormalLikeTexture(entry.path()) && !isWeakGenericTextureName(entry.path()))
-				{
-					fallbackTexturePath = entry.path();
-				}
-			}
-
-			if (m_DiffuseTexturePath.empty())
-			{
-				m_DiffuseTexturePath = fallbackTexturePath;
-			}
-		}
-	}
-
-	if (m_DiffuseTexturePath.empty())
-	{
-		LogEngineTrace("No diffuse texture found. Using 1x1 white fallback texture.");
-		LogEngineTrace("Texture diagnostics - SelectedPath=<fallback white>, ColorSpaceAssumption=sRGB sampling path disabled for fallback white texture");
-		return true;
-	}
-
-	std::string textureSelectionLogMessage = "Texture diagnostics - SelectedPath=";
-	textureSelectionLogMessage.append(m_DiffuseTexturePath.string());
-	textureSelectionLogMessage.append(", ColorSpaceAssumption=sRGB (DXGI_FORMAT_R8G8B8A8_UNORM_SRGB / VK_FORMAT_R8G8B8A8_SRGB)");
-	LogEngineTrace(textureSelectionLogMessage);
-
-	int width = 0;
-	int height = 0;
-	int channels = 0;
-	stbi_uc* pixels = stbi_load(m_DiffuseTexturePath.string().c_str(), &width, &height, &channels, STBI_rgb_alpha);
-	if (!pixels)
-	{
-		LogEngineTrace("Failed to load diffuse texture image. Using white fallback texture.");
-		m_DiffuseTexturePath.clear();
-		return true;
-	}
-
-	m_DiffuseTextureWidth = width;
-	m_DiffuseTextureHeight = height;
-	m_DiffuseTexturePixels.assign(pixels, pixels + static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
-	stbi_image_free(pixels);
-
-	std::string logMessage = "Loaded diffuse texture: ";
-	logMessage.append(m_DiffuseTexturePath.string());
-	logMessage.append(" | SourceChannels=");
-	logMessage.append(std::to_string(channels));
-	logMessage.append(" | UploadedAs=sRGB RGBA8");
-	LogEngineTrace(logMessage);
+	std::string materialTextureSummaryLogMessage = "Material texture count=";
+	materialTextureSummaryLogMessage.append(std::to_string(m_MaterialTextures.size()));
+	LogEngineTrace(materialTextureSummaryLogMessage);
 	return true;
 }
 
 bool Engine::CreateTextureResources()
 {
+	const size_t textureCount = (std::max)(static_cast<size_t>(1), m_MaterialTextures.size());
+
 	if (m_CurrentApi == GraphicsAPI::DirectX12)
 	{
 		auto dx12Device = dynamic_cast<DX12Device*>(m_Device);
@@ -877,37 +886,9 @@ bool Engine::CreateTextureResources()
 			return false;
 		}
 
-		const UINT64 rowPitch = static_cast<UINT64>(m_DiffuseTextureWidth) * 4;
-		const D3D12_RESOURCE_DESC textureDesc = CD3DX12_RESOURCE_DESC::Tex2D(
-			DXGI_FORMAT_R8G8B8A8_UNORM,
-			static_cast<UINT64>(m_DiffuseTextureWidth),
-			static_cast<UINT>(m_DiffuseTextureHeight));
-		const CD3DX12_HEAP_PROPERTIES defaultHeapProperties(D3D12_HEAP_TYPE_DEFAULT);
-
-		if (FAILED(dx12Device->GetD3DDevice()->CreateCommittedResource(
-			&defaultHeapProperties,
-			D3D12_HEAP_FLAG_NONE,
-			&textureDesc,
-			D3D12_RESOURCE_STATE_COPY_DEST,
-			nullptr,
-			IID_PPV_ARGS(&m_Dx12Triangle.DiffuseTexture))))
-		{
-			return false;
-		}
-
-		const UINT64 uploadBufferSize = GetRequiredIntermediateSize(m_Dx12Triangle.DiffuseTexture.Get(), 0, 1);
-		const CD3DX12_HEAP_PROPERTIES uploadHeapProperties(D3D12_HEAP_TYPE_UPLOAD);
-		const auto uploadBufferDesc = CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize);
-		if (FAILED(dx12Device->GetD3DDevice()->CreateCommittedResource(
-			&uploadHeapProperties,
-			D3D12_HEAP_FLAG_NONE,
-			&uploadBufferDesc,
-			D3D12_RESOURCE_STATE_GENERIC_READ,
-			nullptr,
-			IID_PPV_ARGS(&m_Dx12Triangle.DiffuseTextureUpload))))
-		{
-			return false;
-		}
+		m_Dx12Triangle.MaterialTextures.clear();
+		m_Dx12Triangle.MaterialTextures.resize(textureCount);
+		m_Dx12Triangle.ShaderResourceHeap.Reset();
 
 		ComPtr<ID3D12CommandAllocator> commandAllocator;
 		ComPtr<ID3D12GraphicsCommandList> commandList;
@@ -917,25 +898,63 @@ bool Engine::CreateTextureResources()
 			return false;
 		}
 
-		D3D12_SUBRESOURCE_DATA textureData = {};
-		textureData.pData = m_DiffuseTexturePixels.data();
-		textureData.RowPitch = static_cast<LONG_PTR>(rowPitch);
-		textureData.SlicePitch = static_cast<LONG_PTR>(rowPitch * static_cast<UINT64>(m_DiffuseTextureHeight));
-		UpdateSubresources(commandList.Get(), m_Dx12Triangle.DiffuseTexture.Get(), m_Dx12Triangle.DiffuseTextureUpload.Get(), 0, 0, 1, &textureData);
-		auto textureTransitionBarrier = CD3DX12_RESOURCE_BARRIER::Transition(
-			m_Dx12Triangle.DiffuseTexture.Get(),
-			D3D12_RESOURCE_STATE_COPY_DEST,
-			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-		commandList->ResourceBarrier(1, &textureTransitionBarrier);
-		commandList->Close();
+		for (size_t textureIndex = 0; textureIndex < textureCount; ++textureIndex)
+		{
+			const auto& materialTexture = m_MaterialTextures[textureIndex];
+			auto& dx12MaterialTexture = m_Dx12Triangle.MaterialTextures[textureIndex];
+			const UINT64 rowPitch = static_cast<UINT64>(materialTexture.Width) * 4;
+			const D3D12_RESOURCE_DESC textureDesc = CD3DX12_RESOURCE_DESC::Tex2D(
+				DXGI_FORMAT_R8G8B8A8_UNORM,
+				static_cast<UINT64>(materialTexture.Width),
+				static_cast<UINT>(materialTexture.Height));
+			const CD3DX12_HEAP_PROPERTIES defaultHeapProperties(D3D12_HEAP_TYPE_DEFAULT);
 
+			if (FAILED(dx12Device->GetD3DDevice()->CreateCommittedResource(
+				&defaultHeapProperties,
+				D3D12_HEAP_FLAG_NONE,
+				&textureDesc,
+				D3D12_RESOURCE_STATE_COPY_DEST,
+				nullptr,
+				IID_PPV_ARGS(&dx12MaterialTexture.Texture))))
+			{
+				return false;
+			}
+
+			const UINT64 uploadBufferSize = GetRequiredIntermediateSize(dx12MaterialTexture.Texture.Get(), 0, 1);
+			const CD3DX12_HEAP_PROPERTIES uploadHeapProperties(D3D12_HEAP_TYPE_UPLOAD);
+			const auto uploadBufferDesc = CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize);
+			if (FAILED(dx12Device->GetD3DDevice()->CreateCommittedResource(
+				&uploadHeapProperties,
+				D3D12_HEAP_FLAG_NONE,
+				&uploadBufferDesc,
+				D3D12_RESOURCE_STATE_GENERIC_READ,
+				nullptr,
+				IID_PPV_ARGS(&dx12MaterialTexture.TextureUpload))))
+			{
+				return false;
+			}
+
+			D3D12_SUBRESOURCE_DATA textureData = {};
+			textureData.pData = materialTexture.Pixels.data();
+			textureData.RowPitch = static_cast<LONG_PTR>(rowPitch);
+			textureData.SlicePitch = static_cast<LONG_PTR>(rowPitch * static_cast<UINT64>(materialTexture.Height));
+			UpdateSubresources(commandList.Get(), dx12MaterialTexture.Texture.Get(), dx12MaterialTexture.TextureUpload.Get(), 0, 0, 1, &textureData);
+
+			auto textureTransitionBarrier = CD3DX12_RESOURCE_BARRIER::Transition(
+				dx12MaterialTexture.Texture.Get(),
+				D3D12_RESOURCE_STATE_COPY_DEST,
+				D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			commandList->ResourceBarrier(1, &textureTransitionBarrier);
+		}
+
+		commandList->Close();
 		ID3D12CommandList* commandLists[] = { commandList.Get() };
 		dx12Device->GetCommandQueue()->ExecuteCommandLists(1, commandLists);
 		dx12Device->WaitForGPU();
 
 		const D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {
 			.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-			.NumDescriptors = 1,
+			.NumDescriptors = static_cast<UINT>(textureCount),
 			.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE
 		};
 		if (FAILED(dx12Device->GetD3DDevice()->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_Dx12Triangle.ShaderResourceHeap))))
@@ -943,15 +962,21 @@ bool Engine::CreateTextureResources()
 			return false;
 		}
 
-		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-		srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-		srvDesc.Texture2D.MipLevels = 1;
-		dx12Device->GetD3DDevice()->CreateShaderResourceView(
-			m_Dx12Triangle.DiffuseTexture.Get(),
-			&srvDesc,
-			m_Dx12Triangle.ShaderResourceHeap->GetCPUDescriptorHandleForHeapStart());
+		const UINT descriptorSize = dx12Device->GetD3DDevice()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+		auto cpuHandle = m_Dx12Triangle.ShaderResourceHeap->GetCPUDescriptorHandleForHeapStart();
+		for (size_t textureIndex = 0; textureIndex < textureCount; ++textureIndex)
+		{
+			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+			srvDesc.Texture2D.MipLevels = 1;
+			dx12Device->GetD3DDevice()->CreateShaderResourceView(
+				m_Dx12Triangle.MaterialTextures[textureIndex].Texture.Get(),
+				&srvDesc,
+				cpuHandle);
+			cpuHandle.ptr += descriptorSize;
+		}
 
 		return true;
 	}
@@ -962,143 +987,152 @@ bool Engine::CreateTextureResources()
 		return false;
 	}
 
-	// Vulkan 경로는 먼저 sampled image를 만들고, host-visible staging buffer로 픽셀을 올린 뒤
-	// 일회성 copy command로 image를 전송해 shader-read-only layout으로 전환합니다.
-	VkImageCreateInfo imageCreateInfo = {};
-	imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-	imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
-	imageCreateInfo.extent.width = static_cast<uint32_t>(m_DiffuseTextureWidth);
-	imageCreateInfo.extent.height = static_cast<uint32_t>(m_DiffuseTextureHeight);
-	imageCreateInfo.extent.depth = 1;
-	imageCreateInfo.mipLevels = 1;
-	imageCreateInfo.arrayLayers = 1;
-	imageCreateInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
-	imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-	imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-	imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+	// Vulkan 경로는 material 수만큼 sampled image를 만들고, 각 material texture를 staging buffer를 통해
+	// 개별 VkImage로 업로드합니다. 이후 descriptor set은 CreateVulkanTriangleResources()에서 material별로 생성합니다.
+	m_VulkanTriangle.MaterialTextures.clear();
+	m_VulkanTriangle.MaterialTextures.resize(textureCount);
 
-	if (vkCreateImage(vulkanDevice->GetVkDevice(), &imageCreateInfo, nullptr, &m_VulkanTriangle.DiffuseImage) != VK_SUCCESS)
+	for (size_t textureIndex = 0; textureIndex < textureCount; ++textureIndex)
 	{
-		return false;
-	}
+		const auto& materialTexture = m_MaterialTextures[textureIndex];
+		auto& vulkanMaterialTexture = m_VulkanTriangle.MaterialTextures[textureIndex];
 
-	VkMemoryRequirements memoryRequirements = {};
-	vkGetImageMemoryRequirements(vulkanDevice->GetVkDevice(), m_VulkanTriangle.DiffuseImage, &memoryRequirements);
+		VkImageCreateInfo imageCreateInfo = {};
+		imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageCreateInfo.extent.width = static_cast<uint32_t>(materialTexture.Width);
+		imageCreateInfo.extent.height = static_cast<uint32_t>(materialTexture.Height);
+		imageCreateInfo.extent.depth = 1;
+		imageCreateInfo.mipLevels = 1;
+		imageCreateInfo.arrayLayers = 1;
+		imageCreateInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
+		imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 
-	VkMemoryAllocateInfo allocateInfo = {};
-	allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-	allocateInfo.allocationSize = memoryRequirements.size;
-	allocateInfo.memoryTypeIndex = vulkanDevice->FindMemoryTypeForTexture(memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-	if (vkAllocateMemory(vulkanDevice->GetVkDevice(), &allocateInfo, nullptr, &m_VulkanTriangle.DiffuseImageMemory) != VK_SUCCESS)
-	{
-		return false;
-	}
-	vkBindImageMemory(vulkanDevice->GetVkDevice(), m_VulkanTriangle.DiffuseImage, m_VulkanTriangle.DiffuseImageMemory, 0);
+		if (vkCreateImage(vulkanDevice->GetVkDevice(), &imageCreateInfo, nullptr, &vulkanMaterialTexture.Image) != VK_SUCCESS)
+		{
+			return false;
+		}
 
-	BufferDesc stagingDesc = {};
-	stagingDesc.Size = static_cast<uint64_t>(m_DiffuseTexturePixels.size());
-	stagingDesc.Stride = 4;
-	stagingDesc.Heap = HeapType::Upload;
-	stagingDesc.InitialState = ResourceState::GenericRead;
-	VulkanBuffer stagingBuffer(vulkanDevice, stagingDesc);
-	void* mappedData = nullptr;
-	stagingBuffer.Map(&mappedData);
-	std::memcpy(mappedData, m_DiffuseTexturePixels.data(), m_DiffuseTexturePixels.size());
-	stagingBuffer.Unmap();
+		VkMemoryRequirements memoryRequirements = {};
+		vkGetImageMemoryRequirements(vulkanDevice->GetVkDevice(), vulkanMaterialTexture.Image, &memoryRequirements);
 
-	VkCommandBufferAllocateInfo commandBufferAllocateInfo = {};
-	commandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-	commandBufferAllocateInfo.commandPool = vulkanDevice->GetVkCommandPool();
-	commandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	commandBufferAllocateInfo.commandBufferCount = 1;
-	VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-	vkAllocateCommandBuffers(vulkanDevice->GetVkDevice(), &commandBufferAllocateInfo, &commandBuffer);
+		VkMemoryAllocateInfo allocateInfo = {};
+		allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		allocateInfo.allocationSize = memoryRequirements.size;
+		allocateInfo.memoryTypeIndex = vulkanDevice->FindMemoryTypeForTexture(memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+		if (vkAllocateMemory(vulkanDevice->GetVkDevice(), &allocateInfo, nullptr, &vulkanMaterialTexture.ImageMemory) != VK_SUCCESS)
+		{
+			return false;
+		}
+		vkBindImageMemory(vulkanDevice->GetVkDevice(), vulkanMaterialTexture.Image, vulkanMaterialTexture.ImageMemory, 0);
 
-	VkCommandBufferBeginInfo commandBufferBeginInfo = {};
-	commandBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	commandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	vkBeginCommandBuffer(commandBuffer, &commandBufferBeginInfo);
+		BufferDesc stagingDesc = {};
+		stagingDesc.Size = static_cast<uint64_t>(materialTexture.Pixels.size());
+		stagingDesc.Stride = 4;
+		stagingDesc.Heap = HeapType::Upload;
+		stagingDesc.InitialState = ResourceState::GenericRead;
+		VulkanBuffer stagingBuffer(vulkanDevice, stagingDesc);
+		void* mappedData = nullptr;
+		stagingBuffer.Map(&mappedData);
+		std::memcpy(mappedData, materialTexture.Pixels.data(), materialTexture.Pixels.size());
+		stagingBuffer.Unmap();
 
-	// Vulkan 텍스처 이미지는 copy 전에 TRANSFER_DST_OPTIMAL로, copy 후에는 SHADER_READ_ONLY_OPTIMAL로 전환해야
-	// fragment shader에서 안전하게 sampled image로 읽을 수 있습니다.
-	VkImageMemoryBarrier toTransferBarrier = {};
-	toTransferBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	toTransferBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	toTransferBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	toTransferBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	toTransferBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	toTransferBarrier.image = m_VulkanTriangle.DiffuseImage;
-	toTransferBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	toTransferBarrier.subresourceRange.baseMipLevel = 0;
-	toTransferBarrier.subresourceRange.levelCount = 1;
-	toTransferBarrier.subresourceRange.baseArrayLayer = 0;
-	toTransferBarrier.subresourceRange.layerCount = 1;
-	toTransferBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toTransferBarrier);
+		VkCommandBufferAllocateInfo commandBufferAllocateInfo = {};
+		commandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		commandBufferAllocateInfo.commandPool = vulkanDevice->GetVkCommandPool();
+		commandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		commandBufferAllocateInfo.commandBufferCount = 1;
+		VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+		vkAllocateCommandBuffers(vulkanDevice->GetVkDevice(), &commandBufferAllocateInfo, &commandBuffer);
 
-	VkBufferImageCopy copyRegion = {};
-	copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	copyRegion.imageSubresource.mipLevel = 0;
-	copyRegion.imageSubresource.baseArrayLayer = 0;
-	copyRegion.imageSubresource.layerCount = 1;
-	copyRegion.imageExtent = { static_cast<uint32_t>(m_DiffuseTextureWidth), static_cast<uint32_t>(m_DiffuseTextureHeight), 1 };
-	vkCmdCopyBufferToImage(commandBuffer, stagingBuffer.GetVkBuffer(), m_VulkanTriangle.DiffuseImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+		VkCommandBufferBeginInfo commandBufferBeginInfo = {};
+		commandBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		commandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		vkBeginCommandBuffer(commandBuffer, &commandBufferBeginInfo);
 
-	VkImageMemoryBarrier toShaderReadBarrier = {};
-	toShaderReadBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	toShaderReadBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	toShaderReadBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	toShaderReadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	toShaderReadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	toShaderReadBarrier.image = m_VulkanTriangle.DiffuseImage;
-	toShaderReadBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	toShaderReadBarrier.subresourceRange.baseMipLevel = 0;
-	toShaderReadBarrier.subresourceRange.levelCount = 1;
-	toShaderReadBarrier.subresourceRange.baseArrayLayer = 0;
-	toShaderReadBarrier.subresourceRange.layerCount = 1;
-	toShaderReadBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	toShaderReadBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-	vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toShaderReadBarrier);
+		// Vulkan material texture는 copy 전에 TRANSFER_DST_OPTIMAL로, copy 후에는 SHADER_READ_ONLY_OPTIMAL로 전환합니다.
+		// 이렇게 해야 fragment shader에서 material별 sampled image를 안전하게 읽을 수 있습니다.
+		VkImageMemoryBarrier toTransferBarrier = {};
+		toTransferBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		toTransferBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		toTransferBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		toTransferBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		toTransferBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		toTransferBarrier.image = vulkanMaterialTexture.Image;
+		toTransferBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		toTransferBarrier.subresourceRange.baseMipLevel = 0;
+		toTransferBarrier.subresourceRange.levelCount = 1;
+		toTransferBarrier.subresourceRange.baseArrayLayer = 0;
+		toTransferBarrier.subresourceRange.layerCount = 1;
+		toTransferBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toTransferBarrier);
 
-	vkEndCommandBuffer(commandBuffer);
+		VkBufferImageCopy copyRegion = {};
+		copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		copyRegion.imageSubresource.mipLevel = 0;
+		copyRegion.imageSubresource.baseArrayLayer = 0;
+		copyRegion.imageSubresource.layerCount = 1;
+		copyRegion.imageExtent = { static_cast<uint32_t>(materialTexture.Width), static_cast<uint32_t>(materialTexture.Height), 1 };
+		vkCmdCopyBufferToImage(commandBuffer, stagingBuffer.GetVkBuffer(), vulkanMaterialTexture.Image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
 
-	VkSubmitInfo submitInfo = {};
-	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &commandBuffer;
-	vkQueueSubmit(vulkanDevice->GetVkGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE);
-	vkQueueWaitIdle(vulkanDevice->GetVkGraphicsQueue());
-	vkFreeCommandBuffers(vulkanDevice->GetVkDevice(), vulkanDevice->GetVkCommandPool(), 1, &commandBuffer);
+		VkImageMemoryBarrier toShaderReadBarrier = {};
+		toShaderReadBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		toShaderReadBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		toShaderReadBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		toShaderReadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		toShaderReadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		toShaderReadBarrier.image = vulkanMaterialTexture.Image;
+		toShaderReadBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		toShaderReadBarrier.subresourceRange.baseMipLevel = 0;
+		toShaderReadBarrier.subresourceRange.levelCount = 1;
+		toShaderReadBarrier.subresourceRange.baseArrayLayer = 0;
+		toShaderReadBarrier.subresourceRange.layerCount = 1;
+		toShaderReadBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		toShaderReadBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toShaderReadBarrier);
 
-	VkImageViewCreateInfo imageViewCreateInfo = {};
-	imageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	imageViewCreateInfo.image = m_VulkanTriangle.DiffuseImage;
-	imageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-	imageViewCreateInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
-	imageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	imageViewCreateInfo.subresourceRange.levelCount = 1;
-	imageViewCreateInfo.subresourceRange.layerCount = 1;
-	if (vkCreateImageView(vulkanDevice->GetVkDevice(), &imageViewCreateInfo, nullptr, &m_VulkanTriangle.DiffuseImageView) != VK_SUCCESS)
-	{
-		return false;
-	}
+		vkEndCommandBuffer(commandBuffer);
 
-	VkSamplerCreateInfo samplerCreateInfo = {};
-	samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-	samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
-	samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
-	samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-	samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-	samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-	samplerCreateInfo.maxAnisotropy = 1.0f;
-	samplerCreateInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
-	samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
-	samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-	if (vkCreateSampler(vulkanDevice->GetVkDevice(), &samplerCreateInfo, nullptr, &m_VulkanTriangle.DiffuseSampler) != VK_SUCCESS)
-	{
-		return false;
+		VkSubmitInfo submitInfo = {};
+		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &commandBuffer;
+		vkQueueSubmit(vulkanDevice->GetVkGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE);
+		vkQueueWaitIdle(vulkanDevice->GetVkGraphicsQueue());
+		vkFreeCommandBuffers(vulkanDevice->GetVkDevice(), vulkanDevice->GetVkCommandPool(), 1, &commandBuffer);
+
+		VkImageViewCreateInfo imageViewCreateInfo = {};
+		imageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		imageViewCreateInfo.image = vulkanMaterialTexture.Image;
+		imageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		imageViewCreateInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
+		imageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		imageViewCreateInfo.subresourceRange.levelCount = 1;
+		imageViewCreateInfo.subresourceRange.layerCount = 1;
+		if (vkCreateImageView(vulkanDevice->GetVkDevice(), &imageViewCreateInfo, nullptr, &vulkanMaterialTexture.ImageView) != VK_SUCCESS)
+		{
+			return false;
+		}
+
+		VkSamplerCreateInfo samplerCreateInfo = {};
+		samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+		samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
+		samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+		samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		samplerCreateInfo.maxAnisotropy = 1.0f;
+		samplerCreateInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+		samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
+		samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+		if (vkCreateSampler(vulkanDevice->GetVkDevice(), &samplerCreateInfo, nullptr, &vulkanMaterialTexture.Sampler) != VK_SUCCESS)
+		{
+			return false;
+		}
 	}
 
 	return true;
@@ -1106,43 +1140,46 @@ bool Engine::CreateTextureResources()
 
 void Engine::DestroyTextureResources()
 {
-	m_Dx12Triangle.DiffuseTexture.Reset();
-	m_Dx12Triangle.DiffuseTextureUpload.Reset();
 	m_Dx12Triangle.ShaderResourceHeap.Reset();
+	m_Dx12Triangle.MaterialTextures.clear();
 
 	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Device);
 	if (!vulkanDevice)
 	{
-		m_VulkanTriangle.DiffuseImage = VK_NULL_HANDLE;
-		m_VulkanTriangle.DiffuseImageMemory = VK_NULL_HANDLE;
-		m_VulkanTriangle.DiffuseImageView = VK_NULL_HANDLE;
-		m_VulkanTriangle.DiffuseSampler = VK_NULL_HANDLE;
+		m_VulkanTriangle.MaterialTextures.clear();
 		return;
 	}
 
-	if (m_VulkanTriangle.DiffuseSampler != VK_NULL_HANDLE)
+	// Vulkan material texture는 material 수만큼 생성되므로 sampler/image view/image/memory를 모두 순회하며 해제합니다.
+	// 이 정리는 파이프라인 정리와 분리되어 있어, 리사이즈 시 파이프라인만 재생성하고 텍스처는 재사용할 수 있습니다.
+	for (auto& materialTexture : m_VulkanTriangle.MaterialTextures)
 	{
-		vkDestroySampler(vulkanDevice->GetVkDevice(), m_VulkanTriangle.DiffuseSampler, nullptr);
-		m_VulkanTriangle.DiffuseSampler = VK_NULL_HANDLE;
+		if (materialTexture.Sampler != VK_NULL_HANDLE)
+		{
+			vkDestroySampler(vulkanDevice->GetVkDevice(), materialTexture.Sampler, nullptr);
+			materialTexture.Sampler = VK_NULL_HANDLE;
+		}
+
+		if (materialTexture.ImageView != VK_NULL_HANDLE)
+		{
+			vkDestroyImageView(vulkanDevice->GetVkDevice(), materialTexture.ImageView, nullptr);
+			materialTexture.ImageView = VK_NULL_HANDLE;
+		}
+
+		if (materialTexture.Image != VK_NULL_HANDLE)
+		{
+			vkDestroyImage(vulkanDevice->GetVkDevice(), materialTexture.Image, nullptr);
+			materialTexture.Image = VK_NULL_HANDLE;
+		}
+
+		if (materialTexture.ImageMemory != VK_NULL_HANDLE)
+		{
+			vkFreeMemory(vulkanDevice->GetVkDevice(), materialTexture.ImageMemory, nullptr);
+			materialTexture.ImageMemory = VK_NULL_HANDLE;
+		}
 	}
 
-	if (m_VulkanTriangle.DiffuseImageView != VK_NULL_HANDLE)
-	{
-		vkDestroyImageView(vulkanDevice->GetVkDevice(), m_VulkanTriangle.DiffuseImageView, nullptr);
-		m_VulkanTriangle.DiffuseImageView = VK_NULL_HANDLE;
-	}
-
-	if (m_VulkanTriangle.DiffuseImage != VK_NULL_HANDLE)
-	{
-		vkDestroyImage(vulkanDevice->GetVkDevice(), m_VulkanTriangle.DiffuseImage, nullptr);
-		m_VulkanTriangle.DiffuseImage = VK_NULL_HANDLE;
-	}
-
-	if (m_VulkanTriangle.DiffuseImageMemory != VK_NULL_HANDLE)
-	{
-		vkFreeMemory(vulkanDevice->GetVkDevice(), m_VulkanTriangle.DiffuseImageMemory, nullptr);
-		m_VulkanTriangle.DiffuseImageMemory = VK_NULL_HANDLE;
-	}
+	m_VulkanTriangle.MaterialTextures.clear();
 }
 
 bool Engine::CreateDx12TriangleResources()
@@ -1220,8 +1257,9 @@ bool Engine::CreateDx12TriangleResources()
 	psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
 	psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
 	psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-	psoDesc.DepthStencilState.DepthEnable = FALSE;
-	psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+	psoDesc.DepthStencilState.DepthEnable = TRUE;
+	psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+	psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
 	psoDesc.DepthStencilState.StencilEnable = FALSE;
 	psoDesc.InputLayout = { inputLayout, _countof(inputLayout) };
 	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
@@ -1243,22 +1281,42 @@ void Engine::DrawDx12Triangle()
 {
 	auto native = static_cast<ID3D12GraphicsCommandList*>(m_CmdList->GetNativeResource());
 	auto cameraResource = m_CameraBuffer ? static_cast<ID3D12Resource*>(m_CameraBuffer->GetNativeResource()) : nullptr;
-	if (!native || !cameraResource || !m_Dx12Triangle.PipelineState || !m_Dx12Triangle.RootSignature)
+	auto dx12Device = dynamic_cast<DX12Device*>(m_Device);
+	if (!native || !cameraResource || !dx12Device || !m_Dx12Triangle.PipelineState || !m_Dx12Triangle.RootSignature)
 	{
 		return;
 	}
 
 	native->SetGraphicsRootSignature(m_Dx12Triangle.RootSignature.Get());
 	native->SetGraphicsRootConstantBufferView(0, cameraResource->GetGPUVirtualAddress());
-	if (m_Dx12Triangle.ShaderResourceHeap)
+	if (!m_Dx12Triangle.ShaderResourceHeap || m_Dx12Triangle.MaterialTextures.empty())
 	{
-		ID3D12DescriptorHeap* descriptorHeaps[] = { m_Dx12Triangle.ShaderResourceHeap.Get() };
-		native->SetDescriptorHeaps(1, descriptorHeaps);
-		native->SetGraphicsRootDescriptorTable(1, m_Dx12Triangle.ShaderResourceHeap->GetGPUDescriptorHandleForHeapStart());
+		return;
 	}
+
+	ID3D12DescriptorHeap* descriptorHeaps[] = { m_Dx12Triangle.ShaderResourceHeap.Get() };
+	native->SetDescriptorHeaps(1, descriptorHeaps);
 	native->SetPipelineState(m_Dx12Triangle.PipelineState.Get());
 	native->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-	m_CmdList->DrawIndexedInstanced(static_cast<uint32_t>(m_StaticMeshAsset ? m_StaticMeshAsset->Indices.size() : 0), 1, 0, 0, 0);
+
+	const UINT descriptorSize = dx12Device->GetD3DDevice()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	const D3D12_GPU_DESCRIPTOR_HANDLE baseHandle = m_Dx12Triangle.ShaderResourceHeap->GetGPUDescriptorHandleForHeapStart();
+
+	if (m_StaticMeshAsset->Submeshes.empty())
+	{
+		native->SetGraphicsRootDescriptorTable(1, baseHandle);
+		m_CmdList->DrawIndexedInstanced(static_cast<uint32_t>(m_StaticMeshAsset ? m_StaticMeshAsset->Indices.size() : 0), 1, 0, 0, 0);
+		return;
+	}
+
+	for (const auto& submesh : m_StaticMeshAsset->Submeshes)
+	{
+		const size_t materialIndex = submesh.MaterialIndex < m_Dx12Triangle.MaterialTextures.size() ? submesh.MaterialIndex : 0;
+		D3D12_GPU_DESCRIPTOR_HANDLE materialHandle = baseHandle;
+		materialHandle.ptr += static_cast<SIZE_T>(descriptorSize) * materialIndex;
+		native->SetGraphicsRootDescriptorTable(1, materialHandle);
+		m_CmdList->DrawIndexedInstanced(submesh.IndexCount, 1, submesh.IndexOffset, 0, 0);
+	}
 }
 
 bool Engine::CreateCameraBuffer()
@@ -1288,6 +1346,7 @@ void Engine::UpdateCameraBuffer()
 	DirectX::XMStoreFloat4x4(&cameraConstants.ViewProjection, m_Camera.GetViewProjectionMatrix());
 	const auto position = m_Camera.GetPosition();
 	cameraConstants.CameraPosition = { position.x, position.y, position.z, 1.0f };
+	cameraConstants.DebugOptions = { m_IsUvDebugViewEnabled ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
 
 	void* mappedData = nullptr;
 	m_CameraBuffer->Map(&mappedData);
@@ -1434,7 +1493,7 @@ bool Engine::CreateVulkanTriangleResources()
 		.binding = 0,
 		.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
 		.descriptorCount = 1,
-		.stageFlags = VK_SHADER_STAGE_VERTEX_BIT
+		.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
 	};
 	// Vulkan 경로는 diffuse texture를 combined image sampler로 fragment shader에 바인딩합니다.
 	const VkDescriptorSetLayoutBinding textureBinding = {
@@ -1456,19 +1515,21 @@ bool Engine::CreateVulkanTriangleResources()
 		return false;
 	}
 
+	const uint32_t materialTextureCount = static_cast<uint32_t>((std::max)(static_cast<size_t>(1), m_VulkanTriangle.MaterialTextures.size()));
+
 	const VkDescriptorPoolSize descriptorPoolSize = {
 		.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-		.descriptorCount = 1
+		.descriptorCount = materialTextureCount
 	};
 	const VkDescriptorPoolSize textureDescriptorPoolSize = {
 		.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-		.descriptorCount = 1
+		.descriptorCount = materialTextureCount
 	};
 	const VkDescriptorPoolSize descriptorPoolSizes[] = { descriptorPoolSize, textureDescriptorPoolSize };
 
 	const VkDescriptorPoolCreateInfo descriptorPoolCreateInfo = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-		.maxSets = 1,
+		.maxSets = materialTextureCount,
 		.poolSizeCount = static_cast<uint32_t>(std::size(descriptorPoolSizes)),
 		.pPoolSizes = descriptorPoolSizes
 	};
@@ -1478,14 +1539,16 @@ bool Engine::CreateVulkanTriangleResources()
 		return false;
 	}
 
+	std::vector<VkDescriptorSetLayout> descriptorSetLayouts(materialTextureCount, m_VulkanTriangle.DescriptorSetLayout);
 	const VkDescriptorSetAllocateInfo descriptorSetAllocateInfo = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
 		.descriptorPool = m_VulkanTriangle.DescriptorPool,
-		.descriptorSetCount = 1,
-		.pSetLayouts = &m_VulkanTriangle.DescriptorSetLayout
+		.descriptorSetCount = materialTextureCount,
+		.pSetLayouts = descriptorSetLayouts.data()
 	};
+	m_VulkanTriangle.DescriptorSets.resize(materialTextureCount);
 
-	if (vkAllocateDescriptorSets(vulkanDevice->GetVkDevice(), &descriptorSetAllocateInfo, &m_VulkanTriangle.DescriptorSet) != VK_SUCCESS)
+	if (vkAllocateDescriptorSets(vulkanDevice->GetVkDevice(), &descriptorSetAllocateInfo, m_VulkanTriangle.DescriptorSets.data()) != VK_SUCCESS)
 	{
 		return false;
 	}
@@ -1495,32 +1558,37 @@ bool Engine::CreateVulkanTriangleResources()
 		.offset = 0,
 		.range = sizeof(CameraConstants)
 	};
-	// Vulkan 텍스처 샘플링은 shader-read-only layout의 image view와 sampler를 descriptor에 함께 기록합니다.
-	const VkDescriptorImageInfo textureImageInfo = {
-		.sampler = m_VulkanTriangle.DiffuseSampler,
-		.imageView = m_VulkanTriangle.DiffuseImageView,
-		.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-	};
+	// Vulkan 경로는 material 수만큼 descriptor set을 만들고, 각 set에 동일한 camera buffer와 material별 texture를 기록합니다.
+	// 이렇게 해 두면 draw 시 submesh.MaterialIndex에 맞는 descriptor set 하나만 다시 바인딩하면 됩니다.
+	for (uint32_t materialIndex = 0; materialIndex < materialTextureCount; ++materialIndex)
+	{
+		const auto& materialTexture = m_VulkanTriangle.MaterialTextures[materialIndex];
+		const VkDescriptorImageInfo textureImageInfo = {
+			.sampler = materialTexture.Sampler,
+			.imageView = materialTexture.ImageView,
+			.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+		};
 
-	const VkWriteDescriptorSet writeDescriptorSet = {
-		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-		.dstSet = m_VulkanTriangle.DescriptorSet,
-		.dstBinding = 0,
-		.descriptorCount = 1,
-		.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-		.pBufferInfo = &cameraBufferInfo
-	};
-	const VkWriteDescriptorSet textureWriteDescriptorSet = {
-		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-		.dstSet = m_VulkanTriangle.DescriptorSet,
-		.dstBinding = 1,
-		.descriptorCount = 1,
-		.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-		.pImageInfo = &textureImageInfo
-	};
-	const VkWriteDescriptorSet writeDescriptorSets[] = { writeDescriptorSet, textureWriteDescriptorSet };
+		const VkWriteDescriptorSet writeDescriptorSet = {
+			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.dstSet = m_VulkanTriangle.DescriptorSets[materialIndex],
+			.dstBinding = 0,
+			.descriptorCount = 1,
+			.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+			.pBufferInfo = &cameraBufferInfo
+		};
+		const VkWriteDescriptorSet textureWriteDescriptorSet = {
+			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.dstSet = m_VulkanTriangle.DescriptorSets[materialIndex],
+			.dstBinding = 1,
+			.descriptorCount = 1,
+			.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			.pImageInfo = &textureImageInfo
+		};
+		const VkWriteDescriptorSet writeDescriptorSets[] = { writeDescriptorSet, textureWriteDescriptorSet };
 
-	vkUpdateDescriptorSets(vulkanDevice->GetVkDevice(), static_cast<uint32_t>(std::size(writeDescriptorSets)), writeDescriptorSets, 0, nullptr);
+		vkUpdateDescriptorSets(vulkanDevice->GetVkDevice(), static_cast<uint32_t>(std::size(writeDescriptorSets)), writeDescriptorSets, 0, nullptr);
+	}
 
 	const VkPipelineShaderStageCreateInfo shaderStages[2] = {
 		{
@@ -1624,8 +1692,10 @@ bool Engine::CreateVulkanTriangleResources()
 
 	const VkPipelineDepthStencilStateCreateInfo depthStencil = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-		.depthTestEnable = VK_FALSE,
-		.depthWriteEnable = VK_FALSE,
+		// Vulkan 경로도 DX12와 동일하게 depth test/write를 켜서
+		// 카드형 메시나 겹치는 삼각형이 draw 순서가 아니라 깊이값 기준으로 올바르게 가려지게 합니다.
+		.depthTestEnable = VK_TRUE,
+		.depthWriteEnable = VK_TRUE,
 		.depthCompareOp = VK_COMPARE_OP_LESS
 	};
 
@@ -1671,17 +1741,11 @@ void Engine::DestroyVulkanTriangleResources()
 	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Device);
 	if (!vulkanDevice)
 	{
-		const VkImage savedDiffuseImage = m_VulkanTriangle.DiffuseImage;
-		const VkDeviceMemory savedDiffuseImageMemory = m_VulkanTriangle.DiffuseImageMemory;
-		const VkImageView savedDiffuseImageView = m_VulkanTriangle.DiffuseImageView;
-		const VkSampler savedDiffuseSampler = m_VulkanTriangle.DiffuseSampler;
+		auto savedMaterialTextures = std::move(m_VulkanTriangle.MaterialTextures);
 
 		m_VulkanTriangle = {};
 
-		m_VulkanTriangle.DiffuseImage = savedDiffuseImage;
-		m_VulkanTriangle.DiffuseImageMemory = savedDiffuseImageMemory;
-		m_VulkanTriangle.DiffuseImageView = savedDiffuseImageView;
-		m_VulkanTriangle.DiffuseSampler = savedDiffuseSampler;
+		m_VulkanTriangle.MaterialTextures = std::move(savedMaterialTextures);
 		return;
 	}
 
@@ -1716,19 +1780,13 @@ void Engine::DestroyVulkanTriangleResources()
 	}
 
 	// 파이프라인 관련 핸들만 초기화합니다.
-	// 텍스처 핸들(DiffuseImage/Memory/View/Sampler)은 DestroyTextureResources()가 담당하므로
-	// 여기서 보존해야 리사이즈 시 descriptor set 재생성이 정상 동작합니다.
-	const VkImage savedDiffuseImage = m_VulkanTriangle.DiffuseImage;
-	const VkDeviceMemory savedDiffuseImageMemory = m_VulkanTriangle.DiffuseImageMemory;
-	const VkImageView savedDiffuseImageView = m_VulkanTriangle.DiffuseImageView;
-	const VkSampler savedDiffuseSampler = m_VulkanTriangle.DiffuseSampler;
+	// Vulkan material texture는 DestroyTextureResources()가 담당하므로, 리사이즈 중에는 벡터를 보존해야
+	// descriptor set과 pipeline만 재생성하면서 기존 텍스처를 다시 사용할 수 있습니다.
+	auto savedMaterialTextures = std::move(m_VulkanTriangle.MaterialTextures);
 
 	m_VulkanTriangle = {};
 
-	m_VulkanTriangle.DiffuseImage = savedDiffuseImage;
-	m_VulkanTriangle.DiffuseImageMemory = savedDiffuseImageMemory;
-	m_VulkanTriangle.DiffuseImageView = savedDiffuseImageView;
-	m_VulkanTriangle.DiffuseSampler = savedDiffuseSampler;
+	m_VulkanTriangle.MaterialTextures = std::move(savedMaterialTextures);
 }
 
 void Engine::DrawVulkanTriangle()
@@ -1744,20 +1802,49 @@ void Engine::DrawVulkanTriangle()
 		return;
 	}
 
+	if (m_VulkanTriangle.DescriptorSets.empty())
+	{
+		return;
+	}
+
 	// Vulkan은 현재 열린 render pass 안에서 그래픽 파이프라인을 바인딩하고 draw를 기록합니다.
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_VulkanTriangle.Pipeline);
-	// Vulkan 경로는 descriptor set으로 카메라 uniform buffer와 diffuse texture sampler를 바인딩합니다.
-	vkCmdBindDescriptorSets(
-		commandBuffer,
-		VK_PIPELINE_BIND_POINT_GRAPHICS,
-		m_VulkanTriangle.PipelineLayout,
-		0,
-		1,
-		&m_VulkanTriangle.DescriptorSet,
-		0,
-		nullptr);
-	// Vulkan 경로도 DX12와 동일하게 인덱스 버퍼를 사용해 전체 메시를 그립니다.
-	m_CmdList->DrawIndexedInstanced(static_cast<uint32_t>(m_StaticMeshAsset ? m_StaticMeshAsset->Indices.size() : 0), 1, 0, 0, 0);
+
+	if (m_StaticMeshAsset->Submeshes.empty())
+	{
+		// Vulkan fallback 경로에서는 첫 번째 material descriptor set을 사용해 전체 메시를 그립니다.
+		const VkDescriptorSet descriptorSet = m_VulkanTriangle.DescriptorSets.front();
+		vkCmdBindDescriptorSets(
+			commandBuffer,
+			VK_PIPELINE_BIND_POINT_GRAPHICS,
+			m_VulkanTriangle.PipelineLayout,
+			0,
+			1,
+			&descriptorSet,
+			0,
+			nullptr);
+		m_CmdList->DrawIndexedInstanced(static_cast<uint32_t>(m_StaticMeshAsset->Indices.size()), 1, 0, 0, 0);
+		return;
+	}
+
+	for (const auto& submesh : m_StaticMeshAsset->Submeshes)
+	{
+		const size_t materialIndex = submesh.MaterialIndex < m_VulkanTriangle.DescriptorSets.size() ? submesh.MaterialIndex : 0;
+		const VkDescriptorSet descriptorSet = m_VulkanTriangle.DescriptorSets[materialIndex];
+
+		// Vulkan 경로는 submesh.MaterialIndex에 대응하는 descriptor set을 바인딩해 material별 texture를 선택합니다.
+		// 그런 다음 해당 submesh의 index 범위만 DrawIndexedInstanced로 기록해 멀티 머티리얼 메시를 올바르게 렌더링합니다.
+		vkCmdBindDescriptorSets(
+			commandBuffer,
+			VK_PIPELINE_BIND_POINT_GRAPHICS,
+			m_VulkanTriangle.PipelineLayout,
+			0,
+			1,
+			&descriptorSet,
+			0,
+			nullptr);
+		m_CmdList->DrawIndexedInstanced(submesh.IndexCount, 1, submesh.IndexOffset, 0, 0);
+	}
 }
 
 bool Engine::CreateTriangleVertexBuffer()
@@ -1827,6 +1914,8 @@ void Engine::UpdateRendererMenuState()
 		MF_BYCOMMAND | (m_CurrentApi == GraphicsAPI::DirectX12 ? MF_CHECKED : MF_UNCHECKED));
 	CheckMenuItem(menu, IDM_RENDERER_VULKAN, 
 		MF_BYCOMMAND | (m_CurrentApi == GraphicsAPI::Vulkan ? MF_CHECKED : MF_UNCHECKED));
+	CheckMenuItem(menu, IDM_VIEW_UV_DEBUG,
+		MF_BYCOMMAND | (m_IsUvDebugViewEnabled ? MF_CHECKED : MF_UNCHECKED));
 	DrawMenuBar(m_hMainWnd);
 }
 
@@ -1834,7 +1923,12 @@ void Engine::ResetFpsCounter()
 {
 	m_FrameCount = 0;
 	m_LastFpsUpdate = std::chrono::steady_clock::now();
-	SetWindowTextW(m_hMainWnd, m_WindowTitleBase.c_str());
+	std::wstring title = m_WindowTitleBase;
+	if (m_IsUvDebugViewEnabled)
+	{
+		title.append(L" [UV Debug]");
+	}
+	SetWindowTextW(m_hMainWnd, title.c_str());
 }
 
 void Engine::UpdateWindowTitleWithFps()
@@ -1851,7 +1945,7 @@ void Engine::UpdateWindowTitleWithFps()
 
 	const double fps = static_cast<double>(m_FrameCount) / elapsed.count();
 	wchar_t titleBuffer[256] = {};
-	swprintf_s(titleBuffer, L"%s | FPS: %.1f", m_WindowTitleBase.c_str(), fps);
+	swprintf_s(titleBuffer, L"%s%s | FPS: %.1f", m_WindowTitleBase.c_str(), m_IsUvDebugViewEnabled ? L" [UV Debug]" : L"", fps);
 	SetWindowTextW(m_hMainWnd, titleBuffer);
 
 	m_FrameCount = 0;
