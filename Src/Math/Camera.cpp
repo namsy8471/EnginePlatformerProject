@@ -1,6 +1,7 @@
 #include "Camera.h"
 #include "Input/InputSystem.h"
 #include <algorithm>
+#include <cmath>
 
 Camera::Camera()
 {
@@ -12,13 +13,13 @@ Camera::Camera()
 
 void Camera::SetPosition(float x, float y, float z) noexcept
 {
-	m_Position = { x, y, z };
+	m_Transform.Translation = { x, y, z };
 	m_ViewDirty = true;
 }
 
 void Camera::SetPosition(const XMFLOAT3& position) noexcept
 {
-	m_Position = position;
+	m_Transform.Translation = position;
 	m_ViewDirty = true;
 }
 
@@ -29,31 +30,36 @@ void Camera::SetLens(float fovY, float aspect, float nearZ, float farZ) noexcept
 	m_NearZ = nearZ;
 	m_FarZ = farZ;
 
-	const XMMATRIX projection = XMMatrixPerspectiveFovLH(fovY, aspect, nearZ, farZ);
-	XMStoreFloat4x4(&m_Projection, projection);
+	Math::Store(m_Projection, XMMatrixPerspectiveFovLH(fovY, aspect, nearZ, farZ));
 }
 
 void Camera::SetRotation(float pitch, float yaw) noexcept
 {
 	m_Pitch = std::clamp(pitch, -XM_PIDIV2 + 0.01f, XM_PIDIV2 - 0.01f);
 	m_Yaw = yaw;
+	m_Transform.Rotation = Math::Transform::FromEuler(Math::ZeroVector3(), m_Pitch, m_Yaw, 0.0f).Rotation;
 	m_ViewDirty = true;
 }
 
 void Camera::LookAt(const XMFLOAT3& eye, const XMFLOAT3& target, const XMFLOAT3& up) noexcept
 {
-	const XMVECTOR pos = XMLoadFloat3(&eye);
-	const XMVECTOR targetPos = XMLoadFloat3(&target);
-	const XMVECTOR upVec = XMLoadFloat3(&up);
+	const XMVECTOR pos = Math::Load(eye);
+	const XMVECTOR targetPos = Math::Load(target);
+	const XMVECTOR upVec = Math::Load(up);
 
 	const XMVECTOR forward = XMVector3Normalize(targetPos - pos);
 	const XMVECTOR right = XMVector3Normalize(XMVector3Cross(upVec, forward));
 	const XMVECTOR cameraUp = XMVector3Cross(forward, right);
 
-	XMStoreFloat3(&m_Position, pos);
-	XMStoreFloat3(&m_Forward, forward);
-	XMStoreFloat3(&m_Right, right);
-	XMStoreFloat3(&m_Up, cameraUp);
+	m_Transform.Translation = eye;
+	DirectX::XMFLOAT3 forwardFloat = {};
+	Math::Store(forwardFloat, forward);
+	m_Pitch = std::clamp(std::asinf(forwardFloat.y), -XM_PIDIV2 + 0.01f, XM_PIDIV2 - 0.01f);
+	m_Yaw = std::atan2f(forwardFloat.x, forwardFloat.z);
+	m_Transform.Rotation = Math::Transform::FromEuler(Math::ZeroVector3(), m_Pitch, m_Yaw, 0.0f).Rotation;
+	Math::Store(m_Forward, forward);
+	Math::Store(m_Right, right);
+	Math::Store(m_Up, cameraUp);
 
 	m_ViewDirty = true;
 	UpdateViewMatrix();
@@ -61,28 +67,28 @@ void Camera::LookAt(const XMFLOAT3& eye, const XMFLOAT3& target, const XMFLOAT3&
 
 void Camera::Walk(float distance) noexcept
 {
-	const XMVECTOR forward = XMLoadFloat3(&m_Forward);
-	const XMVECTOR position = XMLoadFloat3(&m_Position);
+	const XMVECTOR forward = Math::Load(m_Forward);
+	const XMVECTOR position = Math::Load(m_Transform.Translation);
 	const XMVECTOR newPosition = position + forward * distance;
-	XMStoreFloat3(&m_Position, newPosition);
+	Math::Store(m_Transform.Translation, newPosition);
 	m_ViewDirty = true;
 }
 
 void Camera::Strafe(float distance) noexcept
 {
-	const XMVECTOR right = XMLoadFloat3(&m_Right);
-	const XMVECTOR position = XMLoadFloat3(&m_Position);
+	const XMVECTOR right = Math::Load(m_Right);
+	const XMVECTOR position = Math::Load(m_Transform.Translation);
 	const XMVECTOR newPosition = position + right * distance;
-	XMStoreFloat3(&m_Position, newPosition);
+	Math::Store(m_Transform.Translation, newPosition);
 	m_ViewDirty = true;
 }
 
 void Camera::Rise(float distance) noexcept
 {
-	const XMVECTOR up = XMLoadFloat3(&m_Up);
-	const XMVECTOR position = XMLoadFloat3(&m_Position);
+	const XMVECTOR up = Math::Load(m_Up);
+	const XMVECTOR position = Math::Load(m_Transform.Translation);
 	const XMVECTOR newPosition = position + up * distance;
-	XMStoreFloat3(&m_Position, newPosition);
+	Math::Store(m_Transform.Translation, newPosition);
 	m_ViewDirty = true;
 }
 
@@ -131,7 +137,9 @@ void Camera::Update(float deltaTime, HWND hwnd)
 
 void Camera::UpdateViewMatrix() noexcept
 {
-	const XMMATRIX rotation = XMMatrixRotationRollPitchYaw(m_Pitch, m_Yaw, 0.0f);
+	const Math::Transform rotationTransform = Math::Transform::FromEuler(Math::ZeroVector3(), m_Pitch, m_Yaw, 0.0f);
+	m_Transform.Rotation = rotationTransform.Rotation;
+	const XMMATRIX rotation = rotationTransform.ToXmMatrix();
 
 	const XMVECTOR defaultForward = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
 	const XMVECTOR defaultRight = XMVectorSet(1.0f, 0.0f, 0.0f, 0.0f);
@@ -140,26 +148,25 @@ void Camera::UpdateViewMatrix() noexcept
 	const XMVECTOR forward = XMVector3TransformNormal(defaultForward, rotation);
 	const XMVECTOR right = XMVector3TransformNormal(defaultRight, rotation);
 	const XMVECTOR up = XMVector3TransformNormal(defaultUp, rotation);
-	const XMVECTOR position = XMLoadFloat3(&m_Position);
+	const XMVECTOR position = Math::Load(m_Transform.Translation);
 	const XMVECTOR target = position + forward;
 
-	XMStoreFloat3(&m_Forward, forward);
-	XMStoreFloat3(&m_Right, right);
-	XMStoreFloat3(&m_Up, up);
+	Math::Store(m_Forward, forward);
+	Math::Store(m_Right, right);
+	Math::Store(m_Up, up);
 
-	const XMMATRIX view = XMMatrixLookAtLH(position, target, up);
-	XMStoreFloat4x4(&m_View, view);
+	Math::Store(m_View, XMMatrixLookAtLH(position, target, up));
 	m_ViewDirty = false;
 }
 
 XMMATRIX Camera::GetViewMatrix() const noexcept
 {
-	return XMLoadFloat4x4(&m_View);
+	return Math::Load(m_View);
 }
 
 XMMATRIX Camera::GetProjectionMatrix() const noexcept
 {
-	return XMLoadFloat4x4(&m_Projection);
+	return Math::Load(m_Projection);
 }
 
 XMMATRIX Camera::GetViewProjectionMatrix() const noexcept
@@ -179,7 +186,5 @@ XMFLOAT4X4 Camera::GetProjectionMatrix4x4() const noexcept
 
 XMFLOAT4X4 Camera::GetViewProjectionMatrix4x4() const noexcept
 {
-	XMFLOAT4X4 result;
-	XMStoreFloat4x4(&result, GetViewProjectionMatrix());
-	return result;
+	return Math::ToFloat4x4(GetViewProjectionMatrix());
 }

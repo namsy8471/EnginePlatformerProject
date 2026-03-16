@@ -28,8 +28,8 @@
       <!-- 실제로 선택된 vcpkg 설치 경로의 라이브러리만 연결합니다. -->
       <AdditionalLibraryDirectories Condition="'$(Configuration)' == 'Debug'">$(ResolvedVcpkgInstalledDir)\debug\lib;$(ResolvedVcpkgInstalledDir)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalLibraryDirectories Condition="'$(Configuration)' != 'Debug'">$(ResolvedVcpkgInstalledDir)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies Condition="'$(Configuration)' == 'Debug'">$(AssimpDebugLib);glslangd.lib;SPIRVd.lib;glslang-default-resource-limitsd.lib;MachineIndependentd.lib;GenericCodeGend.lib;OSDependentd.lib;vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalDependencies Condition="'$(Configuration)' != 'Debug'">$(AssimpReleaseLib);glslang.lib;SPIRV.lib;glslang-default-resource-limits.lib;MachineIndependent.lib;GenericCodeGen.lib;OSDependent.lib;vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies Condition="'$(Configuration)' == 'Debug'">$(AssimpDebugLib);glslangd.lib;SPIRVd.lib;glslang-default-resource-limitsd.lib;MachineIndependentd.lib;GenericCodeGend.lib;OSDependentd.lib;imguid.lib;vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies Condition="'$(Configuration)' != 'Debug'">$(AssimpReleaseLib);glslang.lib;SPIRV.lib;glslang-default-resource-limits.lib;MachineIndependent.lib;GenericCodeGen.lib;OSDependent.lib;imgui.lib;vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 </Project>

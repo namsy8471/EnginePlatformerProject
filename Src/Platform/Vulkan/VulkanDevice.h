@@ -33,10 +33,13 @@ public:
 	void* GetDepthStencilView() override;
 
 	// Vulkan 전용 렌더링 확장에서 사용할 최소 getter들입니다.
+	VkInstance GetVkInstance() const { return m_instance; }
 	VkDevice GetVkDevice() const { return m_device; }
 	VkPhysicalDevice GetVkPhysicalDevice() const { return m_physicalDevice; }
 	VkRenderPass GetVkRenderPass() const { return m_renderPass; }
 	VkExtent2D GetVkSwapchainExtent() const { return m_swapchainExtent; }
+	uint32_t GetVkGraphicsQueueFamilyIndex() const { return m_graphicsQueueFamilyIndex; }
+	uint32_t GetVkSwapchainImageCount() const { return static_cast<uint32_t>(m_swapchainImages.size()); }
 	// Vulkan 텍스처 업로드 시 일회성 복사 커맨드를 제출하려면 graphics queue와 command pool 접근이 필요합니다.
 	VkQueue GetVkGraphicsQueue() const { return m_graphicsQueue; }
 	VkCommandPool GetVkCommandPool() const { return m_commandPool; }

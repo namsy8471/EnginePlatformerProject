@@ -1,7 +1,7 @@
 #pragma once
 
 #include "GameApp.h"
-#include "Asset\StaticMesh.h"
+#include "Scene.h"
 #include "RHI/IGraphicsDevice.h"
 #include "RHI/ICommandList.h"
 #include "RHI/IBuffer.h"
@@ -9,9 +9,10 @@
 #include "Math/Camera.h"
 
 #include <chrono>
-#include <filesystem>
-#include <memory>
+#include <cstddef>
 #include <string>
+#include <string_view>
+#include <unordered_set>
 #include <vector>
 #include <wrl.h>
 
@@ -34,6 +35,13 @@ using VkDeviceMemory = struct VkDeviceMemory_T*;
 class Engine : public GameApp
 {
 public:
+	enum class RenderMode
+	{
+		Forward,
+		Deferred,
+		ForwardPlus
+	};
+
 	Engine(HINSTANCE hInstance);
 	~Engine() override;
 
@@ -48,6 +56,7 @@ protected:
 private:
 	// Graphics API 전환 및 관리
 	[[nodiscard]] bool SwitchGraphicsAPI(GraphicsAPI api);
+	void SwitchRenderMode(RenderMode renderMode);
 	void ShutdownGraphics();
 
 	// 렌더 윈도우 관리 (DX12 flip-model과 Vulkan surface를 분리하기 위한 child HWND)
@@ -72,23 +81,33 @@ private:
 	[[nodiscard]] bool CreateCameraBuffer();
 	[[nodiscard]] bool LoadMaterialTextures();
 	[[nodiscard]] bool CreateTextureResources();
+	[[nodiscard]] bool CreateImGuiResources();
 	void DestroyTextureResources();
+	void DestroyImGuiResources();
 	void UpdateCameraBuffer();
+	void UpdateCameraBuffer(EntityId entityId);
+	void UploadEntityGeometry(EntityId entityId);
 	void UpdateAnimatedMesh(float deltaTime);
+	void UpdateObjectPicking();
+	[[nodiscard]] bool TryPickSpider(float mouseX, float mouseY) const;
+	[[nodiscard]] EntityId TryPickEntity(float mouseX, float mouseY) const;
+	void RenderImGui();
+	[[nodiscard]] EntityId CreateEntity(std::string_view name);
+	[[nodiscard]] TransformComponent* GetTransformComponent(EntityId entityId);
+	[[nodiscard]] const TransformComponent* GetTransformComponent(EntityId entityId) const;
+	[[nodiscard]] Asset::StaticMeshAsset* GetMeshAsset(EntityId entityId);
+	[[nodiscard]] const Asset::StaticMeshAsset* GetMeshAsset(EntityId entityId) const;
+	[[nodiscard]] std::vector<CpuMaterialTexture>* GetMaterialTextures(EntityId entityId);
+	[[nodiscard]] const std::vector<CpuMaterialTexture>* GetMaterialTextures(EntityId entityId) const;
+	[[nodiscard]] const std::string* GetEntityName(EntityId entityId) const;
+	[[nodiscard]] bool IsMaterialTransparent(EntityId entityId, size_t materialIndex) const;
+	void RebuildWindowTitleBase();
 
 	// UI 업데이트
 	void UpdateRendererMenuState();
 	void ResetFpsCounter();
 	void UpdateWindowTitleWithFps();
 
-private:
-	struct CpuMaterialTexture
-	{
-		std::filesystem::path Path;
-		std::vector<unsigned char> Pixels = { 255, 255, 255, 255 };
-		int Width = 1;
-		int Height = 1;
-	};
 
 	// 렌더링 리소스
 	IGraphicsDevice* m_Device = nullptr;
@@ -98,14 +117,17 @@ private:
 	IBuffer* m_CameraBuffer = nullptr;
 	HWND m_hRenderWnd = nullptr;
 	Camera m_Camera;
-	std::unique_ptr<Asset::StaticMeshAsset> m_StaticMeshAsset;
+	Scene m_Scene;
+	EntityId m_SpiderEntity = InvalidEntityId;
+	std::vector<EntityId> m_RenderEntities;
+	std::unordered_set<EntityId> m_TransparentEntities;
 	float m_AnimationTimeSeconds = 0.0f;
-	std::vector<CpuMaterialTexture> m_MaterialTextures;
-	bool m_IsUvDebugViewEnabled = false;
 
 	// 현재 API 상태
 	GraphicsAPI m_CurrentApi = GraphicsAPI::Vulkan;
-	std::wstring m_WindowTitleBase = L"EnginePlatformer - Vulkan";
+	RenderMode m_RenderMode = RenderMode::Forward;
+	std::wstring m_WindowTitleBase = L"EnginePlatformer - Vulkan - Forward";
+	std::vector<bool> m_PrimaryMaterialTransparency;
 
 	// FPS 카운팅
 	uint32_t m_FrameCount = 0;
@@ -123,9 +145,15 @@ private:
 
 		Microsoft::WRL::ComPtr<ID3D12RootSignature> RootSignature;
 		Microsoft::WRL::ComPtr<ID3D12PipelineState> PipelineState;
+		Microsoft::WRL::ComPtr<ID3D12PipelineState> TransparentPipelineState;
 		Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> ShaderResourceHeap;
 		std::vector<MaterialTexture> MaterialTextures;
 	} m_Dx12Triangle;
+
+	struct Dx12ImGuiResources
+	{
+		Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> ShaderResourceHeap;
+	} m_Dx12ImGui;
 
 	// Vulkan 전용 리소스
 	struct VulkanTriangleResources
@@ -146,6 +174,15 @@ private:
 		std::vector<MaterialTexture> MaterialTextures;
 		VkPipelineLayout PipelineLayout = nullptr;
 		VkPipeline Pipeline = nullptr;
+		VkPipeline TransparentPipeline = nullptr;
 		bool IsValid = false;
 	} m_VulkanTriangle;
+
+	struct VulkanImGuiResources
+	{
+		VkDescriptorPool DescriptorPool = nullptr;
+	} m_VulkanImGui;
+
+	bool m_ImGuiInitialized = false;
+	bool m_ShowImGuiDemoWindow = false;
 };

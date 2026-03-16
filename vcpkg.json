@@ -5,6 +5,15 @@
   "dependencies": [
     "assimp",
     "glslang",
+    {
+      "name": "imgui",
+      "features": [
+        "win32-binding",
+        "dx12-binding",
+        "vulkan-binding",
+        "docking-experimental"
+      ]
+    },
     "stb",
     "vulkan-headers",
     "vulkan-loader",

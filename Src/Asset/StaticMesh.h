@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Math/Transform.h"
+
 #include <DirectXMath.h>
 
 #include <array>
@@ -77,6 +79,7 @@ namespace Asset
 	{
 		std::string Name;
 		int32_t ParentIndex = -1;
+		Math::Transform LocalBindPose = Math::Transform::Identity();
 		DirectX::XMFLOAT4X4 LocalBindTransform = {
 			1.0f, 0.0f, 0.0f, 0.0f,
 			0.0f, 1.0f, 0.0f, 0.0f,

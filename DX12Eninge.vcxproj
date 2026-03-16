@@ -132,9 +132,17 @@
   <ItemGroup>
     <ClInclude Include="Src\Asset\AssimpModelLoader.h" />
     <ClInclude Include="Src\Asset\StaticMesh.h" />
+    <ClInclude Include="Src\EngineCore\AnimationSystem.h" />
     <ClInclude Include="Src\EngineCore\Engine.h" />
+    <ClInclude Include="Src\EngineCore\PickingSystem.h" />
+    <ClInclude Include="Src\EngineCore\RenderSystem.h" />
+    <ClInclude Include="Src\EngineCore\Scene.h" />
+    <ClInclude Include="Src\EngineCore\SceneLoader.h" />
+    <ClInclude Include="Src\EngineCore\TransformComponent.h" />
     <ClInclude Include="Src\Input\InputSystem.h" />
     <ClInclude Include="Src\Math\Camera.h" />
+    <ClInclude Include="Src\Math\MathHelpers.h" />
+    <ClInclude Include="Src\Math\Transform.h" />
     <ClInclude Include="Src\Platform\DirectX12\DX12Buffer.h" />
     <ClInclude Include="Src\Platform\DirectX12\DX12CommandList.h" />
     <ClInclude Include="Src\EngineCore\GameApp.h" />

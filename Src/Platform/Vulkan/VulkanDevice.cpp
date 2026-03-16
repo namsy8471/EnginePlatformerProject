@@ -1218,7 +1218,17 @@ VkSurfaceFormatKHR VulkanDevice::ChooseSurfaceFormat(const std::vector<VkSurface
 
 VkPresentModeKHR VulkanDevice::ChoosePresentMode(const std::vector<VkPresentModeKHR>& presentModes) const
 {
-	// MAILBOX는 저지연에 유리하므로 가능하면 우선 사용하고, 없으면 FIFO를 사용합니다.
+	// Vulkan에서 수직동기화를 끄려면 IMMEDIATE 모드를 우선 사용합니다.
+	// 플랫폼이 IMMEDIATE를 지원하지 않으면 MAILBOX, 마지막으로 FIFO 순서로 안전하게 폴백합니다.
+	for (VkPresentModeKHR presentMode : presentModes)
+	{
+		if (presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR)
+		{
+			return presentMode;
+		}
+	}
+
+	// IMMEDIATE 미지원 플랫폼에서는 MAILBOX를 우선 사용해 입력 지연을 줄입니다.
 	for (VkPresentModeKHR presentMode : presentModes)
 	{
 		if (presentMode == VK_PRESENT_MODE_MAILBOX_KHR)
@@ -1227,6 +1237,7 @@ VkPresentModeKHR VulkanDevice::ChoosePresentMode(const std::vector<VkPresentMode
 		}
 	}
 
+	// FIFO는 모든 플랫폼에서 보장되는 최종 폴백입니다.
 	return VK_PRESENT_MODE_FIFO_KHR;
 }
 

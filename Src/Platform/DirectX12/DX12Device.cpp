@@ -89,6 +89,15 @@ bool DX12Device::Init()
 		ThrowIfFailed(CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&m_dxgiFactory)));
 		LogDX12StageSuccess("DXGI factory created.");
 
+		// Windowed + Flip-model에서 실제 무제한 프레젠트를 하려면 tearing 지원 여부를 먼저 확인해야 합니다.
+		ComPtr<IDXGIFactory5> factory5;
+		BOOL allowTearing = FALSE;
+		if (SUCCEEDED(m_dxgiFactory.As(&factory5)) &&
+			SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allowTearing, sizeof(allowTearing))))
+		{
+			m_allowTearing = allowTearing == TRUE;
+		}
+
 		// 하드웨어 어댑터 검색
 		ComPtr<IDXGIAdapter1> hardwareAdapter;
 		GetHardwareAdapter(m_dxgiFactory.Get(), &hardwareAdapter);
@@ -136,6 +145,7 @@ bool DX12Device::Init()
 		swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
 		swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD; // Win10/11 표준
 		swapChainDesc.SampleDesc.Count = 1;
+		swapChainDesc.Flags = m_allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
 
 		// 스왑 체인 생성
 		ComPtr<IDXGISwapChain1> swapChain1;
@@ -271,7 +281,8 @@ IGpuResource* DX12Device::GetBackBufferResource()
 
 void DX12Device::Present()
 {
-	ThrowIfFailed(m_swapChain->Present(1, 0));
+	const UINT presentFlags = m_allowTearing ? DXGI_PRESENT_ALLOW_TEARING : 0;
+	ThrowIfFailed(m_swapChain->Present(0, presentFlags));
 }
 
 void DX12Device::Resize(int width, int height)

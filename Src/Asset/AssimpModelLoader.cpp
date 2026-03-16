@@ -59,6 +59,45 @@ namespace Asset
 			};
 		}
 
+		[[nodiscard]] std::string ToLowerInvariant(std::string value)
+		{
+			std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character)
+				{
+					return static_cast<char>(std::tolower(character));
+				});
+			return value;
+		}
+
+		[[nodiscard]] std::filesystem::path PreferLosslessTextureVariant(const std::filesystem::path& resolvedPath)
+		{
+			if (resolvedPath.empty())
+			{
+				return {};
+			}
+
+			const std::string extension = ToLowerInvariant(resolvedPath.extension().string());
+			if (extension == ".png" || extension == ".tga")
+			{
+				return resolvedPath;
+			}
+
+			auto pngPath = resolvedPath;
+			pngPath.replace_extension(".png");
+			if (std::filesystem::exists(pngPath))
+			{
+				return pngPath;
+			}
+
+			auto tgaPath = resolvedPath;
+			tgaPath.replace_extension(".tga");
+			if (std::filesystem::exists(tgaPath))
+			{
+				return tgaPath;
+			}
+
+			return resolvedPath;
+		}
+
 		[[nodiscard]] std::filesystem::path ResolveTexturePath(const aiMaterial& material, aiTextureType textureType, const std::filesystem::path& sourcePath)
 		{
 			aiString texturePath;
@@ -75,10 +114,10 @@ namespace Asset
 			const std::filesystem::path importedPath(texturePath.C_Str());
 			if (importedPath.is_absolute())
 			{
-				return importedPath;
+				return PreferLosslessTextureVariant(importedPath);
 			}
 
-			return sourcePath.parent_path() / importedPath;
+			return PreferLosslessTextureVariant(sourcePath.parent_path() / importedPath);
 		}
 
 		[[nodiscard]] LoadedTextureImage LoadEmbeddedTextureImage(const aiScene& scene, const aiMaterial& material, aiTextureType textureType)
@@ -134,19 +173,6 @@ namespace Asset
 			}
 
 			return image;
-		}
-
-		[[nodiscard]] int32_t FindPreferredUvChannel(const aiMesh& mesh) noexcept
-		{
-			for (uint32_t uvChannel = 0; uvChannel < AI_MAX_NUMBER_OF_TEXTURECOORDS; ++uvChannel)
-			{
-				if (mesh.HasTextureCoords(uvChannel))
-				{
-					return static_cast<int32_t>(uvChannel);
-				}
-			}
-
-			return -1;
 		}
 
 		[[nodiscard]] LoadedTextureImage LoadTextureImage(const std::filesystem::path& texturePath)
@@ -240,6 +266,7 @@ namespace Asset
 			runtimeNode.Name = node.mName.C_Str();
 			runtimeNode.ParentIndex = parentIndex;
 			runtimeNode.LocalBindTransform = ToMatrix(node.mTransformation);
+			runtimeNode.LocalBindPose = Math::Transform::FromMatrix(runtimeNode.LocalBindTransform);
 			meshAsset.NodeIndices[runtimeNode.Name] = nodeIndex;
 			meshAsset.Nodes.push_back(std::move(runtimeNode));
 
@@ -418,24 +445,11 @@ namespace Asset
 				submesh.MaterialIndex = mesh->mMaterialIndex;
 				submesh.Name = mesh->mName.C_Str();
 				submesh.NodeIndex = meshIndex < meshNodeIndices.size() ? meshNodeIndices[meshIndex] : 0;
-				const int32_t preferredUvChannel = FindPreferredUvChannel(*mesh);
-
-				std::string uvDiagnosticMessage = "mesh[";
-				uvDiagnosticMessage.append(std::to_string(meshIndex));
-				uvDiagnosticMessage.append("] name='");
-				uvDiagnosticMessage.append(submesh.Name);
-				uvDiagnosticMessage.append("' preferredUV=");
-				uvDiagnosticMessage.append(std::to_string(preferredUvChannel));
-				uvDiagnosticMessage.append(" hasUV0=");
-				uvDiagnosticMessage.append(mesh->HasTextureCoords(0) ? "true" : "false");
-				uvDiagnosticMessage.append(" hasUV1=");
-				uvDiagnosticMessage.append(mesh->HasTextureCoords(1) ? "true" : "false");
-				LogAssimpMessage(uvDiagnosticMessage);
 
 				meshAsset->Vertices.reserve(meshAsset->Vertices.size() + mesh->mNumVertices);
 				for (uint32_t vertexIndex = 0; vertexIndex < mesh->mNumVertices; ++vertexIndex)
 				{
-					StaticMeshVertex vertex = {};
+					StaticMeshVertex vertex;
 					vertex.Position = ToFloat3(mesh->mVertices[vertexIndex]);
 
 					if (mesh->HasNormals())
@@ -443,11 +457,11 @@ namespace Asset
 						vertex.Normal = ToFloat3(mesh->mNormals[vertexIndex]);
 					}
 
-					if (preferredUvChannel >= 0)
+					if (mesh->HasTextureCoords(0))
 					{
 						vertex.TexCoord = {
-							mesh->mTextureCoords[preferredUvChannel][vertexIndex].x,
-							mesh->mTextureCoords[preferredUvChannel][vertexIndex].y };
+							mesh->mTextureCoords[0][vertexIndex].x,
+							mesh->mTextureCoords[0][vertexIndex].y };
 					}
 
 					if (mesh->HasTangentsAndBitangents())

@@ -86,4 +86,5 @@ private:
 	HANDLE m_fenceEvent = nullptr;
 	uint64_t m_fenceValues[FrameCount] = {};
 	uint64_t m_frameIndex = 0;
+	bool m_allowTearing = false;
 };

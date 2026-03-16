@@ -1,7 +1,11 @@
 #include "Engine.h"
+#include "AnimationSystem.h"
 #include "Asset/AssimpModelLoader.h"
 #include "Input/InputSystem.h"
+#include "PickingSystem.h"
 #include "Resource.h"
+#include "RenderSystem.h"
+#include "SceneLoader.h"
 #include "Utilities/ShaderUtils.h"
 
 #include "Platform/DirectX12/DX12Buffer.h"
@@ -12,6 +16,10 @@
 
 #include <d3dcompiler.h>
 #include <glslang/Include/glslang_c_interface.h>
+#include <imgui.h>
+#include <imgui_impl_dx12.h>
+#include <imgui_impl_vulkan.h>
+#include <imgui_impl_win32.h>
 #include <stb_image.h>
 
 #include <array>
@@ -21,16 +29,24 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <memory>
 #include <span>
 #include <string_view>
 
 using Microsoft::WRL::ComPtr;
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 namespace
 {
 	// 렌더 윈도우 클래스 등록 및 관리
 	LRESULT CALLBACK RenderWindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	{
+		if (ImGui::GetCurrentContext() != nullptr && ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
+		{
+			return 1;
+		}
+
 		InputSystem::Get().ProcessMessage(msg, wParam, lParam);
 
 		if (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN)
@@ -88,13 +104,6 @@ namespace
 		float Color[4];
 	};
 
-	struct alignas(16) CameraConstants
-	{
-		DirectX::XMFLOAT4X4 ViewProjection = {};
-		DirectX::XMFLOAT4 CameraPosition = {};
-		DirectX::XMFLOAT4 DebugOptions = {};
-	};
-
 	constexpr std::array<TriangleVertex, 3> kDx12TriangleVertices = {{
 		{ { 0.0f, 0.5f },  { 1.0f, 0.0f, 0.0f, 1.0f } },
 		{ { 0.5f, -0.5f }, { 0.0f, 1.0f, 0.0f, 1.0f } },
@@ -136,6 +145,54 @@ namespace
 		}
 	}
 
+	[[nodiscard]] constexpr std::string_view RenderModeToString(Engine::RenderMode renderMode) noexcept
+	{
+		switch (renderMode)
+		{
+		case Engine::RenderMode::Forward:
+			return "Forward";
+		case Engine::RenderMode::Deferred:
+			return "Deferred";
+		case Engine::RenderMode::ForwardPlus:
+			return "Forward+";
+		default:
+			return "Unknown";
+		}
+	}
+
+	[[nodiscard]] constexpr std::wstring_view RenderModeToWideString(Engine::RenderMode renderMode) noexcept
+	{
+		switch (renderMode)
+		{
+		case Engine::RenderMode::Forward:
+			return L"Forward";
+		case Engine::RenderMode::Deferred:
+			return L"Deferred";
+		case Engine::RenderMode::ForwardPlus:
+			return L"Forward+";
+		default:
+			return L"Unknown";
+		}
+	}
+
+	[[nodiscard]] bool MaterialTextureHasTransparency(const CpuMaterialTexture& materialTexture)
+	{
+		if (materialTexture.Width <= 0 || materialTexture.Height <= 0)
+		{
+			return false;
+		}
+
+		for (size_t pixelOffset = 3; pixelOffset < materialTexture.Pixels.size(); pixelOffset += 4)
+		{
+			if (materialTexture.Pixels[pixelOffset] < 250)
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
 	void LogEngineTrace(std::string_view message)
 	{
 		constexpr std::string_view prefix = "[Engine][TRACE] ";
@@ -149,98 +206,11 @@ namespace
 		OutputDebugStringA(buffer.c_str());
 	}
 
-	[[nodiscard]] DirectX::XMMATRIX LoadMatrix(const DirectX::XMFLOAT4X4& matrix)
+	void CheckImGuiVulkanResult(VkResult result)
 	{
-		return DirectX::XMLoadFloat4x4(&matrix);
-	}
-
-	[[nodiscard]] DirectX::XMVECTOR InterpolateVectorKey(const std::vector<Asset::AnimationVectorKey>& keys, double timeTicks)
-	{
-		if (keys.empty())
+		if (result != VK_SUCCESS)
 		{
-			return DirectX::XMVectorZero();
-		}
-
-		if (keys.size() == 1 || timeTicks <= keys.front().TimeTicks)
-		{
-			return DirectX::XMLoadFloat3(&keys.front().Value);
-		}
-
-		for (size_t keyIndex = 0; keyIndex + 1 < keys.size(); ++keyIndex)
-		{
-			if (timeTicks < keys[keyIndex + 1].TimeTicks)
-			{
-				const double delta = keys[keyIndex + 1].TimeTicks - keys[keyIndex].TimeTicks;
-				const float factor = delta > 0.0 ? static_cast<float>((timeTicks - keys[keyIndex].TimeTicks) / delta) : 0.0f;
-				return DirectX::XMVectorLerp(
-					DirectX::XMLoadFloat3(&keys[keyIndex].Value),
-					DirectX::XMLoadFloat3(&keys[keyIndex + 1].Value),
-					factor);
-			}
-		}
-
-		return DirectX::XMLoadFloat3(&keys.back().Value);
-	}
-
-	[[nodiscard]] DirectX::XMVECTOR InterpolateQuaternionKey(const std::vector<Asset::AnimationQuaternionKey>& keys, double timeTicks)
-	{
-		if (keys.empty())
-		{
-			return DirectX::XMQuaternionIdentity();
-		}
-
-		if (keys.size() == 1 || timeTicks <= keys.front().TimeTicks)
-		{
-			return DirectX::XMLoadFloat4(&keys.front().Value);
-		}
-
-		for (size_t keyIndex = 0; keyIndex + 1 < keys.size(); ++keyIndex)
-		{
-			if (timeTicks < keys[keyIndex + 1].TimeTicks)
-			{
-				const double delta = keys[keyIndex + 1].TimeTicks - keys[keyIndex].TimeTicks;
-				const float factor = delta > 0.0 ? static_cast<float>((timeTicks - keys[keyIndex].TimeTicks) / delta) : 0.0f;
-				return DirectX::XMQuaternionSlerp(
-					DirectX::XMLoadFloat4(&keys[keyIndex].Value),
-					DirectX::XMLoadFloat4(&keys[keyIndex + 1].Value),
-					factor);
-			}
-		}
-
-		return DirectX::XMLoadFloat4(&keys.back().Value);
-	}
-
-	[[nodiscard]] DirectX::XMMATRIX BuildAnimatedLocalTransform(const Asset::SkeletonNode& node, const Asset::AnimationClip& clip, const Asset::StaticMeshAsset& meshAsset, double timeTicks)
-	{
-		auto channelIndex = clip.ChannelIndices.find(node.Name);
-		if (channelIndex == clip.ChannelIndices.end())
-		{
-			return LoadMatrix(node.LocalBindTransform);
-		}
-
-		const Asset::AnimationChannel& channel = clip.Channels[channelIndex->second];
-		const DirectX::XMVECTOR translation = channel.PositionKeys.empty()
-			? DirectX::XMVectorZero()
-			: InterpolateVectorKey(channel.PositionKeys, timeTicks);
-		const DirectX::XMVECTOR rotation = channel.RotationKeys.empty()
-			? DirectX::XMQuaternionIdentity()
-			: InterpolateQuaternionKey(channel.RotationKeys, timeTicks);
-		const DirectX::XMVECTOR scaling = channel.ScalingKeys.empty()
-			? DirectX::XMVectorSet(1.0f, 1.0f, 1.0f, 0.0f)
-			: InterpolateVectorKey(channel.ScalingKeys, timeTicks);
-
-		UNREFERENCED_PARAMETER(meshAsset);
-		return DirectX::XMMatrixScalingFromVector(scaling) *
-			DirectX::XMMatrixRotationQuaternion(rotation) *
-			DirectX::XMMatrixTranslationFromVector(translation);
-	}
-
-	void ComputeGlobalNodeTransforms(const Asset::StaticMeshAsset& meshAsset, const std::vector<DirectX::XMMATRIX>& localTransforms, uint32_t nodeIndex, const DirectX::XMMATRIX& parentTransform, std::vector<DirectX::XMMATRIX>& globalTransforms)
-	{
-		globalTransforms[nodeIndex] = localTransforms[nodeIndex] * parentTransform;
-		for (uint32_t childIndex : meshAsset.Nodes[nodeIndex].Children)
-		{
-			ComputeGlobalNodeTransforms(meshAsset, localTransforms, childIndex, globalTransforms[nodeIndex], globalTransforms);
+			throw std::runtime_error("ImGui Vulkan backend call failed.");
 		}
 	}
 }
@@ -254,6 +224,90 @@ Engine::~Engine()
 	ShutdownGraphics();
 	DestroyRenderWindow();
 	glslang_finalize_process();
+}
+
+EntityId Engine::CreateEntity(std::string_view name)
+{
+	return m_Scene.CreateEntity(name);
+}
+
+TransformComponent* Engine::GetTransformComponent(EntityId entityId)
+{
+	return m_Scene.GetTransformComponent(entityId);
+}
+
+const TransformComponent* Engine::GetTransformComponent(EntityId entityId) const
+{
+	return m_Scene.GetTransformComponent(entityId);
+}
+
+Asset::StaticMeshAsset* Engine::GetMeshAsset(EntityId entityId)
+{
+	return m_Scene.GetMeshAsset(entityId);
+}
+
+const Asset::StaticMeshAsset* Engine::GetMeshAsset(EntityId entityId) const
+{
+	return m_Scene.GetMeshAsset(entityId);
+}
+
+std::vector<CpuMaterialTexture>* Engine::GetMaterialTextures(EntityId entityId)
+{
+	return m_Scene.GetMaterialTextures(entityId);
+}
+
+const std::vector<CpuMaterialTexture>* Engine::GetMaterialTextures(EntityId entityId) const
+{
+	return m_Scene.GetMaterialTextures(entityId);
+}
+
+const std::string* Engine::GetEntityName(EntityId entityId) const
+{
+	return m_Scene.GetEntityName(entityId);
+}
+
+bool Engine::IsMaterialTransparent(EntityId entityId, size_t materialIndex) const
+{
+	if (m_TransparentEntities.find(entityId) != m_TransparentEntities.end())
+	{
+		return true;
+	}
+
+	if (entityId == m_Scene.GetPrimaryRenderableEntity())
+	{
+		if (materialIndex < m_PrimaryMaterialTransparency.size())
+		{
+			return m_PrimaryMaterialTransparency[materialIndex];
+		}
+		return false;
+	}
+
+	const auto* materialTextures = GetMaterialTextures(entityId);
+	if (!materialTextures || materialIndex >= materialTextures->size())
+	{
+		return false;
+	}
+
+	return MaterialTextureHasTransparency((*materialTextures)[materialIndex]);
+}
+
+void Engine::UploadEntityGeometry(EntityId entityId)
+{
+	const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+	if (!meshAsset || !m_VertexBuffer || !m_IndexBuffer)
+	{
+		return;
+	}
+
+	void* mappedVertexData = nullptr;
+	m_VertexBuffer->Map(&mappedVertexData);
+	std::memcpy(mappedVertexData, meshAsset->Vertices.data(), meshAsset->Vertices.size() * sizeof(Asset::StaticMeshVertex));
+	m_VertexBuffer->Unmap();
+
+	void* mappedIndexData = nullptr;
+	m_IndexBuffer->Map(&mappedIndexData);
+	std::memcpy(mappedIndexData, meshAsset->Indices.data(), meshAsset->Indices.size() * sizeof(uint32_t));
+	m_IndexBuffer->Unmap();
 }
 
 bool Engine::Init()
@@ -283,6 +337,11 @@ bool Engine::Init()
 
 LRESULT Engine::MsgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+	if (ImGui::GetCurrentContext() != nullptr && ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
+	{
+		return 1;
+	}
+
 	if (msg == WM_COMMAND)
 	{
 		switch (LOWORD(wParam))
@@ -309,10 +368,16 @@ LRESULT Engine::MsgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			}
 			return 0;
 
-		case IDM_VIEW_UV_DEBUG:
-			m_IsUvDebugViewEnabled = !m_IsUvDebugViewEnabled;
-			UpdateRendererMenuState();
-			UpdateWindowTitleWithFps();
+		case IDM_RENDERMODE_FORWARD:
+			SwitchRenderMode(RenderMode::Forward);
+			return 0;
+
+		case IDM_RENDERMODE_DEFERRED:
+			SwitchRenderMode(RenderMode::Deferred);
+			return 0;
+
+		case IDM_RENDERMODE_FORWARD_PLUS:
+			SwitchRenderMode(RenderMode::ForwardPlus);
 			return 0;
 		}
 	}
@@ -324,6 +389,7 @@ void Engine::Update(float deltaTime)
 {
 	UpdateAnimatedMesh(deltaTime);
 	m_Camera.Update(deltaTime, m_hRenderWnd ? m_hRenderWnd : m_hMainWnd);
+	UpdateObjectPicking();
 }
 
 void Engine::Render()
@@ -356,7 +422,6 @@ void Engine::Render()
 	const float clearColor[4] = { color, 0.2f, 0.4f, 1.0f };
 	m_CmdList->ClearRenderTarget(rtvHandle, clearColor);
 	m_CmdList->ClearDepthStencil(dsvHandle, 1.0f, 0);
-	UpdateCameraBuffer();
 
 	// 정점 버퍼 바인딩 및 삼각형 그리기
 	m_CmdList->SetVertexBuffer(m_VertexBuffer);
@@ -370,6 +435,8 @@ void Engine::Render()
 	{
 		DrawVulkanTriangle();
 	}
+
+	RenderImGui();
 
 	// 백버퍼를 Present 상태로 전환
 	m_CmdList->ResourceBarrier(backBuffer, ResourceState::RenderTarget, ResourceState::Present);
@@ -390,6 +457,7 @@ void Engine::OnResize()
 
 	if (m_Device)
 	{
+		DestroyImGuiResources();
 		m_Device->Resize(m_ClientWidth, m_ClientHeight);
 
 		// Vulkan 파이프라인은 렌더패스 호환성을 유지하더라도 리사이즈 시 재생성해 두는 편이 학습상 명확합니다.
@@ -398,6 +466,8 @@ void Engine::OnResize()
 			DestroyVulkanTriangleResources();
 			CreateVulkanTriangleResources();
 		}
+
+		CreateImGuiResources();
 	}
 }
 
@@ -474,9 +544,14 @@ bool Engine::SwitchGraphicsAPI(GraphicsAPI api)
 		return false;
 	}
 
-	m_WindowTitleBase = api == GraphicsAPI::DirectX12 
-		? L"EnginePlatformer - DirectX12" 
-		: L"EnginePlatformer - Vulkan";
+	if (!CreateImGuiResources())
+	{
+		LogEngineTrace("SwitchGraphicsAPI failed during ImGui initialization.");
+		ShutdownGraphics();
+		return false;
+	}
+
+	RebuildWindowTitleBase();
 	m_Camera.SetLens(DirectX::XM_PIDIV4, static_cast<float>(m_ClientWidth) / static_cast<float>((std::max)(m_ClientHeight, 1)), 0.1f, 1000.0f);
 	m_RenderStartTime = std::chrono::steady_clock::now();
 	ResetFpsCounter();
@@ -486,6 +561,34 @@ bool Engine::SwitchGraphicsAPI(GraphicsAPI api)
 	return true;
 }
 
+void Engine::SwitchRenderMode(RenderMode renderMode)
+{
+	if (m_RenderMode == renderMode)
+	{
+		return;
+	}
+
+	m_RenderMode = renderMode;
+	RebuildWindowTitleBase();
+	ResetFpsCounter();
+	UpdateRendererMenuState();
+
+	std::string modeLogMessage = "Render mode switched to ";
+	modeLogMessage.append(RenderModeToString(m_RenderMode));
+	LogEngineTrace(modeLogMessage);
+}
+
+void Engine::RebuildWindowTitleBase()
+{
+	const std::wstring_view apiName = m_CurrentApi == GraphicsAPI::DirectX12 ? L"DirectX12" : L"Vulkan";
+	m_WindowTitleBase.clear();
+	m_WindowTitleBase.reserve(64);
+	m_WindowTitleBase.append(L"EnginePlatformer - ");
+	m_WindowTitleBase.append(apiName);
+	m_WindowTitleBase.append(L" - ");
+	m_WindowTitleBase.append(RenderModeToWideString(m_RenderMode));
+}
+
 void Engine::ShutdownGraphics()
 {
 	if (m_Device)
@@ -493,6 +596,8 @@ void Engine::ShutdownGraphics()
 		LogEngineTrace("ShutdownGraphics waiting for GPU.");
 		m_Device->WaitForGPU();
 	}
+
+	DestroyImGuiResources();
 
 	DestroyTextureResources();
 	DestroyDx12TriangleResources();
@@ -596,6 +701,9 @@ void Engine::ResizeRenderWindow()
 
 bool Engine::LoadSpiderStaticMesh()
 {
+	m_RenderEntities.clear();
+	m_TransparentEntities.clear();
+
 	const std::filesystem::path spiderDirectory = "Assets/Models/Spider";
 	if (!std::filesystem::exists(spiderDirectory))
 	{
@@ -603,43 +711,25 @@ bool Engine::LoadSpiderStaticMesh()
 		return false;
 	}
 
-	Asset::AssimpModelLoader modelLoader;
-	std::filesystem::path selectedModelPath;
-
-	for (const auto& entry : std::filesystem::directory_iterator(spiderDirectory))
+	const SceneLoader::EntityLoadResult loadResult = SceneLoader::LoadFirstModelEntity(m_Scene, "Spider", spiderDirectory);
+	const EntityId spiderEntity = loadResult.Entity;
+	const std::filesystem::path& selectedModelPath = loadResult.SelectedPath;
+	if (spiderEntity != InvalidEntityId)
 	{
-		if (!entry.is_regular_file())
+		m_SpiderEntity = spiderEntity;
+		m_RenderEntities.push_back(spiderEntity);
+		m_Scene.SetPrimaryRenderableEntity(spiderEntity);
+		if (loadResult.IsAnimated)
 		{
-			continue;
+			LogEngineTrace("Auto-routed Spider asset to animated loader.");
 		}
-
-		const auto extension = entry.path().extension().wstring();
-		if (extension != L".fbx" && extension != L".obj" && extension != L".gltf" && extension != L".glb")
+		else
 		{
-			continue;
-		}
-
-		const bool isAnimated = modelLoader.HasAnimation(entry.path().string());
-		auto loadedMesh = isAnimated
-			? modelLoader.LoadAnimatedMesh(entry.path().string())
-			: modelLoader.LoadStaticMesh(entry.path().string());
-
-		if (loadedMesh && !loadedMesh->Vertices.empty() && !loadedMesh->Indices.empty())
-		{
-			selectedModelPath = entry.path();
-			m_StaticMeshAsset = std::move(loadedMesh);
-
-			if (isAnimated)
-			{
-				LogEngineTrace("Auto-routed Spider asset to animated loader.");
-			}
-			else
-			{
-				LogEngineTrace("Auto-routed Spider asset to static loader.");
-			}
-			break;
+			LogEngineTrace("Auto-routed Spider asset to static loader.");
 		}
 	}
+
+	Asset::StaticMeshAsset* spiderMesh = GetMeshAsset(spiderEntity);
 
 	if (selectedModelPath.empty())
 	{
@@ -647,7 +737,7 @@ bool Engine::LoadSpiderStaticMesh()
 		return false;
 	}
 
-	if (!m_StaticMeshAsset || m_StaticMeshAsset->Vertices.empty() || m_StaticMeshAsset->Indices.empty())
+	if (!spiderMesh || spiderMesh->Vertices.empty() || spiderMesh->Indices.empty())
 	{
 		MessageBoxW(m_hMainWnd, L"Spider 정적 메시를 로드하지 못했습니다.", L"Asset Error", MB_OK | MB_ICONERROR);
 		return false;
@@ -660,7 +750,7 @@ bool Engine::LoadSpiderStaticMesh()
 		(std::numeric_limits<float>::lowest)(),
 		(std::numeric_limits<float>::lowest)());
 	uint32_t outOfRangeUvCount = 0;
-	for (const auto& vertex : m_StaticMeshAsset->Vertices)
+	for (const auto& vertex : spiderMesh->Vertices)
 	{
 		minUv.x = (std::min)(minUv.x, vertex.TexCoord.x);
 		minUv.y = (std::min)(minUv.y, vertex.TexCoord.y);
@@ -684,64 +774,98 @@ bool Engine::LoadSpiderStaticMesh()
 	uvLogMessage.append(std::to_string(outOfRangeUvCount));
 	LogEngineTrace(uvLogMessage);
 
-	const std::filesystem::path spiderTextureDirectory = spiderDirectory / "textures";
-	std::filesystem::path preferredSpiderDiffuseTexturePath;
-	std::filesystem::path preferredSpiderNormalTexturePath;
-	if (std::filesystem::exists(spiderTextureDirectory))
-	{
-		for (const auto& entry : std::filesystem::directory_iterator(spiderTextureDirectory))
-		{
-			if (!entry.is_regular_file())
-			{
-				continue;
-			}
-
-			std::wstring fileName = entry.path().filename().wstring();
-			std::transform(fileName.begin(), fileName.end(), fileName.begin(), [](wchar_t ch) { return static_cast<wchar_t>(::towlower(ch)); });
-
-			if (fileName.find(L"color") != std::wstring::npos)
-			{
-				const bool isPng = entry.path().extension() == L".png" || entry.path().extension() == L".PNG";
-				if (preferredSpiderDiffuseTexturePath.empty() || isPng)
-				{
-					preferredSpiderDiffuseTexturePath = entry.path();
-				}
-			}
-
-			if (preferredSpiderNormalTexturePath.empty() && (fileName.find(L"nrm") != std::wstring::npos || fileName.find(L"normal") != std::wstring::npos))
-			{
-				preferredSpiderNormalTexturePath = entry.path();
-			}
-		}
-	}
-
-	if (!preferredSpiderDiffuseTexturePath.empty())
-	{
-		for (auto& material : m_StaticMeshAsset->Materials)
-		{
-			material.DiffuseTexturePath = preferredSpiderDiffuseTexturePath;
-			material.EmbeddedDiffuseTexturePixels.clear();
-			material.EmbeddedDiffuseTextureWidth = 0;
-			material.EmbeddedDiffuseTextureHeight = 0;
-			if (!preferredSpiderNormalTexturePath.empty())
-			{
-				material.NormalTexturePath = preferredSpiderNormalTexturePath;
-			}
-		}
-
-		std::string spiderTextureOverrideLogMessage = "Spider texture override - Diffuse=";
-		spiderTextureOverrideLogMessage.append(preferredSpiderDiffuseTexturePath.string());
-		if (!preferredSpiderNormalTexturePath.empty())
-		{
-			spiderTextureOverrideLogMessage.append(" Normal=");
-			spiderTextureOverrideLogMessage.append(preferredSpiderNormalTexturePath.string());
-		}
-		LogEngineTrace(spiderTextureOverrideLogMessage);
-	}
-
 	if (!LoadMaterialTextures())
 	{
 		return false;
+	}
+
+	if (auto* spiderTransform = GetTransformComponent(spiderEntity))
+	{
+		spiderTransform->SetLocalTransform(Math::Transform::Identity());
+		spiderTransform->UpdateWorld();
+	}
+
+	const auto* sourceMaterialTextures = GetMaterialTextures(spiderEntity);
+	const std::array<DirectX::XMFLOAT4, 10> tintPalette = {
+		DirectX::XMFLOAT4{ 1.0f, 1.0f, 1.0f, 1.0f },
+		DirectX::XMFLOAT4{ 1.0f, 0.6f, 0.6f, 1.0f },
+		DirectX::XMFLOAT4{ 0.6f, 1.0f, 0.6f, 1.0f },
+		DirectX::XMFLOAT4{ 0.6f, 0.8f, 1.0f, 1.0f },
+		DirectX::XMFLOAT4{ 1.0f, 0.8f, 0.4f, 1.0f },
+		DirectX::XMFLOAT4{ 0.9f, 0.5f, 1.0f, 1.0f },
+		DirectX::XMFLOAT4{ 0.5f, 1.0f, 1.0f, 1.0f },
+		DirectX::XMFLOAT4{ 1.0f, 0.7f, 0.9f, 1.0f },
+		DirectX::XMFLOAT4{ 0.8f, 1.0f, 0.7f, 1.0f },
+		DirectX::XMFLOAT4{ 1.0f, 0.9f, 0.7f, 1.0f }
+	};
+
+	auto applyVertexTint = [](Asset::StaticMeshAsset& mesh, const DirectX::XMFLOAT4& tint)
+	{
+		for (auto& vertex : mesh.Vertices)
+		{
+			vertex.Color = tint;
+		}
+		for (auto& vertex : mesh.BindPoseVertices)
+		{
+			vertex.Color = tint;
+		}
+	};
+
+	if (spiderMesh)
+	{
+		applyVertexTint(*spiderMesh, tintPalette[0]);
+
+		auto spawnVariant = [&](int variantIndex, bool glassVariant)
+		{
+			std::string entityName = glassVariant ? "Glass_" : "Spider_";
+			entityName.append(std::to_string(variantIndex + 1));
+
+			const EntityId entity = CreateEntity(entityName);
+			MeshComponent& meshComponent = m_Scene.EnsureMeshComponent(entity);
+			meshComponent.Asset = std::make_unique<Asset::StaticMeshAsset>(*spiderMesh);
+			if (sourceMaterialTextures)
+			{
+				meshComponent.MaterialTextures = *sourceMaterialTextures;
+			}
+
+			const size_t colorIndex = static_cast<size_t>(variantIndex) % tintPalette.size();
+			DirectX::XMFLOAT4 tint = tintPalette[colorIndex];
+			if (glassVariant)
+			{
+				tint.w = 0.35f;
+				m_TransparentEntities.insert(entity);
+			}
+			applyVertexTint(*meshComponent.Asset, tint);
+
+			TransformComponent& transform = m_Scene.EnsureTransformComponent(entity);
+			const float x = static_cast<float>((variantIndex % 5) - 2) * 1.8f;
+			const float z = glassVariant
+				? 3.0f + static_cast<float>(variantIndex / 5) * 2.2f
+				: -2.0f - static_cast<float>(variantIndex / 5) * 2.2f;
+			transform.LocalTransform = Math::Transform(
+				{ x, 0.0f, z },
+				Math::IdentityQuaternion(),
+				{ 0.4f, 0.4f, 0.4f });
+			transform.UpdateWorld();
+
+			if (const BoundsComponent* sourceBounds = m_Scene.GetBoundsComponent(spiderEntity))
+			{
+				BoundsComponent& bounds = m_Scene.EnsureBoundsComponent(entity);
+				bounds = *sourceBounds;
+			}
+
+			m_RenderEntities.push_back(entity);
+		};
+
+		for (int index = 1; index < 10; ++index)
+		{
+			spawnVariant(index, false);
+		}
+
+		for (int index = 0; index < 10; ++index)
+		{
+			spawnVariant(index, true);
+		}
 	}
 
 	DirectX::XMFLOAT3 minBounds(
@@ -753,7 +877,7 @@ bool Engine::LoadSpiderStaticMesh()
 		(std::numeric_limits<float>::lowest)(),
 		(std::numeric_limits<float>::lowest)());
 
-	for (const auto& vertex : m_StaticMeshAsset->Vertices)
+	for (const auto& vertex : spiderMesh->Vertices)
 	{
 		minBounds.x = (std::min)(minBounds.x, vertex.Position.x);
 		minBounds.y = (std::min)(minBounds.y, vertex.Position.y);
@@ -761,6 +885,12 @@ bool Engine::LoadSpiderStaticMesh()
 		maxBounds.x = (std::max)(maxBounds.x, vertex.Position.x);
 		maxBounds.y = (std::max)(maxBounds.y, vertex.Position.y);
 		maxBounds.z = (std::max)(maxBounds.z, vertex.Position.z);
+	}
+
+	if (auto* spiderBounds = m_Scene.GetBoundsComponent(spiderEntity))
+	{
+		spiderBounds->LocalMin = minBounds;
+		spiderBounds->LocalMax = maxBounds;
 	}
 
 	const DirectX::XMFLOAT3 center = {
@@ -786,30 +916,41 @@ bool Engine::LoadSpiderStaticMesh()
 
 bool Engine::LoadMaterialTextures()
 {
-	m_MaterialTextures.clear();
-
-	if (!m_StaticMeshAsset)
+	const EntityId spiderEntity = m_Scene.GetPrimaryRenderableEntity();
+	Asset::StaticMeshAsset* spiderMesh = GetMeshAsset(spiderEntity);
+	std::vector<CpuMaterialTexture>* materialTextures = GetMaterialTextures(spiderEntity);
+	if (!materialTextures)
 	{
+		return false;
+	}
+
+	materialTextures->clear();
+
+	if (!spiderMesh)
+	{
+		m_PrimaryMaterialTransparency.clear();
 		return true;
 	}
 
-	const size_t textureCount = (std::max)(static_cast<size_t>(1), m_StaticMeshAsset->Materials.size());
-	m_MaterialTextures.resize(textureCount);
+	const size_t textureCount = (std::max)(static_cast<size_t>(1), spiderMesh->Materials.size());
+	materialTextures->resize(textureCount);
+	m_PrimaryMaterialTransparency.assign(textureCount, false);
 
 	for (size_t materialIndex = 0; materialIndex < textureCount; ++materialIndex)
 	{
-		auto& materialTexture = m_MaterialTextures[materialIndex];
+		auto& materialTexture = (*materialTextures)[materialIndex];
 		materialTexture.Path.clear();
 		materialTexture.Pixels = { 255, 255, 255, 255 };
 		materialTexture.Width = 1;
 		materialTexture.Height = 1;
+		m_PrimaryMaterialTransparency[materialIndex] = false;
 
-		if (materialIndex >= m_StaticMeshAsset->Materials.size())
+		if (materialIndex >= spiderMesh->Materials.size())
 		{
 			continue;
 		}
 
-		const auto& material = m_StaticMeshAsset->Materials[materialIndex];
+		const auto& material = spiderMesh->Materials[materialIndex];
 		if (!material.DiffuseTexturePath.empty() && std::filesystem::exists(material.DiffuseTexturePath))
 		{
 			int width = 0;
@@ -832,6 +973,7 @@ bool Engine::LoadMaterialTextures()
 			materialTexture.Height = height;
 			materialTexture.Pixels.assign(pixels, pixels + static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
 			stbi_image_free(pixels);
+			m_PrimaryMaterialTransparency[materialIndex] = MaterialTextureHasTransparency(materialTexture);
 
 			std::string loadedTextureLogMessage = "Material texture loaded - MaterialIndex=";
 			loadedTextureLogMessage.append(std::to_string(materialIndex));
@@ -849,6 +991,7 @@ bool Engine::LoadMaterialTextures()
 			materialTexture.Width = material.EmbeddedDiffuseTextureWidth;
 			materialTexture.Height = material.EmbeddedDiffuseTextureHeight;
 			materialTexture.Pixels = material.EmbeddedDiffuseTexturePixels;
+			m_PrimaryMaterialTransparency[materialIndex] = MaterialTextureHasTransparency(materialTexture);
 
 			std::string embeddedTextureLogMessage = "Material embedded texture loaded - MaterialIndex=";
 			embeddedTextureLogMessage.append(std::to_string(materialIndex));
@@ -869,14 +1012,20 @@ bool Engine::LoadMaterialTextures()
 	}
 
 	std::string materialTextureSummaryLogMessage = "Material texture count=";
-	materialTextureSummaryLogMessage.append(std::to_string(m_MaterialTextures.size()));
+	materialTextureSummaryLogMessage.append(std::to_string(materialTextures->size()));
 	LogEngineTrace(materialTextureSummaryLogMessage);
 	return true;
 }
 
 bool Engine::CreateTextureResources()
 {
-	const size_t textureCount = (std::max)(static_cast<size_t>(1), m_MaterialTextures.size());
+	const auto* materialTextures = GetMaterialTextures(m_Scene.GetPrimaryRenderableEntity());
+	if (!materialTextures)
+	{
+		return false;
+	}
+
+	const size_t textureCount = (std::max)(static_cast<size_t>(1), materialTextures->size());
 
 	if (m_CurrentApi == GraphicsAPI::DirectX12)
 	{
@@ -900,7 +1049,7 @@ bool Engine::CreateTextureResources()
 
 		for (size_t textureIndex = 0; textureIndex < textureCount; ++textureIndex)
 		{
-			const auto& materialTexture = m_MaterialTextures[textureIndex];
+			const auto& materialTexture = (*materialTextures)[textureIndex];
 			auto& dx12MaterialTexture = m_Dx12Triangle.MaterialTextures[textureIndex];
 			const UINT64 rowPitch = static_cast<UINT64>(materialTexture.Width) * 4;
 			const D3D12_RESOURCE_DESC textureDesc = CD3DX12_RESOURCE_DESC::Tex2D(
@@ -994,7 +1143,7 @@ bool Engine::CreateTextureResources()
 
 	for (size_t textureIndex = 0; textureIndex < textureCount; ++textureIndex)
 	{
-		const auto& materialTexture = m_MaterialTextures[textureIndex];
+		const auto& materialTexture = (*materialTextures)[textureIndex];
 		auto& vulkanMaterialTexture = m_VulkanTriangle.MaterialTextures[textureIndex];
 
 		VkImageCreateInfo imageCreateInfo = {};
@@ -1182,6 +1331,264 @@ void Engine::DestroyTextureResources()
 	m_VulkanTriangle.MaterialTextures.clear();
 }
 
+bool Engine::CreateImGuiResources()
+{
+	if (m_ImGuiInitialized)
+	{
+		return true;
+	}
+
+	HWND imguiWindow = m_hRenderWnd ? m_hRenderWnd : m_hMainWnd;
+	if (!imguiWindow || !m_Device)
+	{
+		return false;
+	}
+
+	IMGUI_CHECKVERSION();
+	ImGui::CreateContext();
+	ImGuiIO& io = ImGui::GetIO();
+	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+	ImGui::StyleColorsDark();
+
+	if (!ImGui_ImplWin32_Init(imguiWindow))
+	{
+		ImGui::DestroyContext();
+		return false;
+	}
+
+	if (m_CurrentApi == GraphicsAPI::DirectX12)
+	{
+		auto dx12Device = dynamic_cast<DX12Device*>(m_Device);
+		if (!dx12Device)
+		{
+			ImGui_ImplWin32_Shutdown();
+			ImGui::DestroyContext();
+			return false;
+		}
+
+		D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
+		heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+		heapDesc.NumDescriptors = 1;
+		heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+		if (FAILED(dx12Device->GetD3DDevice()->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_Dx12ImGui.ShaderResourceHeap))))
+		{
+			ImGui_ImplWin32_Shutdown();
+			ImGui::DestroyContext();
+			return false;
+		}
+
+		if (!ImGui_ImplDX12_Init(
+			dx12Device->GetD3DDevice(),
+			2,
+			DXGI_FORMAT_R8G8B8A8_UNORM,
+			m_Dx12ImGui.ShaderResourceHeap.Get(),
+			m_Dx12ImGui.ShaderResourceHeap->GetCPUDescriptorHandleForHeapStart(),
+			m_Dx12ImGui.ShaderResourceHeap->GetGPUDescriptorHandleForHeapStart()))
+		{
+			m_Dx12ImGui.ShaderResourceHeap.Reset();
+			ImGui_ImplWin32_Shutdown();
+			ImGui::DestroyContext();
+			return false;
+		}
+	}
+	else
+	{
+		auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Device);
+		if (!vulkanDevice)
+		{
+			ImGui_ImplWin32_Shutdown();
+			ImGui::DestroyContext();
+			return false;
+		}
+
+		const VkDescriptorPoolSize poolSizes[] = {
+			{ VK_DESCRIPTOR_TYPE_SAMPLER, 100 },
+			{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 100 },
+			{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 100 },
+			{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 100 },
+			{ VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 100 },
+			{ VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 100 },
+			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 100 },
+			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 100 },
+			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 100 },
+			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 100 },
+			{ VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 100 }
+		};
+
+		// Vulkan ImGui backend는 내부 폰트 텍스처와 사용자 이미지용 descriptor set을 자체적으로 할당하므로,
+		// 엔진의 material descriptor pool과 분리된 전용 descriptor pool을 준비해 넘겨야 합니다.
+		VkDescriptorPoolCreateInfo poolInfo = {};
+		poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+		poolInfo.maxSets = 100 * static_cast<uint32_t>(std::size(poolSizes));
+		poolInfo.poolSizeCount = static_cast<uint32_t>(std::size(poolSizes));
+		poolInfo.pPoolSizes = poolSizes;
+		if (vkCreateDescriptorPool(vulkanDevice->GetVkDevice(), &poolInfo, nullptr, &m_VulkanImGui.DescriptorPool) != VK_SUCCESS)
+		{
+			ImGui_ImplWin32_Shutdown();
+			ImGui::DestroyContext();
+			return false;
+		}
+
+		ImGui_ImplVulkan_InitInfo initInfo = {};
+		initInfo.ApiVersion = VK_API_VERSION_1_0;
+		initInfo.Instance = vulkanDevice->GetVkInstance();
+		initInfo.PhysicalDevice = vulkanDevice->GetVkPhysicalDevice();
+		initInfo.Device = vulkanDevice->GetVkDevice();
+		initInfo.QueueFamily = vulkanDevice->GetVkGraphicsQueueFamilyIndex();
+		initInfo.Queue = vulkanDevice->GetVkGraphicsQueue();
+		initInfo.DescriptorPool = m_VulkanImGui.DescriptorPool;
+		initInfo.RenderPass = vulkanDevice->GetVkRenderPass();
+		initInfo.MinImageCount = (std::max)(2u, vulkanDevice->GetVkSwapchainImageCount());
+		initInfo.ImageCount = (std::max)(2u, vulkanDevice->GetVkSwapchainImageCount());
+		initInfo.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+		initInfo.CheckVkResultFn = &CheckImGuiVulkanResult;
+		if (!ImGui_ImplVulkan_Init(&initInfo))
+		{
+			vkDestroyDescriptorPool(vulkanDevice->GetVkDevice(), m_VulkanImGui.DescriptorPool, nullptr);
+			m_VulkanImGui.DescriptorPool = VK_NULL_HANDLE;
+			ImGui_ImplWin32_Shutdown();
+			ImGui::DestroyContext();
+			return false;
+		}
+
+		// Vulkan backend는 현재 render pass 형식에 맞는 폰트 texture 리소스를 먼저 준비해야 합니다.
+		// 이 엔진은 resize 시 render pass를 다시 만들므로 backend도 재초기화하면서 같은 경로를 다시 탑니다.
+		if (!ImGui_ImplVulkan_CreateFontsTexture())
+		{
+			ImGui_ImplVulkan_Shutdown();
+			vkDestroyDescriptorPool(vulkanDevice->GetVkDevice(), m_VulkanImGui.DescriptorPool, nullptr);
+			m_VulkanImGui.DescriptorPool = VK_NULL_HANDLE;
+			ImGui_ImplWin32_Shutdown();
+			ImGui::DestroyContext();
+			return false;
+		}
+		ImGui_ImplVulkan_DestroyFontsTexture();
+	}
+
+	m_ImGuiInitialized = true;
+	return true;
+}
+
+void Engine::DestroyImGuiResources()
+{
+	if (m_CurrentApi == GraphicsAPI::DirectX12)
+	{
+		if (m_ImGuiInitialized)
+		{
+			ImGui_ImplDX12_Shutdown();
+		}
+		m_Dx12ImGui.ShaderResourceHeap.Reset();
+	}
+	else
+	{
+		if (m_ImGuiInitialized)
+		{
+			ImGui_ImplVulkan_Shutdown();
+		}
+
+		auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Device);
+		if (vulkanDevice && m_VulkanImGui.DescriptorPool != VK_NULL_HANDLE)
+		{
+			// Vulkan backend가 descriptor set을 반납한 뒤, 엔진이 소유한 전용 descriptor pool을 파괴합니다.
+			vkDestroyDescriptorPool(vulkanDevice->GetVkDevice(), m_VulkanImGui.DescriptorPool, nullptr);
+		}
+		m_VulkanImGui.DescriptorPool = VK_NULL_HANDLE;
+	}
+
+	if (ImGui::GetCurrentContext() != nullptr)
+	{
+		ImGui_ImplWin32_Shutdown();
+		ImGui::DestroyContext();
+	}
+
+	m_ImGuiInitialized = false;
+}
+
+void Engine::RenderImGui()
+{
+	if (!m_ImGuiInitialized)
+	{
+		return;
+	}
+
+	if (m_CurrentApi == GraphicsAPI::DirectX12)
+	{
+		ImGui_ImplDX12_NewFrame();
+	}
+	else
+	{
+		ImGui_ImplVulkan_NewFrame();
+	}
+	ImGui_ImplWin32_NewFrame();
+	ImGui::NewFrame();
+
+	ImGui::Begin("Engine Debug");
+	ImGui::Text("API: %s", GraphicsApiToString(m_CurrentApi).data());
+	ImGui::Text("Render Mode: %s", RenderModeToString(m_RenderMode).data());
+	int renderModeIndex = static_cast<int>(m_RenderMode);
+	if (ImGui::Combo("Render Mode", &renderModeIndex, "Forward\0Deferred\0Forward+\0"))
+	{
+		SwitchRenderMode(static_cast<RenderMode>(renderModeIndex));
+	}
+	const DirectX::XMFLOAT3 cameraPosition = m_Camera.GetPosition();
+	ImGui::Text("Camera Position: %.2f %.2f %.2f", cameraPosition.x, cameraPosition.y, cameraPosition.z);
+	ImGui::Separator();
+	ImGui::Text("Selection");
+	const EntityId selectedEntity = m_Scene.GetSelectedEntity();
+	const std::string* selectedEntityName = GetEntityName(selectedEntity);
+	Asset::StaticMeshAsset* selectedMeshAsset = GetMeshAsset(selectedEntity);
+	TransformComponent* selectedTransform = GetTransformComponent(selectedEntity);
+	if (selectedEntity != InvalidEntityId && selectedEntityName && selectedMeshAsset && selectedTransform)
+	{
+		ImGui::Text("Object: %s", selectedEntityName->c_str());
+		ImGui::Text("Vertices: %d", static_cast<int>(selectedMeshAsset->Vertices.size()));
+		ImGui::Text("Materials: %d", static_cast<int>(selectedMeshAsset->Materials.size()));
+		if (ImGui::DragFloat3("Position", &selectedTransform->LocalTransform.Translation.x, 0.05f))
+		{
+			selectedTransform->UpdateWorld();
+		}
+		if (ImGui::DragFloat4("Rotation", &selectedTransform->LocalTransform.Rotation.x, 0.01f, -1.0f, 1.0f))
+		{
+			Math::Store(selectedTransform->LocalTransform.Rotation, DirectX::XMQuaternionNormalize(Math::Load(selectedTransform->LocalTransform.Rotation)));
+			selectedTransform->UpdateWorld();
+		}
+		if (ImGui::DragFloat3("Scale", &selectedTransform->LocalTransform.Scale.x, 0.01f, 0.01f, 100.0f))
+		{
+			selectedTransform->UpdateWorld();
+		}
+	}
+	else
+	{
+		ImGui::TextUnformatted("Click the spider mesh to inspect its transform.");
+	}
+	ImGui::Checkbox("ImGui Demo Window", &m_ShowImGuiDemoWindow);
+	ImGui::End();
+
+	if (m_ShowImGuiDemoWindow)
+	{
+		ImGui::ShowDemoWindow(&m_ShowImGuiDemoWindow);
+	}
+
+	ImGui::Render();
+
+	if (m_CurrentApi == GraphicsAPI::DirectX12)
+	{
+		auto commandList = static_cast<ID3D12GraphicsCommandList*>(m_CmdList->GetNativeResource());
+		ID3D12DescriptorHeap* descriptorHeaps[] = { m_Dx12ImGui.ShaderResourceHeap.Get() };
+		commandList->SetDescriptorHeaps(1, descriptorHeaps);
+		ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), commandList);
+	}
+	else
+	{
+		// Vulkan ImGui draw data는 현재 열린 render pass 안에서 같은 command buffer에 기록해야 합니다.
+		// 엔진 렌더 루프는 scene draw 뒤, Present 전 barrier 전에 이 함수를 호출하므로 그 조건을 만족합니다.
+		auto commandBuffer = reinterpret_cast<VkCommandBuffer>(m_CmdList->GetNativeResource());
+		ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
+	}
+}
+
 bool Engine::CreateDx12TriangleResources()
 {
 	auto dx12Device = dynamic_cast<DX12Device*>(m_Device);
@@ -1259,7 +1666,7 @@ bool Engine::CreateDx12TriangleResources()
 	psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
 	psoDesc.DepthStencilState.DepthEnable = TRUE;
 	psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-	psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+	psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
 	psoDesc.DepthStencilState.StencilEnable = FALSE;
 	psoDesc.InputLayout = { inputLayout, _countof(inputLayout) };
 	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
@@ -1268,11 +1675,28 @@ bool Engine::CreateDx12TriangleResources()
 	psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 	psoDesc.SampleDesc.Count = 1;
 
-	return SUCCEEDED(dx12Device->GetD3DDevice()->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_Dx12Triangle.PipelineState)));
+	if (FAILED(dx12Device->GetD3DDevice()->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_Dx12Triangle.PipelineState))))
+	{
+		return false;
+	}
+
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC transparentPsoDesc = psoDesc;
+	transparentPsoDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;
+	transparentPsoDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+	transparentPsoDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+	transparentPsoDesc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+	transparentPsoDesc.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+	transparentPsoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+	transparentPsoDesc.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+	transparentPsoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+	transparentPsoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+
+	return SUCCEEDED(dx12Device->GetD3DDevice()->CreateGraphicsPipelineState(&transparentPsoDesc, IID_PPV_ARGS(&m_Dx12Triangle.TransparentPipelineState)));
 }
 
 void Engine::DestroyDx12TriangleResources()
 {
+	m_Dx12Triangle.TransparentPipelineState.Reset();
 	m_Dx12Triangle.PipelineState.Reset();
 	m_Dx12Triangle.RootSignature.Reset();
 }
@@ -1296,26 +1720,77 @@ void Engine::DrawDx12Triangle()
 
 	ID3D12DescriptorHeap* descriptorHeaps[] = { m_Dx12Triangle.ShaderResourceHeap.Get() };
 	native->SetDescriptorHeaps(1, descriptorHeaps);
-	native->SetPipelineState(m_Dx12Triangle.PipelineState.Get());
 	native->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 	const UINT descriptorSize = dx12Device->GetD3DDevice()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 	const D3D12_GPU_DESCRIPTOR_HANDLE baseHandle = m_Dx12Triangle.ShaderResourceHeap->GetGPUDescriptorHandleForHeapStart();
-
-	if (m_StaticMeshAsset->Submeshes.empty())
+	const bool drawTransparentInSecondPass = (m_RenderMode == RenderMode::Forward || m_RenderMode == RenderMode::ForwardPlus) && m_Dx12Triangle.TransparentPipelineState;
+	const bool drawOpaquePass = true;
+	if (drawOpaquePass)
 	{
-		native->SetGraphicsRootDescriptorTable(1, baseHandle);
-		m_CmdList->DrawIndexedInstanced(static_cast<uint32_t>(m_StaticMeshAsset ? m_StaticMeshAsset->Indices.size() : 0), 1, 0, 0, 0);
-		return;
+		native->SetPipelineState(m_Dx12Triangle.PipelineState.Get());
 	}
 
-	for (const auto& submesh : m_StaticMeshAsset->Submeshes)
+	for (EntityId entityId : m_RenderEntities)
 	{
-		const size_t materialIndex = submesh.MaterialIndex < m_Dx12Triangle.MaterialTextures.size() ? submesh.MaterialIndex : 0;
-		D3D12_GPU_DESCRIPTOR_HANDLE materialHandle = baseHandle;
-		materialHandle.ptr += static_cast<SIZE_T>(descriptorSize) * materialIndex;
-		native->SetGraphicsRootDescriptorTable(1, materialHandle);
-		m_CmdList->DrawIndexedInstanced(submesh.IndexCount, 1, submesh.IndexOffset, 0, 0);
+		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+		if (!meshAsset)
+		{
+			continue;
+		}
+
+		// 공용 upload buffer를 재사용하므로,
+		// entity마다 geometry와 camera 상수를 갱신한 뒤 draw를 이어서 기록합니다.
+		UploadEntityGeometry(entityId);
+		UpdateCameraBuffer(entityId);
+		native->SetGraphicsRootConstantBufferView(0, cameraResource->GetGPUVirtualAddress());
+
+		if (meshAsset->Submeshes.empty())
+		{
+			const bool entityIsTransparent = IsMaterialTransparent(entityId, 0);
+			if ((entityIsTransparent && !drawTransparentInSecondPass) || (!entityIsTransparent && !drawOpaquePass))
+			{
+				continue;
+			}
+
+			native->SetPipelineState(entityIsTransparent ? m_Dx12Triangle.TransparentPipelineState.Get() : m_Dx12Triangle.PipelineState.Get());
+			native->SetGraphicsRootDescriptorTable(1, baseHandle);
+			m_CmdList->DrawIndexedInstanced(static_cast<uint32_t>(meshAsset->Indices.size()), 1, 0, 0, 0);
+			continue;
+		}
+
+		auto drawSubmesh = [&](const Asset::StaticMeshSubmesh& submesh)
+		{
+			const size_t materialIndex = submesh.MaterialIndex < m_Dx12Triangle.MaterialTextures.size() ? submesh.MaterialIndex : 0;
+			D3D12_GPU_DESCRIPTOR_HANDLE materialHandle = baseHandle;
+			materialHandle.ptr += static_cast<SIZE_T>(descriptorSize) * materialIndex;
+			native->SetGraphicsRootDescriptorTable(1, materialHandle);
+			m_CmdList->DrawIndexedInstanced(submesh.IndexCount, 1, submesh.IndexOffset, 0, 0);
+		};
+
+		if (drawOpaquePass)
+		{
+			native->SetPipelineState(m_Dx12Triangle.PipelineState.Get());
+			for (const auto& submesh : meshAsset->Submeshes)
+			{
+				if (!IsMaterialTransparent(entityId, submesh.MaterialIndex))
+				{
+					drawSubmesh(submesh);
+				}
+			}
+		}
+
+		if (drawTransparentInSecondPass)
+		{
+			native->SetPipelineState(m_Dx12Triangle.TransparentPipelineState.Get());
+			for (const auto& submesh : meshAsset->Submeshes)
+			{
+				if (IsMaterialTransparent(entityId, submesh.MaterialIndex))
+				{
+					drawSubmesh(submesh);
+				}
+			}
+		}
 	}
 }
 
@@ -1337,16 +1812,21 @@ bool Engine::CreateCameraBuffer()
 
 void Engine::UpdateCameraBuffer()
 {
+	UpdateCameraBuffer(m_Scene.GetPrimaryRenderableEntity());
+}
+
+void Engine::UpdateCameraBuffer(EntityId entityId)
+{
 	if (!m_CameraBuffer)
 	{
 		return;
 	}
 
 	CameraConstants cameraConstants = {};
-	DirectX::XMStoreFloat4x4(&cameraConstants.ViewProjection, m_Camera.GetViewProjectionMatrix());
-	const auto position = m_Camera.GetPosition();
-	cameraConstants.CameraPosition = { position.x, position.y, position.z, 1.0f };
-	cameraConstants.DebugOptions = { m_IsUvDebugViewEnabled ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+	if (!RenderSystem::BuildCameraConstants(m_Scene, m_Camera, entityId, cameraConstants))
+	{
+		return;
+	}
 
 	void* mappedData = nullptr;
 	m_CameraBuffer->Map(&mappedData);
@@ -1354,88 +1834,92 @@ void Engine::UpdateCameraBuffer()
 	m_CameraBuffer->Unmap();
 }
 
+void Engine::UpdateObjectPicking()
+{
+	InputSystem& input = InputSystem::Get();
+	if (!input.IsMouseButtonPressed(0) || input.IsMouseButtonDown(1))
+	{
+		return;
+	}
+
+	if (ImGui::GetCurrentContext() != nullptr && ImGui::GetIO().WantCaptureMouse)
+	{
+		return;
+	}
+
+	const int mouseX = input.GetMouseX();
+	const int mouseY = input.GetMouseY();
+	if (mouseX < 0 || mouseY < 0 || mouseX >= m_ClientWidth || mouseY >= m_ClientHeight)
+	{
+		return;
+	}
+
+	m_Scene.SetSelectedEntity(TryPickEntity(static_cast<float>(mouseX), static_cast<float>(mouseY)));
+}
+
+bool Engine::TryPickSpider(float mouseX, float mouseY) const
+{
+	return TryPickEntity(mouseX, mouseY) == m_SpiderEntity;
+}
+
+EntityId Engine::TryPickEntity(float mouseX, float mouseY) const
+{
+	for (EntityId entityId : m_RenderEntities)
+	{
+		if (entityId == InvalidEntityId)
+		{
+			continue;
+		}
+
+		if (PickingSystem::TryPickEntityAabb(
+			m_Scene,
+			entityId,
+			m_Camera,
+			mouseX,
+			mouseY,
+			static_cast<float>(m_ClientWidth),
+			static_cast<float>(m_ClientHeight)))
+		{
+			return entityId;
+		}
+	}
+
+	return InvalidEntityId;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 void Engine::UpdateAnimatedMesh(float deltaTime)
 {
-	if (!m_StaticMeshAsset || !m_StaticMeshAsset->IsAnimated || m_StaticMeshAsset->Animations.empty() || m_StaticMeshAsset->Bones.empty())
-	{
-		return;
-	}
-
-	const Asset::AnimationClip& clip = m_StaticMeshAsset->Animations.front();
-	if (clip.DurationTicks <= 0.0)
-	{
-		return;
-	}
-
-	m_AnimationTimeSeconds += deltaTime;
-	const double ticksPerSecond = clip.TicksPerSecond > 0.0 ? clip.TicksPerSecond : 25.0;
-	const double animationTimeTicks = std::fmod(static_cast<double>(m_AnimationTimeSeconds) * ticksPerSecond, clip.DurationTicks);
-
-	std::vector<DirectX::XMMATRIX> localTransforms;
-	localTransforms.reserve(m_StaticMeshAsset->Nodes.size());
-	for (const auto& node : m_StaticMeshAsset->Nodes)
-	{
-		localTransforms.push_back(BuildAnimatedLocalTransform(node, clip, *m_StaticMeshAsset, animationTimeTicks));
-	}
-
-	std::vector<DirectX::XMMATRIX> globalTransforms(m_StaticMeshAsset->Nodes.size(), DirectX::XMMatrixIdentity());
-	if (!m_StaticMeshAsset->Nodes.empty())
-	{
-		ComputeGlobalNodeTransforms(*m_StaticMeshAsset, localTransforms, 0, DirectX::XMMatrixIdentity(), globalTransforms);
-	}
-
-	std::vector<DirectX::XMMATRIX> boneMatrices(m_StaticMeshAsset->Bones.size(), DirectX::XMMatrixIdentity());
-	const DirectX::XMMATRIX rootInverseTransform = LoadMatrix(m_StaticMeshAsset->RootInverseTransform);
-	for (size_t boneIndex = 0; boneIndex < m_StaticMeshAsset->Bones.size(); ++boneIndex)
-	{
-		const auto& bone = m_StaticMeshAsset->Bones[boneIndex];
-		boneMatrices[boneIndex] = LoadMatrix(bone.OffsetMatrix) * globalTransforms[bone.NodeIndex] * rootInverseTransform;
-	}
-
-	m_StaticMeshAsset->Vertices = m_StaticMeshAsset->BindPoseVertices;
-	for (size_t vertexIndex = 0; vertexIndex < m_StaticMeshAsset->Vertices.size(); ++vertexIndex)
-	{
-		const auto& bindVertex = m_StaticMeshAsset->BindPoseVertices[vertexIndex];
-		auto& animatedVertex = m_StaticMeshAsset->Vertices[vertexIndex];
-
-		const DirectX::XMVECTOR bindPosition = DirectX::XMLoadFloat3(&bindVertex.Position);
-		const DirectX::XMVECTOR bindNormal = DirectX::XMLoadFloat3(&bindVertex.Normal);
-		DirectX::XMVECTOR skinnedPosition = DirectX::XMVectorZero();
-		DirectX::XMVECTOR skinnedNormal = DirectX::XMVectorZero();
-		float totalWeight = 0.0f;
-
-		for (size_t influenceIndex = 0; influenceIndex < bindVertex.BoneWeights.size(); ++influenceIndex)
-		{
-			const float weight = bindVertex.BoneWeights[influenceIndex];
-			if (weight <= 0.0f)
-			{
-				continue;
-			}
-
-			const uint32_t boneIndex = bindVertex.BoneIndices[influenceIndex];
-			const DirectX::XMMATRIX boneMatrix = boneIndex < boneMatrices.size() ? boneMatrices[boneIndex] : DirectX::XMMatrixIdentity();
-			skinnedPosition += DirectX::XMVectorScale(DirectX::XMVector3TransformCoord(bindPosition, boneMatrix), weight);
-			skinnedNormal += DirectX::XMVectorScale(DirectX::XMVector3TransformNormal(bindNormal, boneMatrix), weight);
-			totalWeight += weight;
-		}
-
-		if (totalWeight > 0.0f)
-		{
-			DirectX::XMStoreFloat3(&animatedVertex.Position, skinnedPosition);
-			const DirectX::XMVECTOR normalizedNormal = DirectX::XMVector3Normalize(skinnedNormal);
-			DirectX::XMStoreFloat3(&animatedVertex.Normal, normalizedNormal);
-		}
-	}
-
-	if (!m_VertexBuffer)
-	{
-		return;
-	}
-
-	void* mappedData = nullptr;
-	m_VertexBuffer->Map(&mappedData);
-	std::memcpy(mappedData, m_StaticMeshAsset->Vertices.data(), m_StaticMeshAsset->Vertices.size() * sizeof(Asset::StaticMeshVertex));
-	m_VertexBuffer->Unmap();
+	AnimationSystem::UpdateAnimatedMesh(
+		m_Scene,
+		m_SpiderEntity,
+		deltaTime,
+		m_AnimationTimeSeconds,
+		m_VertexBuffer);
 }
 
 bool Engine::CreateVulkanTriangleResources()
@@ -1493,7 +1977,7 @@ bool Engine::CreateVulkanTriangleResources()
 		.binding = 0,
 		.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
 		.descriptorCount = 1,
-		.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
+		.stageFlags = VK_SHADER_STAGE_VERTEX_BIT
 	};
 	// Vulkan 경로는 diffuse texture를 combined image sampler로 fragment shader에 바인딩합니다.
 	const VkDescriptorSetLayoutBinding textureBinding = {
@@ -1683,21 +2167,34 @@ bool Engine::CreateVulkanTriangleResources()
 		.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | 
 		                  VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
 	};
+	VkPipelineColorBlendAttachmentState transparentColorBlendAttachment = colorBlendAttachment;
+	transparentColorBlendAttachment.blendEnable = VK_TRUE;
+	transparentColorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+	transparentColorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	transparentColorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+	transparentColorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+	transparentColorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	transparentColorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
 
 	const VkPipelineColorBlendStateCreateInfo colorBlending = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
 		.attachmentCount = 1,
 		.pAttachments = &colorBlendAttachment
 	};
+	const VkPipelineColorBlendStateCreateInfo transparentColorBlending = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+		.attachmentCount = 1,
+		.pAttachments = &transparentColorBlendAttachment
+	};
 
 	const VkPipelineDepthStencilStateCreateInfo depthStencil = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-		// Vulkan 경로도 DX12와 동일하게 depth test/write를 켜서
-		// 카드형 메시나 겹치는 삼각형이 draw 순서가 아니라 깊이값 기준으로 올바르게 가려지게 합니다.
 		.depthTestEnable = VK_TRUE,
 		.depthWriteEnable = VK_TRUE,
 		.depthCompareOp = VK_COMPARE_OP_LESS
 	};
+	VkPipelineDepthStencilStateCreateInfo transparentDepthStencil = depthStencil;
+	transparentDepthStencil.depthWriteEnable = VK_FALSE;
 
 	const VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -1732,6 +2229,16 @@ bool Engine::CreateVulkanTriangleResources()
 		return false;
 	}
 
+	// Vulkan 투명 패스는 불투명 파이프라인과 동일한 셰이더/레이아웃을 사용하되,
+	// color blend를 켜고 depth write를 꺼서 반투명 유리 오브젝트를 올바르게 합성합니다.
+	VkGraphicsPipelineCreateInfo transparentPipelineCreateInfo = pipelineCreateInfo;
+	transparentPipelineCreateInfo.pColorBlendState = &transparentColorBlending;
+	transparentPipelineCreateInfo.pDepthStencilState = &transparentDepthStencil;
+	if (vkCreateGraphicsPipelines(vulkanDevice->GetVkDevice(), VK_NULL_HANDLE, 1, &transparentPipelineCreateInfo, nullptr, &m_VulkanTriangle.TransparentPipeline) != VK_SUCCESS)
+	{
+		return false;
+	}
+
 	m_VulkanTriangle.IsValid = true;
 	return true;
 }
@@ -1752,6 +2259,11 @@ void Engine::DestroyVulkanTriangleResources()
 	if (m_VulkanTriangle.Pipeline != VK_NULL_HANDLE)
 	{
 		vkDestroyPipeline(vulkanDevice->GetVkDevice(), m_VulkanTriangle.Pipeline, nullptr);
+	}
+
+	if (m_VulkanTriangle.TransparentPipeline != VK_NULL_HANDLE)
+	{
+		vkDestroyPipeline(vulkanDevice->GetVkDevice(), m_VulkanTriangle.TransparentPipeline, nullptr);
 	}
 
 	if (m_VulkanTriangle.PipelineLayout != VK_NULL_HANDLE)
@@ -1791,7 +2303,7 @@ void Engine::DestroyVulkanTriangleResources()
 
 void Engine::DrawVulkanTriangle()
 {
-	if (!m_VulkanTriangle.IsValid || !m_StaticMeshAsset)
+	if (!m_VulkanTriangle.IsValid)
 	{
 		return;
 	}
@@ -1807,55 +2319,112 @@ void Engine::DrawVulkanTriangle()
 		return;
 	}
 
+	const bool drawTransparentInSecondPass = (m_RenderMode == RenderMode::Forward || m_RenderMode == RenderMode::ForwardPlus) && m_VulkanTriangle.TransparentPipeline != VK_NULL_HANDLE;
+	const bool drawOpaquePass = true;
+
 	// Vulkan은 현재 열린 render pass 안에서 그래픽 파이프라인을 바인딩하고 draw를 기록합니다.
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_VulkanTriangle.Pipeline);
 
-	if (m_StaticMeshAsset->Submeshes.empty())
+	for (EntityId entityId : m_RenderEntities)
 	{
-		// Vulkan fallback 경로에서는 첫 번째 material descriptor set을 사용해 전체 메시를 그립니다.
-		const VkDescriptorSet descriptorSet = m_VulkanTriangle.DescriptorSets.front();
-		vkCmdBindDescriptorSets(
-			commandBuffer,
-			VK_PIPELINE_BIND_POINT_GRAPHICS,
-			m_VulkanTriangle.PipelineLayout,
-			0,
-			1,
-			&descriptorSet,
-			0,
-			nullptr);
-		m_CmdList->DrawIndexedInstanced(static_cast<uint32_t>(m_StaticMeshAsset->Indices.size()), 1, 0, 0, 0);
-		return;
-	}
+		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+		if (!meshAsset)
+		{
+			continue;
+		}
 
-	for (const auto& submesh : m_StaticMeshAsset->Submeshes)
-	{
-		const size_t materialIndex = submesh.MaterialIndex < m_VulkanTriangle.DescriptorSets.size() ? submesh.MaterialIndex : 0;
-		const VkDescriptorSet descriptorSet = m_VulkanTriangle.DescriptorSets[materialIndex];
+		UploadEntityGeometry(entityId);
+		UpdateCameraBuffer(entityId);
 
-		// Vulkan 경로는 submesh.MaterialIndex에 대응하는 descriptor set을 바인딩해 material별 texture를 선택합니다.
-		// 그런 다음 해당 submesh의 index 범위만 DrawIndexedInstanced로 기록해 멀티 머티리얼 메시를 올바르게 렌더링합니다.
-		vkCmdBindDescriptorSets(
-			commandBuffer,
-			VK_PIPELINE_BIND_POINT_GRAPHICS,
-			m_VulkanTriangle.PipelineLayout,
-			0,
-			1,
-			&descriptorSet,
-			0,
-			nullptr);
-		m_CmdList->DrawIndexedInstanced(submesh.IndexCount, 1, submesh.IndexOffset, 0, 0);
+		if (meshAsset->Submeshes.empty())
+		{
+			const bool entityIsTransparent = IsMaterialTransparent(entityId, 0);
+			if ((entityIsTransparent && !drawTransparentInSecondPass) || (!entityIsTransparent && !drawOpaquePass))
+			{
+				continue;
+			}
+
+			// Vulkan 단일-메시 fallback에서도 엔티티 투명 여부에 따라 알맞은 파이프라인을 바꿉니다.
+			vkCmdBindPipeline(
+				commandBuffer,
+				VK_PIPELINE_BIND_POINT_GRAPHICS,
+				entityIsTransparent ? m_VulkanTriangle.TransparentPipeline : m_VulkanTriangle.Pipeline);
+
+			// Vulkan fallback 경로에서는 첫 번째 material descriptor set을 사용해 전체 메시를 그립니다.
+			const VkDescriptorSet descriptorSet = m_VulkanTriangle.DescriptorSets.front();
+			vkCmdBindDescriptorSets(
+				commandBuffer,
+				VK_PIPELINE_BIND_POINT_GRAPHICS,
+				m_VulkanTriangle.PipelineLayout,
+				0,
+				1,
+				&descriptorSet,
+				0,
+				nullptr);
+			m_CmdList->DrawIndexedInstanced(static_cast<uint32_t>(meshAsset->Indices.size()), 1, 0, 0, 0);
+			continue;
+		}
+
+		auto drawSubmesh = [&](const Asset::StaticMeshSubmesh& submesh)
+		{
+			const size_t materialIndex = submesh.MaterialIndex < m_VulkanTriangle.DescriptorSets.size() ? submesh.MaterialIndex : 0;
+			const VkDescriptorSet descriptorSet = m_VulkanTriangle.DescriptorSets[materialIndex];
+
+			// Vulkan 경로는 submesh.MaterialIndex에 대응하는 descriptor set을 바인딩해 material별 texture를 선택합니다.
+			// 그런 다음 해당 submesh의 index 범위만 DrawIndexedInstanced로 기록해 멀티 머티리얼 메시를 올바르게 렌더링합니다.
+			vkCmdBindDescriptorSets(
+				commandBuffer,
+				VK_PIPELINE_BIND_POINT_GRAPHICS,
+				m_VulkanTriangle.PipelineLayout,
+				0,
+				1,
+				&descriptorSet,
+				0,
+				nullptr);
+			m_CmdList->DrawIndexedInstanced(submesh.IndexCount, 1, submesh.IndexOffset, 0, 0);
+		};
+
+		if (drawOpaquePass)
+		{
+			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_VulkanTriangle.Pipeline);
+			// Vulkan의 불투명 패스는 forward/deferred/forward+ 공통으로 먼저 실행합니다.
+			// deferred와 forward+에서는 이 구간이 G-Buffer geometry pass에 해당하는 역할입니다.
+			for (const auto& submesh : meshAsset->Submeshes)
+			{
+				if (!IsMaterialTransparent(entityId, submesh.MaterialIndex))
+				{
+					drawSubmesh(submesh);
+				}
+			}
+		}
+
+		if (drawTransparentInSecondPass)
+		{
+			// Vulkan 투명 패스는 alpha blend가 켜진 전용 파이프라인으로 그려야 유리 오브젝트가 반투명하게 합성됩니다.
+			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_VulkanTriangle.TransparentPipeline);
+			// Vulkan의 투명 패스는 forward와 forward+에서만 실행합니다.
+			// deferred 모드에서는 투명 물체를 생략해 전통적인 deferred 제한을 따릅니다.
+			for (const auto& submesh : meshAsset->Submeshes)
+			{
+				if (IsMaterialTransparent(entityId, submesh.MaterialIndex))
+				{
+					drawSubmesh(submesh);
+				}
+			}
+		}
 	}
 }
 
 bool Engine::CreateTriangleVertexBuffer()
 {
-	if (!m_StaticMeshAsset || m_StaticMeshAsset->Vertices.empty())
+	const Asset::StaticMeshAsset* spiderMesh = RenderSystem::GetPrimaryRenderableMesh(m_Scene);
+	if (!spiderMesh || spiderMesh->Vertices.empty())
 	{
 		return false;
 	}
 
 	const BufferDesc bufferDesc = {
-		.Size = static_cast<uint64_t>(m_StaticMeshAsset->Vertices.size() * sizeof(Asset::StaticMeshVertex)),
+		.Size = static_cast<uint64_t>(spiderMesh->Vertices.size() * sizeof(Asset::StaticMeshVertex)),
 		.Stride = sizeof(Asset::StaticMeshVertex),
 		.Heap = HeapType::Upload,
 		.InitialState = ResourceState::GenericRead
@@ -1869,7 +2438,7 @@ bool Engine::CreateTriangleVertexBuffer()
 
 	void* mappedData = nullptr;
 	m_VertexBuffer->Map(&mappedData);
-	std::memcpy(mappedData, m_StaticMeshAsset->Vertices.data(), static_cast<size_t>(bufferDesc.Size));
+	std::memcpy(mappedData, spiderMesh->Vertices.data(), static_cast<size_t>(bufferDesc.Size));
 	m_VertexBuffer->Unmap();
 
 	return true;
@@ -1877,13 +2446,14 @@ bool Engine::CreateTriangleVertexBuffer()
 
 bool Engine::CreateIndexBuffer()
 {
-	if (!m_StaticMeshAsset || m_StaticMeshAsset->Indices.empty())
+	const Asset::StaticMeshAsset* spiderMesh = RenderSystem::GetPrimaryRenderableMesh(m_Scene);
+	if (!spiderMesh || spiderMesh->Indices.empty())
 	{
 		return false;
 	}
 
 	const BufferDesc bufferDesc = {
-		.Size = static_cast<uint64_t>(m_StaticMeshAsset->Indices.size() * sizeof(uint32_t)),
+		.Size = static_cast<uint64_t>(spiderMesh->Indices.size() * sizeof(uint32_t)),
 		.Stride = sizeof(uint32_t),
 		.Heap = HeapType::Upload,
 		.InitialState = ResourceState::GenericRead
@@ -1897,7 +2467,7 @@ bool Engine::CreateIndexBuffer()
 
 	void* mappedData = nullptr;
 	m_IndexBuffer->Map(&mappedData);
-	std::memcpy(mappedData, m_StaticMeshAsset->Indices.data(), static_cast<size_t>(bufferDesc.Size));
+	std::memcpy(mappedData, spiderMesh->Indices.data(), static_cast<size_t>(bufferDesc.Size));
 	m_IndexBuffer->Unmap();
 	return true;
 }
@@ -1914,8 +2484,12 @@ void Engine::UpdateRendererMenuState()
 		MF_BYCOMMAND | (m_CurrentApi == GraphicsAPI::DirectX12 ? MF_CHECKED : MF_UNCHECKED));
 	CheckMenuItem(menu, IDM_RENDERER_VULKAN, 
 		MF_BYCOMMAND | (m_CurrentApi == GraphicsAPI::Vulkan ? MF_CHECKED : MF_UNCHECKED));
-	CheckMenuItem(menu, IDM_VIEW_UV_DEBUG,
-		MF_BYCOMMAND | (m_IsUvDebugViewEnabled ? MF_CHECKED : MF_UNCHECKED));
+	CheckMenuItem(menu, IDM_RENDERMODE_FORWARD,
+		MF_BYCOMMAND | (m_RenderMode == RenderMode::Forward ? MF_CHECKED : MF_UNCHECKED));
+	CheckMenuItem(menu, IDM_RENDERMODE_DEFERRED,
+		MF_BYCOMMAND | (m_RenderMode == RenderMode::Deferred ? MF_CHECKED : MF_UNCHECKED));
+	CheckMenuItem(menu, IDM_RENDERMODE_FORWARD_PLUS,
+		MF_BYCOMMAND | (m_RenderMode == RenderMode::ForwardPlus ? MF_CHECKED : MF_UNCHECKED));
 	DrawMenuBar(m_hMainWnd);
 }
 
@@ -1923,12 +2497,7 @@ void Engine::ResetFpsCounter()
 {
 	m_FrameCount = 0;
 	m_LastFpsUpdate = std::chrono::steady_clock::now();
-	std::wstring title = m_WindowTitleBase;
-	if (m_IsUvDebugViewEnabled)
-	{
-		title.append(L" [UV Debug]");
-	}
-	SetWindowTextW(m_hMainWnd, title.c_str());
+	SetWindowTextW(m_hMainWnd, m_WindowTitleBase.c_str());
 }
 
 void Engine::UpdateWindowTitleWithFps()
@@ -1945,7 +2514,7 @@ void Engine::UpdateWindowTitleWithFps()
 
 	const double fps = static_cast<double>(m_FrameCount) / elapsed.count();
 	wchar_t titleBuffer[256] = {};
-	swprintf_s(titleBuffer, L"%s%s | FPS: %.1f", m_WindowTitleBase.c_str(), m_IsUvDebugViewEnabled ? L" [UV Debug]" : L"", fps);
+	swprintf_s(titleBuffer, L"%s | FPS: %.1f", m_WindowTitleBase.c_str(), fps);
 	SetWindowTextW(m_hMainWnd, titleBuffer);
 
 	m_FrameCount = 0;

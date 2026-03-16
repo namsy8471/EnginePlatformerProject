@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Transform.h"
+
 #include <DirectXMath.h>
 #include <windows.h>
 
@@ -38,10 +40,11 @@ public:
 	void UpdateViewMatrix() noexcept;
 
 	// Getter
-	[[nodiscard]] XMFLOAT3 GetPosition() const noexcept { return m_Position; }
+	[[nodiscard]] XMFLOAT3 GetPosition() const noexcept { return m_Transform.Translation; }
 	[[nodiscard]] XMFLOAT3 GetForward() const noexcept { return m_Forward; }
 	[[nodiscard]] XMFLOAT3 GetRight() const noexcept { return m_Right; }
 	[[nodiscard]] XMFLOAT3 GetUp() const noexcept { return m_Up; }
+	[[nodiscard]] const Math::Transform& GetTransform() const noexcept { return m_Transform; }
 
 	[[nodiscard]] XMMATRIX GetViewMatrix() const noexcept;
 	[[nodiscard]] XMMATRIX GetProjectionMatrix() const noexcept;
@@ -53,7 +56,7 @@ public:
 
 private:
 	// 카메라 위치 및 방향
-	XMFLOAT3 m_Position = { 0.0f, 0.0f, -5.0f };
+	Math::Transform m_Transform = Math::Transform({ 0.0f, 0.0f, -5.0f }, Math::IdentityQuaternion(), Math::OneVector3());
 	XMFLOAT3 m_Forward = { 0.0f, 0.0f, 1.0f };
 	XMFLOAT3 m_Right = { 1.0f, 0.0f, 0.0f };
 	XMFLOAT3 m_Up = { 0.0f, 1.0f, 0.0f };
