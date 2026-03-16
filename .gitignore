@@ -65,3 +65,4 @@ obj/
 
 # [External / Library] - 외부 패키지 매니저 결과물
 vcpkg_installed/
+/PerformanceTests1

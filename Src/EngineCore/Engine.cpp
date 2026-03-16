@@ -288,6 +288,17 @@ bool Engine::IsMaterialTransparent(EntityId entityId, size_t materialIndex) cons
 		return false;
 	}
 
+	const auto cachedTransparencyIt = m_EntityMaterialTransparency.find(entityId);
+	if (cachedTransparencyIt != m_EntityMaterialTransparency.end())
+	{
+		const auto& cachedTransparency = cachedTransparencyIt->second;
+		if (materialIndex < cachedTransparency.size())
+		{
+			return cachedTransparency[materialIndex];
+		}
+		return false;
+	}
+
 	return MaterialTextureHasTransparency((*materialTextures)[materialIndex]);
 }
 
@@ -703,6 +714,7 @@ bool Engine::LoadSpiderStaticMesh()
 {
 	m_RenderEntities.clear();
 	m_TransparentEntities.clear();
+	m_EntityMaterialTransparency.clear();
 
 	const std::filesystem::path spiderDirectory = "Assets/Models/Spider";
 	if (!std::filesystem::exists(spiderDirectory))
@@ -814,6 +826,7 @@ bool Engine::LoadSpiderStaticMesh()
 	if (spiderMesh)
 	{
 		applyVertexTint(*spiderMesh, tintPalette[0]);
+		const std::vector<bool> baseMaterialTransparency = m_PrimaryMaterialTransparency;
 
 		auto spawnVariant = [&](int variantIndex, bool glassVariant)
 		{
@@ -827,6 +840,7 @@ bool Engine::LoadSpiderStaticMesh()
 			{
 				meshComponent.MaterialTextures = *sourceMaterialTextures;
 			}
+			m_EntityMaterialTransparency[entity] = baseMaterialTransparency;
 
 			const size_t colorIndex = static_cast<size_t>(variantIndex) % tintPalette.size();
 			DirectX::XMFLOAT4 tint = tintPalette[colorIndex];
@@ -929,6 +943,10 @@ bool Engine::LoadMaterialTextures()
 	if (!spiderMesh)
 	{
 		m_PrimaryMaterialTransparency.clear();
+        if (spiderEntity != InvalidEntityId)
+		{
+			m_EntityMaterialTransparency[spiderEntity].clear();
+		}
 		return true;
 	}
 
@@ -1014,6 +1032,12 @@ bool Engine::LoadMaterialTextures()
 	std::string materialTextureSummaryLogMessage = "Material texture count=";
 	materialTextureSummaryLogMessage.append(std::to_string(materialTextures->size()));
 	LogEngineTrace(materialTextureSummaryLogMessage);
+
+	if (spiderEntity != InvalidEntityId)
+	{
+		m_EntityMaterialTransparency[spiderEntity] = m_PrimaryMaterialTransparency;
+	}
+
 	return true;
 }
 

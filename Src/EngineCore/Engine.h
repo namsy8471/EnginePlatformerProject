@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <wrl.h>
@@ -128,6 +129,7 @@ private:
 	RenderMode m_RenderMode = RenderMode::Forward;
 	std::wstring m_WindowTitleBase = L"EnginePlatformer - Vulkan - Forward";
 	std::vector<bool> m_PrimaryMaterialTransparency;
+	std::unordered_map<EntityId, std::vector<bool>> m_EntityMaterialTransparency;
 
 	// FPS 카운팅
 	uint32_t m_FrameCount = 0;
