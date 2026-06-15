@@ -2,6 +2,7 @@
 
 #include "Rendering/RHI/IBuffer.h"
 
+#include <memory>
 #include <vector>
 #include <wrl.h>
 
@@ -61,9 +62,12 @@ namespace Rendering
 
 	struct StaticMeshRenderer
 	{
-		IBuffer* VertexBuffer = nullptr;
-		IBuffer* IndexBuffer = nullptr;
-		IBuffer* CameraBuffer = nullptr;
+		std::unique_ptr<IBuffer> VertexBuffer;
+		std::unique_ptr<IBuffer> IndexBuffer;
+		std::unique_ptr<IBuffer> CameraBuffer;
+		uint64_t CameraBufferStride = 256;
+		uint32_t CameraBufferCapacity = 0;
+		uint32_t CameraBufferCursor = 0;
 		Dx12StaticMeshResources Dx12;
 		VulkanStaticMeshResources Vulkan;
 	};

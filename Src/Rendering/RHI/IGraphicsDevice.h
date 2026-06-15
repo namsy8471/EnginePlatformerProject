@@ -1,6 +1,8 @@
 #pragma once
 #include "GraphicsCommon.h"
 
+#include <memory>
+
 class ICommandList;
 class IBuffer;
 class IGpuResource;
@@ -28,10 +30,10 @@ public:
 	virtual void MoveToNextFrame() = 0; // SwapChain Present 후 인덱스 이동
 
 	// 생성
-	[[nodiscard]] virtual ICommandList* CreateCommandList() = 0;
+	[[nodiscard]] virtual std::unique_ptr<ICommandList> CreateCommandList() = 0;
 
 	// 버퍼 생성 (버텍스, 인덱스, 업로드 버퍼 등)
-	[[nodiscard]] virtual IBuffer* CreateBuffer(const BufferDesc& desc) = 0;
+	[[nodiscard]] virtual std::unique_ptr<IBuffer> CreateBuffer(const BufferDesc& desc) = 0;
 
 	// 화면 표시
 	virtual void Present() = 0;
@@ -49,5 +51,5 @@ public:
 
 	// 팩토리 메서드
 	// windowHandle은 플랫폼별 윈도우 핸들 (예: HWND)
-	[[nodiscard]] static IGraphicsDevice* Create(GraphicsAPI api, void* windowHandle, int width, int height);
+	[[nodiscard]] static std::unique_ptr<IGraphicsDevice> Create(GraphicsAPI api, void* windowHandle, int width, int height);
 };

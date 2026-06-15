@@ -2,6 +2,8 @@
 
 #include "Rendering/RHI/GraphicsCommon.h"
 
+#include <memory>
+
 class ICommandList;
 class IGraphicsDevice;
 
@@ -9,8 +11,8 @@ namespace Rendering
 {
 	struct GraphicsRuntime
 	{
-		IGraphicsDevice* Device = nullptr;
-		ICommandList* CommandList = nullptr;
+		std::unique_ptr<IGraphicsDevice> Device;
+		std::unique_ptr<ICommandList> CommandList;
 		GraphicsAPI CurrentApi = GraphicsAPI::Vulkan;
 	};
 }

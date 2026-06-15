@@ -18,7 +18,7 @@ namespace Samples::Benchmark
 		void SetSpawnView(const Camera& camera);
 		void Update(float deltaTime);
 		void DrawImGui();
-		void DrawViewportOverlay(const Camera& camera, float viewportWidth, float viewportHeight) const;
+		void DrawViewportOverlay(const Camera& camera, float viewportLeft, float viewportTop, float viewportWidth, float viewportHeight) const;
 		void RunSweep();
 
 		[[nodiscard]] const BenchmarkConfig& GetConfig() const noexcept;

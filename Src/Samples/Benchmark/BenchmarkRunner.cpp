@@ -11,6 +11,7 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -19,6 +20,7 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <utility>
 
 namespace Samples::Benchmark
 {
@@ -273,14 +275,14 @@ namespace Samples::Benchmark
 		BenchmarkConfig editedConfig = m_Config;
 		bool configChanged = false;
 
-		int modeIndex = static_cast<int>(editedConfig.Mode);
+		int modeIndex = std::to_underlying(editedConfig.Mode);
 		if (ImGui::Combo("Benchmark Mode", &modeIndex, "Non-ECS\0ECS\0"))
 		{
 			editedConfig.Mode = static_cast<BenchmarkMode>(modeIndex);
 			configChanged = true;
 		}
 
-		int objectTypeIndex = static_cast<int>(editedConfig.ObjectType);
+		int objectTypeIndex = std::to_underlying(editedConfig.ObjectType);
 		if (ImGui::Combo("Object Type", &objectTypeIndex, "Primitive\0Spider\0"))
 		{
 			editedConfig.ObjectType = static_cast<BenchmarkObjectType>(objectTypeIndex);
@@ -297,8 +299,8 @@ namespace Samples::Benchmark
 			}
 		}
 
-		const char* objectCountItems[] = { "100", "1000", "10000", "100000", "1000000", "10000000" };
-		if (ImGui::Combo("Object Count", &objectCountIndex, objectCountItems, static_cast<int>(std::size(objectCountItems))))
+		static constexpr std::array objectCountItems = { "100", "1000", "10000", "100000", "1000000", "10000000" };
+		if (ImGui::Combo("Object Count", &objectCountIndex, objectCountItems.data(), static_cast<int>(objectCountItems.size())))
 		{
 			editedConfig.ObjectCount = kBenchmarkObjectCounts[static_cast<size_t>(objectCountIndex)];
 			configChanged = true;
@@ -339,23 +341,26 @@ namespace Samples::Benchmark
 		DrawSweepTable(m_SweepResults);
 	}
 
-	void BenchmarkRunner::DrawViewportOverlay(const Camera& camera, float viewportWidth, float viewportHeight) const
+	void BenchmarkRunner::DrawViewportOverlay(const Camera& camera, float viewportLeft, float viewportTop, float viewportWidth, float viewportHeight) const
 	{
 		if (!m_ShowViewportDots || m_RenderInstances.empty() || viewportWidth <= 0.0f || viewportHeight <= 0.0f)
 		{
 			return;
 		}
 
-		ImDrawList* drawList = ImGui::GetBackgroundDrawList();
+		ImDrawList* drawList = ImGui::GetForegroundDrawList();
 		if (!drawList)
 		{
 			return;
 		}
 
 		const ImVec2 viewportOrigin = ImGui::GetMainViewport()->Pos;
+		const ImVec2 clipMin(viewportOrigin.x + viewportLeft, viewportOrigin.y + viewportTop);
+		const ImVec2 clipMax(clipMin.x + viewportWidth, clipMin.y + viewportHeight);
 		const DirectX::XMMATRIX viewProjection = camera.GetViewProjectionMatrix();
 		const float pointRadius = m_Config.ObjectCount >= 10000 ? 1.0f : 2.0f;
 
+		drawList->PushClipRect(clipMin, clipMax, true);
 		for (const BenchmarkRenderInstance& instance : m_RenderInstances)
 		{
 			const DirectX::XMVECTOR worldPosition = DirectX::XMVectorSet(instance.Position.x, instance.Position.y, instance.Position.z, 1.0f);
@@ -373,13 +378,14 @@ namespace Samples::Benchmark
 				continue;
 			}
 
-			const float screenX = viewportOrigin.x + (ndcX * 0.5f + 0.5f) * viewportWidth;
-			const float screenY = viewportOrigin.y + (-ndcY * 0.5f + 0.5f) * viewportHeight;
+			const float screenX = clipMin.x + (ndcX * 0.5f + 0.5f) * viewportWidth;
+			const float screenY = clipMin.y + (-ndcY * 0.5f + 0.5f) * viewportHeight;
 			drawList->AddRectFilled(
 				ImVec2(screenX - pointRadius, screenY - pointRadius),
 				ImVec2(screenX + pointRadius, screenY + pointRadius),
 				ToImGuiColor(instance.Tint));
 		}
+		drawList->PopClipRect();
 	}
 
 	void BenchmarkRunner::RunSweep()

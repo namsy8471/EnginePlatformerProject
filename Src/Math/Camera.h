@@ -18,6 +18,7 @@ public:
 	// 카메라 속성 설정
 	void SetPosition(float x, float y, float z) noexcept;
 	void SetPosition(const XMFLOAT3& position) noexcept;
+	void SetTransform(const Math::Transform& transform) noexcept;
 	void SetLens(float fovY, float aspect, float nearZ, float farZ) noexcept;
 
 	// 카메라 방향 제어
@@ -35,6 +36,17 @@ public:
 
 	// 입력 기반 업데이트
 	void Update(float deltaTime, HWND hwnd);
+	void UpdateFromInputState(
+		float deltaTime,
+		bool moveForward,
+		bool moveBackward,
+		bool moveLeft,
+		bool moveRight,
+		bool moveDown,
+		bool moveUp,
+		bool mouseLook,
+		float mouseDeltaX,
+		float mouseDeltaY) noexcept;
 
 	// 행렬 업데이트
 	void UpdateViewMatrix() noexcept;
@@ -46,6 +58,8 @@ public:
 	[[nodiscard]] XMFLOAT3 GetUp() const noexcept { return m_Up; }
 	[[nodiscard]] float GetFovY() const noexcept { return m_FovY; }
 	[[nodiscard]] float GetAspect() const noexcept { return m_Aspect; }
+	[[nodiscard]] float GetNearZ() const noexcept { return m_NearZ; }
+	[[nodiscard]] float GetFarZ() const noexcept { return m_FarZ; }
 	[[nodiscard]] const Math::Transform& GetTransform() const noexcept { return m_Transform; }
 
 	[[nodiscard]] XMMATRIX GetViewMatrix() const noexcept;

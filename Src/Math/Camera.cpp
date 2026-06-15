@@ -23,6 +23,20 @@ void Camera::SetPosition(const XMFLOAT3& position) noexcept
 	m_ViewDirty = true;
 }
 
+void Camera::SetTransform(const Math::Transform& transform) noexcept
+{
+	m_Transform = transform;
+	m_Transform.Rotation = Math::NormalizeQuaternionOrIdentity(transform.Rotation);
+	const XMVECTOR rotation = Math::Load(m_Transform.Rotation);
+	const XMVECTOR forward = XMVector3Normalize(XMVector3Rotate(XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f), rotation));
+	DirectX::XMFLOAT3 forwardFloat = {};
+	Math::Store(forwardFloat, forward);
+	m_Pitch = std::clamp(std::asinf(forwardFloat.y), -XM_PIDIV2 + 0.01f, XM_PIDIV2 - 0.01f);
+	m_Yaw = std::atan2f(forwardFloat.x, forwardFloat.z);
+	m_ViewDirty = true;
+	UpdateViewMatrix();
+}
+
 void Camera::SetLens(float fovY, float aspect, float nearZ, float farZ) noexcept
 {
 	m_FovY = fovY;
@@ -107,26 +121,53 @@ void Camera::Yaw(float angle) noexcept
 void Camera::Update(float deltaTime, HWND hwnd)
 {
 	InputSystem& input = InputSystem::Get();
-	const float moveAmount = m_MoveSpeed * deltaTime;
-
-	// WASD 이동
-	if (input.IsKeyDown('W')) Walk(moveAmount);
-	if (input.IsKeyDown('S')) Walk(-moveAmount);
-	if (input.IsKeyDown('A')) Strafe(-moveAmount);
-	if (input.IsKeyDown('D')) Strafe(moveAmount);
-	if (input.IsKeyDown('Q')) Rise(-moveAmount);
-	if (input.IsKeyDown('E')) Rise(moveAmount);
-
-	// 우클릭으로 마우스 룩
 	if (input.IsMouseButtonDown(1))
 	{
 		input.LockCursor(hwnd, true);
-		Yaw(input.GetMouseDeltaX() * m_MouseSensitivity);
-		Pitch(input.GetMouseDeltaY() * m_MouseSensitivity);
 	}
 	else
 	{
 		input.LockCursor(hwnd, false);
+	}
+
+	UpdateFromInputState(
+		deltaTime,
+		input.IsKeyDown('W'),
+		input.IsKeyDown('S'),
+		input.IsKeyDown('A'),
+		input.IsKeyDown('D'),
+		input.IsKeyDown('Q'),
+		input.IsKeyDown('E'),
+		input.IsMouseButtonDown(1),
+		static_cast<float>(input.GetMouseDeltaX()),
+		static_cast<float>(input.GetMouseDeltaY()));
+}
+
+void Camera::UpdateFromInputState(
+	float deltaTime,
+	bool moveForward,
+	bool moveBackward,
+	bool moveLeft,
+	bool moveRight,
+	bool moveDown,
+	bool moveUp,
+	bool mouseLook,
+	float mouseDeltaX,
+	float mouseDeltaY) noexcept
+{
+	const float moveAmount = m_MoveSpeed * deltaTime;
+
+	if (moveForward) Walk(moveAmount);
+	if (moveBackward) Walk(-moveAmount);
+	if (moveLeft) Strafe(-moveAmount);
+	if (moveRight) Strafe(moveAmount);
+	if (moveDown) Rise(-moveAmount);
+	if (moveUp) Rise(moveAmount);
+
+	if (mouseLook)
+	{
+		Yaw(mouseDeltaX * m_MouseSensitivity);
+		Pitch(mouseDeltaY * m_MouseSensitivity);
 	}
 
 	if (m_ViewDirty)

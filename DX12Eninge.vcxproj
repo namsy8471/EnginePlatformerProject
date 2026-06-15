@@ -71,13 +71,14 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <!-- MSVC의 C++26 후보 기능은 stdcpplatest로 사용합니다. 이 값이 현재 최종 선택 표준입니다. -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -92,7 +93,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -105,7 +106,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
       <AdditionalIncludeDirectories>$(SolutionDir)\Src;$(SolutionDir)\Src\App\Win32;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -121,7 +122,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
       <AdditionalIncludeDirectories>$(SolutionDir)\Src;$(SolutionDir)\Src\App\Win32;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -167,7 +168,7 @@
     <ClInclude Include="Src\Rendering\RHI\IGraphicsDevice.h" />
     <ClInclude Include="Src\Rendering\GraphicsRuntime.h" />
     <ClInclude Include="Src\Rendering\RenderMode.h" />
-    <ClInclude Include="Src\Rendering\Debug\ImGuiDebugLayer.h" />
+    <ClInclude Include="Src\Editor\EditorLayer.h" />
     <ClInclude Include="Src\Rendering\Resources\MaterialTextureSystem.h" />
     <ClInclude Include="Src\Rendering\Systems\StaticMeshRenderer.h" />
     <ClInclude Include="Src\Samples\Benchmark\BenchmarkComponents.h" />
@@ -196,7 +197,7 @@
     <ClCompile Include="Src\Rendering\Backends\Vulkan\VulkanCommandList.cpp" />
     <ClCompile Include="Src\Rendering\Backends\Vulkan\VulkanDevice.cpp" />
     <ClCompile Include="Src\Rendering\RHI\IGraphicsDevice.cpp" />
-    <ClCompile Include="Src\Rendering\Debug\ImGuiDebugLayer.cpp" />
+    <ClCompile Include="Src\Editor\EditorLayer.cpp" />
     <ClCompile Include="Src\Rendering\Resources\MaterialTextureSystem.cpp" />
     <ClCompile Include="Src\Samples\Benchmark\BenchmarkRunner.cpp" />
     <ClCompile Include="Src\Samples\Benchmark\EcsObjectStore.cpp" />

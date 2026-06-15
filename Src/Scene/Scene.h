@@ -42,6 +42,31 @@ struct BoundsComponent
 	DirectX::XMFLOAT3 LocalMax = { 0.0f, 0.0f, 0.0f };
 };
 
+struct CameraComponent
+{
+	float FovY = DirectX::XM_PIDIV4;
+	float NearZ = 0.1f;
+	float FarZ = 1000.0f;
+	bool IsGameCamera = false;
+};
+
+enum class LightType : uint8_t
+{
+	Directional,
+	Point,
+	Spot
+};
+
+struct LightComponent
+{
+	LightType Type = LightType::Directional;
+	DirectX::XMFLOAT3 Color = { 1.0f, 0.96f, 0.86f };
+	float Intensity = 2.5f;
+	float Range = 200.0f;
+	float SpotAngle = DirectX::XM_PIDIV4;
+	bool Enabled = true;
+};
+
 class Scene
 {
 public:
@@ -83,6 +108,16 @@ public:
 	[[nodiscard]] BoundsComponent& EnsureBoundsComponent(EntityId entityId)
 	{
 		return m_Bounds[entityId];
+	}
+
+	[[nodiscard]] CameraComponent& EnsureCameraComponent(EntityId entityId)
+	{
+		return m_Cameras[entityId];
+	}
+
+	[[nodiscard]] LightComponent& EnsureLightComponent(EntityId entityId)
+	{
+		return m_Lights[entityId];
 	}
 
 	[[nodiscard]] const MeshComponent* GetMeshComponent(EntityId entityId) const
@@ -127,6 +162,30 @@ public:
 		return boundsIt != m_Bounds.end() ? &boundsIt->second : nullptr;
 	}
 
+	[[nodiscard]] CameraComponent* GetCameraComponent(EntityId entityId)
+	{
+		auto cameraIt = m_Cameras.find(entityId);
+		return cameraIt != m_Cameras.end() ? &cameraIt->second : nullptr;
+	}
+
+	[[nodiscard]] const CameraComponent* GetCameraComponent(EntityId entityId) const
+	{
+		auto cameraIt = m_Cameras.find(entityId);
+		return cameraIt != m_Cameras.end() ? &cameraIt->second : nullptr;
+	}
+
+	[[nodiscard]] LightComponent* GetLightComponent(EntityId entityId)
+	{
+		auto lightIt = m_Lights.find(entityId);
+		return lightIt != m_Lights.end() ? &lightIt->second : nullptr;
+	}
+
+	[[nodiscard]] const LightComponent* GetLightComponent(EntityId entityId) const
+	{
+		auto lightIt = m_Lights.find(entityId);
+		return lightIt != m_Lights.end() ? &lightIt->second : nullptr;
+	}
+
 	[[nodiscard]] const std::string* GetEntityName(EntityId entityId) const
 	{
 		for (const SceneEntity& entity : m_Entities)
@@ -138,6 +197,11 @@ public:
 		}
 
 		return nullptr;
+	}
+
+	[[nodiscard]] const std::vector<SceneEntity>& GetEntities() const noexcept
+	{
+		return m_Entities;
 	}
 
 	void ResetSelection() noexcept
@@ -188,4 +252,6 @@ private:
 	std::unordered_map<EntityId, TransformComponent> m_Transforms;
 	std::unordered_map<EntityId, MeshComponent> m_Meshes;
 	std::unordered_map<EntityId, BoundsComponent> m_Bounds;
+	std::unordered_map<EntityId, CameraComponent> m_Cameras;
+	std::unordered_map<EntityId, LightComponent> m_Lights;
 };

@@ -5,17 +5,18 @@
 #include "VulkanResource.h"
 
 #include <algorithm>
-#include <cstdio>
-#include <cstring>
+#include <format>
+#include <ranges>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 
 namespace
 {
 	void LogVulkanMessage(const char* level, const char* message)
 	{
-		char buffer[512] = {};
-		snprintf(buffer, sizeof(buffer), "[Vulkan][%s] %s\n", level, message);
-		OutputDebugStringA(buffer);
+		const std::string buffer = std::format("[Vulkan][{}] {}\n", level, message);
+		OutputDebugStringA(buffer.c_str());
 	}
 
 	void LogVulkanStageSuccess(const char* stage)
@@ -35,28 +36,20 @@ namespace
 
 	bool ContainsLayer(const std::vector<VkLayerProperties>& layers, const char* layerName)
 	{
-		for (const VkLayerProperties& layer : layers)
-		{
-			if (strcmp(layer.layerName, layerName) == 0)
+		const std::string_view target = layerName;
+		return std::ranges::any_of(layers, [target](const VkLayerProperties& layer)
 			{
-				return true;
-			}
-		}
-
-		return false;
+				return std::string_view(layer.layerName) == target;
+			});
 	}
 
 	bool ContainsExtension(const std::vector<VkExtensionProperties>& extensions, const char* extensionName)
 	{
-		for (const VkExtensionProperties& extension : extensions)
-		{
-			if (strcmp(extension.extensionName, extensionName) == 0)
+		const std::string_view target = extensionName;
+		return std::ranges::any_of(extensions, [target](const VkExtensionProperties& extension)
 			{
-				return true;
-			}
-		}
-
-		return false;
+				return std::string_view(extension.extensionName) == target;
+			});
 	}
 }
 
@@ -327,16 +320,16 @@ void VulkanDevice::Resize(int width, int height)
 	LogVulkanStageSuccess("Swapchain image acquired after resize.");
 }
 
-ICommandList* VulkanDevice::CreateCommandList()
+std::unique_ptr<ICommandList> VulkanDevice::CreateCommandList()
 {
 	// 현재 Vulkan 커맨드 버퍼에 기록하는 VulkanCommandList를 생성합니다.
-	return new VulkanCommandList(this);
+	return std::make_unique<VulkanCommandList>(this);
 }
 
-IBuffer* VulkanDevice::CreateBuffer(const BufferDesc& desc)
+std::unique_ptr<IBuffer> VulkanDevice::CreateBuffer(const BufferDesc& desc)
 {
 	// RHI의 BufferDesc를 기반으로 실제 VulkanBuffer를 생성합니다.
-	return new VulkanBuffer(this, desc);
+	return std::make_unique<VulkanBuffer>(this, desc);
 }
 
 void VulkanDevice::ExecuteCommandList(ICommandList* cmdList)
@@ -555,9 +548,8 @@ VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDevice::DebugCallback(
 	else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
 		severity = "[WARNING]";
 
-	char buffer[4096];
-	snprintf(buffer, sizeof(buffer), "[Vulkan Validation] %s %s\n", severity, pCallbackData->pMessage);
-	OutputDebugStringA(buffer);
+	const std::string buffer = std::format("[Vulkan Validation] {} {}\n", severity, pCallbackData->pMessage);
+	OutputDebugStringA(buffer.c_str());
 
 	return VK_FALSE;
 }
@@ -1169,15 +1161,7 @@ bool VulkanDevice::SupportsRequiredDeviceExtensions(VkPhysicalDevice physicalDev
 	std::vector<VkExtensionProperties> extensions(extensionCount);
 	vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extensionCount, extensions.data());
 
-	for (const VkExtensionProperties& extension : extensions)
-	{
-		if (strcmp(extension.extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME) == 0)
-		{
-			return true;
-		}
-	}
-
-	return false;
+	return ContainsExtension(extensions, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 }
 
 VulkanDevice::SwapchainSupportDetails VulkanDevice::QuerySwapchainSupport(VkPhysicalDevice physicalDevice) const

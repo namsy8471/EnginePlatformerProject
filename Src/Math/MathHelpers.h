@@ -1,6 +1,7 @@
 #pragma once
 
 #include <DirectXMath.h>
+#include <cmath>
 
 namespace Math
 {
@@ -65,6 +66,24 @@ namespace Math
 	[[nodiscard]] inline DirectX::XMFLOAT4 IdentityQuaternion() noexcept
 	{
 		return { 0.0f, 0.0f, 0.0f, 1.0f };
+	}
+
+	[[nodiscard]] inline DirectX::XMFLOAT4 NormalizeQuaternionOrIdentity(const DirectX::XMFLOAT4& rotation) noexcept
+	{
+		const float lengthSquared =
+			rotation.x * rotation.x
+			+ rotation.y * rotation.y
+			+ rotation.z * rotation.z
+			+ rotation.w * rotation.w;
+
+		if (!std::isfinite(lengthSquared) || lengthSquared <= 1.0e-8f)
+		{
+			return IdentityQuaternion();
+		}
+
+		DirectX::XMFLOAT4 normalized = {};
+		Store(normalized, DirectX::XMQuaternionNormalize(Load(rotation)));
+		return normalized;
 	}
 
 	[[nodiscard]] inline DirectX::XMFLOAT3 OneVector3() noexcept

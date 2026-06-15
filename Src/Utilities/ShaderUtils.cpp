@@ -1,30 +1,37 @@
 #include "ShaderUtils.h"
 #include <glslang/Public/resource_limits_c.h>
-#include <cstdio>
+
+#include <filesystem>
+#include <format>
+#include <fstream>
+#include <iterator>
+#include <memory>
 #include <windows.h>
 
 namespace ShaderUtils
 {
+	namespace
+	{
+		void OutputDebugLine(const std::string& message)
+		{
+			OutputDebugStringA(message.c_str());
+			OutputDebugStringA("\n");
+		}
+	}
+
 	std::string LoadShaderSource(std::string_view filepath)
 	{
-		FILE* file = nullptr;
-		if (fopen_s(&file, filepath.data(), "rb") != 0 || !file)
+		std::ifstream file(std::filesystem::path(std::string(filepath)), std::ios::binary);
+		if (!file)
 		{
-			char errorBuffer[512] = {};
-			snprintf(errorBuffer, sizeof(errorBuffer), "[ShaderUtils][ERROR] Failed to open: %s\n", filepath.data());
-			OutputDebugStringA(errorBuffer);
+			OutputDebugLine(std::format("[ShaderUtils][ERROR] Failed to open: {}", filepath));
 			return {};
 		}
 
-		fseek(file, 0, SEEK_END);
-		const long fileSize = ftell(file);
-		fseek(file, 0, SEEK_SET);
-
-		std::string content(fileSize, '\0');
-		fread(content.data(), 1, fileSize, file);
-		fclose(file);
-
-		return content;
+		return {
+			std::istreambuf_iterator<char>(file),
+			std::istreambuf_iterator<char>()
+		};
 	}
 
 	std::vector<uint32_t> CompileGlslToSpirv(
@@ -50,48 +57,42 @@ namespace ShaderUtils
 			.resource = glslang_default_resource()
 		};
 
-		glslang_shader_t* shader = glslang_shader_create(&input);
-		glslang_shader_set_entry_point(shader, entryPoint.data());
+		std::unique_ptr<glslang_shader_t, decltype(&glslang_shader_delete)> shader(
+			glslang_shader_create(&input),
+			glslang_shader_delete);
+		glslang_shader_set_entry_point(shader.get(), entryPoint.data());
 
-		if (!glslang_shader_preprocess(shader, &input) || !glslang_shader_parse(shader, &input))
+		if (!glslang_shader_preprocess(shader.get(), &input) || !glslang_shader_parse(shader.get(), &input))
 		{
-			const char* log = glslang_shader_get_info_log(shader);
-			char errorBuffer[2048] = {};
-			snprintf(errorBuffer, sizeof(errorBuffer), "[ShaderUtils][ERROR] Shader compilation failed:\n%s\n", log);
-			OutputDebugStringA(errorBuffer);
-			glslang_shader_delete(shader);
+			const char* log = glslang_shader_get_info_log(shader.get());
+			OutputDebugLine(std::format("[ShaderUtils][ERROR] Shader compilation failed:\n{}", log ? log : "<no log>"));
 			return {};
 		}
 
-		glslang_program_t* program = glslang_program_create();
-		glslang_program_add_shader(program, shader);
+		std::unique_ptr<glslang_program_t, decltype(&glslang_program_delete)> program(
+			glslang_program_create(),
+			glslang_program_delete);
+		glslang_program_add_shader(program.get(), shader.get());
 		
-		if (!glslang_program_link(program, input.messages))
+		if (!glslang_program_link(program.get(), input.messages))
 		{
-			const char* log = glslang_program_get_info_log(program);
-			char errorBuffer[2048] = {};
-			snprintf(errorBuffer, sizeof(errorBuffer), "[ShaderUtils][ERROR] Shader linking failed:\n%s\n", log);
-			OutputDebugStringA(errorBuffer);
-			glslang_program_delete(program);
-			glslang_shader_delete(shader);
+			const char* log = glslang_program_get_info_log(program.get());
+			OutputDebugLine(std::format("[ShaderUtils][ERROR] Shader linking failed:\n{}", log ? log : "<no log>"));
 			return {};
 		}
 
-		glslang_program_SPIRV_generate(program, stage);
-		const size_t wordCount = glslang_program_SPIRV_get_size(program);
+		glslang_program_SPIRV_generate(program.get(), stage);
+		const size_t wordCount = glslang_program_SPIRV_get_size(program.get());
 		std::vector<uint32_t> spirv(wordCount);
-		glslang_program_SPIRV_get(program, spirv.data());
+		glslang_program_SPIRV_get(program.get(), spirv.data());
 
-		const char* spvMessages = glslang_program_SPIRV_get_messages(program);
+		const char* spvMessages = glslang_program_SPIRV_get_messages(program.get());
 		if (spvMessages && spvMessages[0] != '\0')
 		{
 			OutputDebugStringA("[ShaderUtils][SPIR-V] ");
 			OutputDebugStringA(spvMessages);
 			OutputDebugStringA("\n");
 		}
-
-		glslang_program_delete(program);
-		glslang_shader_delete(shader);
 		
 		return spirv;
 	}

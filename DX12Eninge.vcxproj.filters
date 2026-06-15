@@ -144,7 +144,7 @@
     <ClInclude Include="Src\Rendering\GraphicsRuntime.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\Rendering\Debug\ImGuiDebugLayer.h">
+    <ClInclude Include="Src\Editor\EditorLayer.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
     <ClInclude Include="Src\Samples\Spider\SpiderSampleScene.h">
@@ -218,7 +218,7 @@
     <ClCompile Include="Src\Rendering\Resources\MaterialTextureSystem.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
-    <ClCompile Include="Src\Rendering\Debug\ImGuiDebugLayer.cpp">
+    <ClCompile Include="Src\Editor\EditorLayer.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
     <ClCompile Include="Src\Samples\Benchmark\BenchmarkRunner.cpp">

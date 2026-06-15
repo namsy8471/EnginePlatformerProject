@@ -1,6 +1,7 @@
 #pragma once
 
 #include "App/Win32/GameApp.h"
+#include "Editor/EditorLayer.h"
 #include "Scene/Scene.h"
 #include "Rendering/RHI/IGraphicsDevice.h"
 #include "Rendering/RHI/ICommandList.h"
@@ -15,6 +16,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -22,6 +24,7 @@
 
 struct ID3D12DescriptorHeap;
 using VkDescriptorPool = struct VkDescriptorPool_T*;
+struct CameraConstants;
 
 class Engine : public GameApp
 {
@@ -51,12 +54,12 @@ private:
 	// DirectX12 리소스 관리
 	[[nodiscard]] bool CreateDx12TriangleResources();
 	void DestroyDx12TriangleResources();
-	void DrawDx12Triangle();
+	void DrawDx12Triangle(const Camera& camera);
 
 	// Vulkan 리소스 관리
 	[[nodiscard]] bool CreateVulkanTriangleResources();
 	void DestroyVulkanTriangleResources();
-	void DrawVulkanTriangle();
+	void DrawVulkanTriangle(const Camera& camera);
 
 	// 공통 리소스 관리
 	[[nodiscard]] bool LoadSpiderStaticMesh();
@@ -68,20 +71,35 @@ private:
 	[[nodiscard]] bool CreateImGuiResources();
 	void DestroyTextureResources();
 	void DestroyImGuiResources();
-	void UpdateCameraBuffer();
-	void UpdateCameraBuffer(EntityId entityId);
+	void ResetCameraConstantAllocator() noexcept;
+	[[nodiscard]] uint64_t AllocateCameraConstantOffset() noexcept;
+	[[nodiscard]] uint64_t WriteCameraConstants(const CameraConstants& cameraConstants);
+	[[nodiscard]] uint64_t UpdateCameraBuffer();
+	[[nodiscard]] uint64_t UpdateCameraBuffer(EntityId entityId);
+	[[nodiscard]] uint64_t UpdateCameraBuffer(const Camera& camera);
+	[[nodiscard]] uint64_t UpdateCameraBuffer(EntityId entityId, const Camera& camera);
 	void UploadEntityGeometry(EntityId entityId);
 	void UpdateAnimatedMesh(float deltaTime);
 	void UpdateObjectPicking();
 	[[nodiscard]] bool TryPickSpider(float mouseX, float mouseY) const;
 	[[nodiscard]] EntityId TryPickEntity(float mouseX, float mouseY) const;
-	void RenderImGui();
+	[[nodiscard]] EntityId TryPickEntity(float mouseX, float mouseY, const Camera& camera, float viewportWidth, float viewportHeight) const;
+	void BeginEditorFrame();
+	void RenderEditorDrawData();
+	void UpdateEditorCameraFromInput(float deltaTime);
+	void UpdateViewportCameraLenses();
+	void RenderWorldViewport(const Editor::ViewportPanelState& viewport, const Camera& camera);
 	void FramePrimaryRenderableCamera();
-	void DrawBenchmarkInstances();
-	void DrawDx12BenchmarkInstances();
-	void DrawVulkanBenchmarkInstances();
-	void UploadBenchmarkGeometry(const std::vector<Asset::StaticMeshVertex>& vertices, const std::vector<uint32_t>& indices);
-	void UpdateBenchmarkCameraBuffer(uint32_t instanceCount, float localScale);
+	void FrameSelectedEntityCamera();
+	void FrameEntityCamera(EntityId entityId);
+	void FramePrimaryRenderableCamera(Camera& camera);
+	void FrameSelectedEntityCamera(Camera& camera);
+	void FrameEntityCamera(Camera& camera, EntityId entityId);
+	void DrawBenchmarkInstances(const Camera& camera);
+	void DrawDx12BenchmarkInstances(const Camera& camera);
+	void DrawVulkanBenchmarkInstances(const Camera& camera);
+	void UploadBenchmarkGeometry(std::span<const Asset::StaticMeshVertex> vertices, std::span<const uint32_t> indices);
+	[[nodiscard]] uint64_t UpdateBenchmarkCameraBuffer(const Camera& camera, uint32_t instanceCount, float localScale);
 	[[nodiscard]] EntityId CreateEntity(std::string_view name);
 	[[nodiscard]] TransformComponent* GetTransformComponent(EntityId entityId);
 	[[nodiscard]] const TransformComponent* GetTransformComponent(EntityId entityId) const;
@@ -97,6 +115,11 @@ private:
 	void UpdateRendererMenuState();
 	void ResetFpsCounter();
 	void UpdateWindowTitleWithFps();
+	void ProcessPendingGraphicsApiSwitch();
+	void CreateEditorSceneEntities();
+	void SyncRuntimeCameraToGameCameraEntity();
+	void SyncGameCameraFromSceneEntity();
+	[[nodiscard]] bool IsGameCameraEntity(EntityId entityId) const noexcept;
 
 
 	// 렌더링 리소스
@@ -104,16 +127,24 @@ private:
 	Rendering::StaticMeshRenderer m_StaticMeshRenderer;
 	HWND m_hRenderWnd = nullptr;
 	Camera m_Camera;
+	Camera m_SceneCamera;
 	Scene m_Scene;
 	EntityId m_SpiderEntity = InvalidEntityId;
+	EntityId m_GameCameraEntity = InvalidEntityId;
+	EntityId m_KeyLightEntity = InvalidEntityId;
 	SceneRenderState m_RenderState;
 	Samples::Benchmark::SampleMode m_SampleMode = Samples::Benchmark::SampleMode::SpiderSample;
 	Samples::Benchmark::SampleMode m_LastSampleMode = Samples::Benchmark::SampleMode::SpiderSample;
 	Samples::Benchmark::BenchmarkRunner m_BenchmarkRunner;
+	Editor::EditorLayer m_EditorLayer;
 	float m_AnimationTimeSeconds = 0.0f;
+	float m_LastDeltaTime = 1.0f / 60.0f;
+	bool m_SceneCameraControlActive = false;
 
 	// 현재 렌더 모드 상태
 	RenderMode m_RenderMode = RenderMode::Forward;
+	GraphicsAPI m_PendingGraphicsApi = GraphicsAPI::Vulkan;
+	bool m_HasPendingGraphicsApiSwitch = false;
 	std::wstring m_WindowTitleBase = L"EnginePlatformer - Vulkan - Forward";
 
 	// FPS 카운팅

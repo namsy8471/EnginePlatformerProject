@@ -23,8 +23,8 @@ public:
 	void Present() override;
 	void Resize(int width, int height) override;
 
-	ICommandList* CreateCommandList() override;
-	IBuffer* CreateBuffer(const BufferDesc& desc) override;
+	std::unique_ptr<ICommandList> CreateCommandList() override;
+	std::unique_ptr<IBuffer> CreateBuffer(const BufferDesc& desc) override;
 
 	void ExecuteCommandList(ICommandList* cmdList) override;
 	IGpuResource* GetBackBufferResource() override;

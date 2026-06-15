@@ -3,7 +3,7 @@
 #include <stdexcept>
 #include <string>
 #include <iostream>
-#include <cstdio>
+#include <format>
 #include "d3dx12.h" // CD3DX12 유틸리티 클래스
 #include "DX12Buffer.h"
 #include "DX12CommandList.h"
@@ -13,9 +13,8 @@ namespace
 {
 	void LogDX12Message(const char* level, const char* message)
 	{
-		char buffer[512] = {};
-		snprintf(buffer, sizeof(buffer), "[DX12][%s] %s\n", level, message);
-		OutputDebugStringA(buffer);
+		const std::string buffer = std::format("[DX12][{}] {}\n", level, message);
+		OutputDebugStringA(buffer.c_str());
 	}
 
 	void LogDX12StageSuccess(const char* stage)
@@ -248,15 +247,15 @@ void DX12Device::MoveToNextFrame()
 	m_fenceValues[m_frameIndex] = currentFenceValue + 1;
 }
 
-ICommandList* DX12Device::CreateCommandList()
+std::unique_ptr<ICommandList> DX12Device::CreateCommandList()
 {
 	// DX12CommandList 인스턴스 생성
-	return new DX12CommandList(this);
+	return std::make_unique<DX12CommandList>(this);
 }
 
-IBuffer* DX12Device::CreateBuffer(const BufferDesc& desc)
+std::unique_ptr<IBuffer> DX12Device::CreateBuffer(const BufferDesc& desc)
 {
-	return new DX12Buffer(this, desc);
+	return std::make_unique<DX12Buffer>(this, desc);
 }
 
 void DX12Device::ExecuteCommandList(ICommandList* cmdList)

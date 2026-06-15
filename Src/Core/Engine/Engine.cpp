@@ -3,7 +3,6 @@
 #include "Input/InputSystem.h"
 #include "Scene/PickingSystem.h"
 #include "App/Win32/Resource.h"
-#include "Rendering/Debug/ImGuiDebugLayer.h"
 #include "Rendering/Resources/MaterialTextureSystem.h"
 #include "Rendering/Systems/RenderSystem.h"
 #include "Samples/Spider/SpiderSampleScene.h"
@@ -33,6 +32,7 @@
 #include <array>
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -76,6 +76,21 @@ namespace
 	[[nodiscard]] constexpr std::wstring_view GetRenderWindowClassName() noexcept
 	{
 		return L"EngineRenderWindowClass";
+	}
+
+	[[nodiscard]] constexpr uint32_t CameraConstantSlotCount() noexcept
+	{
+		return 8192;
+	}
+
+	[[nodiscard]] constexpr uint64_t InvalidCameraConstantOffset() noexcept
+	{
+		return (std::numeric_limits<uint64_t>::max)();
+	}
+
+	[[nodiscard]] constexpr uint64_t AlignUp(uint64_t value, uint64_t alignment) noexcept
+	{
+		return alignment > 0 ? ((value + alignment - 1) / alignment) * alignment : value;
 	}
 
    [[nodiscard]] bool EnsureRenderWindowClassRegistered(HINSTANCE hInstance)
@@ -531,12 +546,16 @@ bool Engine::Init()
 		return false;
 	}
 
+	FramePrimaryRenderableCamera();
+	FramePrimaryRenderableCamera(m_SceneCamera);
+	CreateEditorSceneEntities();
+	SyncRuntimeCameraToGameCameraEntity();
+
 	if (!SwitchGraphicsAPI(m_Graphics.CurrentApi))
 	{
 		return false;
 	}
 
-	FramePrimaryRenderableCamera();
 	return true;
 }
 
@@ -598,13 +617,16 @@ LRESULT Engine::MsgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 void Engine::Update(float deltaTime)
 {
+	m_LastDeltaTime = deltaTime;
+	ProcessPendingGraphicsApiSwitch();
+
 	if (m_LastSampleMode != m_SampleMode)
 	{
 		FramePrimaryRenderableCamera();
+		FramePrimaryRenderableCamera(m_SceneCamera);
 		m_LastSampleMode = m_SampleMode;
 	}
 
-	m_Camera.Update(deltaTime, m_hRenderWnd ? m_hRenderWnd : m_hMainWnd);
 	if (m_SampleMode == Samples::Benchmark::SampleMode::EcsBenchmark)
 	{
 		m_BenchmarkRunner.Update(deltaTime);
@@ -612,7 +634,6 @@ void Engine::Update(float deltaTime)
 	}
 
 	UpdateAnimatedMesh(deltaTime);
-	UpdateObjectPicking();
 }
 
 void Engine::Render()
@@ -624,6 +645,7 @@ void Engine::Render()
 
 	// 커맨드 리스트 리셋 및 기본 설정
 	m_Graphics.CommandList->Reset();
+	ResetCameraConstantAllocator();
 	m_Graphics.CommandList->SetViewport(0, 0, static_cast<float>(m_ClientWidth), static_cast<float>(m_ClientHeight));
 	m_Graphics.CommandList->SetScissorRect(0, 0, m_ClientWidth, m_ClientHeight);
 
@@ -636,38 +658,23 @@ void Engine::Render()
 	void* dsvHandle = m_Graphics.Device->GetDepthStencilView();
 	m_Graphics.CommandList->SetRenderTargets(rtvHandle, dsvHandle);
 
-	// 애니메이션 효과를 위한 시간 기반 색상 계산
-	const auto now = std::chrono::steady_clock::now();
-	const std::chrono::duration<float> elapsed = now - m_RenderStartTime;
-	const float color = (std::sinf(elapsed.count() * 2.0f) + 1.0f) * 0.5f;
-
-	// 화면 클리어
-	const float clearColor[4] = { color, 0.2f, 0.4f, 1.0f };
+	// 화면 전체는 에디터 배경색으로만 초기화하고, 실제 월드 렌더는 Scene/Game 패널 rect 안에서만 수행합니다.
+	const float clearColor[4] = { 0.025f, 0.027f, 0.032f, 1.0f };
 	m_Graphics.CommandList->ClearRenderTarget(rtvHandle, clearColor);
 	m_Graphics.CommandList->ClearDepthStencil(dsvHandle, 1.0f, 0);
 
-	// Benchmark 모드에서도 기준 씬 오브젝트를 계속 렌더링해 카메라가 볼 대상을 잃지 않게 합니다.
-	m_Graphics.CommandList->SetVertexBuffer(m_StaticMeshRenderer.VertexBuffer);
-	m_Graphics.CommandList->SetIndexBuffer(m_StaticMeshRenderer.IndexBuffer);
-
-	if (m_Graphics.CurrentApi == GraphicsAPI::DirectX12)
-	{
-		DrawDx12Triangle();
-	}
-	else
-	{
-		DrawVulkanTriangle();
-	}
-
-	DrawBenchmarkInstances();
-	RenderImGui();
+	BeginEditorFrame();
+	UpdateViewportCameraLenses();
+	RenderWorldViewport(m_EditorLayer.GetSceneViewport(), m_SceneCamera);
+	RenderWorldViewport(m_EditorLayer.GetGameViewport(), m_Camera);
+	RenderEditorDrawData();
 
 	// 백버퍼를 Present 상태로 전환
 	m_Graphics.CommandList->ResourceBarrier(backBuffer, ResourceState::RenderTarget, ResourceState::Present);
 	m_Graphics.CommandList->Close();
 
 	// 커맨드 리스트 실행 및 화면 출력
-	m_Graphics.Device->ExecuteCommandList(m_Graphics.CommandList);
+	m_Graphics.Device->ExecuteCommandList(m_Graphics.CommandList.get());
 	m_Graphics.Device->Present();
 	m_Graphics.Device->MoveToNextFrame();
 
@@ -678,6 +685,7 @@ void Engine::OnResize()
 {
 	ResizeRenderWindow();
 	m_Camera.SetLens(DirectX::XM_PIDIV4, static_cast<float>(m_ClientWidth) / static_cast<float>((std::max)(m_ClientHeight, 1)), 0.1f, 1000.0f);
+	m_SceneCamera.SetLens(DirectX::XM_PIDIV4, static_cast<float>(m_ClientWidth) / static_cast<float>((std::max)(m_ClientHeight, 1)), 0.1f, 1000.0f);
 	m_BenchmarkRunner.SetSpawnView(m_Camera);
 
 	if (m_Graphics.Device)
@@ -793,6 +801,7 @@ bool Engine::SwitchGraphicsAPI(GraphicsAPI api)
 
 	RebuildWindowTitleBase();
 	m_Camera.SetLens(DirectX::XM_PIDIV4, static_cast<float>(m_ClientWidth) / static_cast<float>((std::max)(m_ClientHeight, 1)), 0.1f, 1000.0f);
+	m_SceneCamera.SetLens(DirectX::XM_PIDIV4, static_cast<float>(m_ClientWidth) / static_cast<float>((std::max)(m_ClientHeight, 1)), 0.1f, 1000.0f);
 	m_RenderStartTime = std::chrono::steady_clock::now();
 	ResetFpsCounter();
 	UpdateRendererMenuState();
@@ -816,6 +825,139 @@ void Engine::SwitchRenderMode(RenderMode renderMode)
 	std::string modeLogMessage = "Render mode switched to ";
 	modeLogMessage.append(RenderModeToString(m_RenderMode));
 	LogEngineTrace(modeLogMessage);
+}
+
+void Engine::ProcessPendingGraphicsApiSwitch()
+{
+	if (!m_HasPendingGraphicsApiSwitch)
+	{
+		return;
+	}
+
+	const GraphicsAPI requestedApi = m_PendingGraphicsApi;
+	m_HasPendingGraphicsApiSwitch = false;
+	if (requestedApi == m_Graphics.CurrentApi)
+	{
+		return;
+	}
+
+	const GraphicsAPI previousApi = m_Graphics.CurrentApi;
+	if (!SwitchGraphicsAPI(requestedApi) && !SwitchGraphicsAPI(previousApi))
+	{
+		LogEngineTrace("Editor toolbar failed to restore previous graphics API after switch failure.");
+	}
+}
+
+void Engine::CreateEditorSceneEntities()
+{
+	if (m_GameCameraEntity == InvalidEntityId)
+	{
+		m_GameCameraEntity = CreateEntity("Camera");
+		TransformComponent& transform = m_Scene.EnsureTransformComponent(m_GameCameraEntity);
+		transform.LocalTransform = m_Camera.GetTransform();
+		transform.LocalTransform.Scale = Math::OneVector3();
+		transform.UpdateWorld();
+
+		CameraComponent& camera = m_Scene.EnsureCameraComponent(m_GameCameraEntity);
+		camera.FovY = m_Camera.GetFovY();
+		camera.NearZ = m_Camera.GetNearZ();
+		camera.FarZ = m_Camera.GetFarZ();
+		camera.IsGameCamera = true;
+	}
+
+	if (m_KeyLightEntity == InvalidEntityId)
+	{
+		m_KeyLightEntity = CreateEntity("Light");
+		TransformComponent& transform = m_Scene.EnsureTransformComponent(m_KeyLightEntity);
+		transform.LocalTransform = Math::Transform::FromEuler(
+			{ -120.0f, 220.0f, -220.0f },
+			DirectX::XMConvertToRadians(40.0f),
+			DirectX::XMConvertToRadians(35.0f),
+			0.0f);
+		transform.UpdateWorld();
+
+		LightComponent& light = m_Scene.EnsureLightComponent(m_KeyLightEntity);
+		light.Type = LightType::Directional;
+		light.Color = { 1.0f, 0.95f, 0.82f };
+		light.Intensity = 2.5f;
+		light.Range = 450.0f;
+		light.SpotAngle = DirectX::XM_PIDIV4;
+		light.Enabled = true;
+	}
+}
+
+void Engine::SyncRuntimeCameraToGameCameraEntity()
+{
+	if (m_GameCameraEntity == InvalidEntityId)
+	{
+		return;
+	}
+
+	TransformComponent& transform = m_Scene.EnsureTransformComponent(m_GameCameraEntity);
+	transform.LocalTransform = m_Camera.GetTransform();
+	transform.LocalTransform.Scale = Math::OneVector3();
+	transform.UpdateWorld();
+
+	CameraComponent& camera = m_Scene.EnsureCameraComponent(m_GameCameraEntity);
+	camera.FovY = m_Camera.GetFovY();
+	camera.NearZ = m_Camera.GetNearZ();
+	camera.FarZ = m_Camera.GetFarZ();
+	camera.IsGameCamera = true;
+}
+
+void Engine::SyncGameCameraFromSceneEntity()
+{
+	if (m_GameCameraEntity == InvalidEntityId)
+	{
+		return;
+	}
+
+	const DirectX::XMFLOAT3 previousPosition = m_Camera.GetPosition();
+	const DirectX::XMFLOAT3 previousForward = m_Camera.GetForward();
+	const float previousFovY = m_Camera.GetFovY();
+	const float previousNearZ = m_Camera.GetNearZ();
+	const float previousFarZ = m_Camera.GetFarZ();
+
+	if (TransformComponent* transform = m_Scene.GetTransformComponent(m_GameCameraEntity))
+	{
+		transform->UpdateWorld();
+		m_Camera.SetTransform(transform->WorldTransform);
+	}
+
+	if (CameraComponent* camera = m_Scene.GetCameraComponent(m_GameCameraEntity))
+	{
+		const float aspect = m_Camera.GetAspect();
+		const float fovY = std::clamp(camera->FovY, DirectX::XMConvertToRadians(1.0f), DirectX::XMConvertToRadians(179.0f));
+		const float nearZ = (std::max)(0.001f, camera->NearZ);
+		const float farZ = (std::max)(nearZ + 0.001f, camera->FarZ);
+		camera->FovY = fovY;
+		camera->NearZ = nearZ;
+		camera->FarZ = farZ;
+		camera->IsGameCamera = true;
+		m_Camera.SetLens(camera->FovY, aspect, camera->NearZ, camera->FarZ);
+	}
+
+	const DirectX::XMFLOAT3 currentPosition = m_Camera.GetPosition();
+	const DirectX::XMFLOAT3 currentForward = m_Camera.GetForward();
+	const bool cameraChanged =
+		std::fabs(currentPosition.x - previousPosition.x) > 0.0001f
+		|| std::fabs(currentPosition.y - previousPosition.y) > 0.0001f
+		|| std::fabs(currentPosition.z - previousPosition.z) > 0.0001f
+		|| std::fabs(currentForward.x - previousForward.x) > 0.0001f
+		|| std::fabs(currentForward.y - previousForward.y) > 0.0001f
+		|| std::fabs(currentForward.z - previousForward.z) > 0.0001f
+		|| std::fabs(m_Camera.GetFovY() - previousFovY) > 0.0001f
+		|| std::fabs(m_Camera.GetNearZ() - previousNearZ) > 0.0001f
+		|| std::fabs(m_Camera.GetFarZ() - previousFarZ) > 0.0001f;
+	if (cameraChanged)
+	{
+		m_BenchmarkRunner.SetSpawnView(m_Camera);
+	}
+}
+
+bool Engine::IsGameCameraEntity(EntityId entityId) const noexcept
+{
+	return entityId != InvalidEntityId && entityId == m_GameCameraEntity;
 }
 
 void Engine::RebuildWindowTitleBase()
@@ -846,20 +988,15 @@ void Engine::ShutdownGraphics()
 	DestroyVulkanTriangleResources();
 	DestroyTextureResources();
 
-	delete m_StaticMeshRenderer.VertexBuffer;
-	m_StaticMeshRenderer.VertexBuffer = nullptr;
+	m_StaticMeshRenderer.VertexBuffer.reset();
+	m_StaticMeshRenderer.IndexBuffer.reset();
+	m_StaticMeshRenderer.CameraBuffer.reset();
+	m_StaticMeshRenderer.CameraBufferStride = 256;
+	m_StaticMeshRenderer.CameraBufferCapacity = 0;
+	m_StaticMeshRenderer.CameraBufferCursor = 0;
 
-	delete m_StaticMeshRenderer.IndexBuffer;
-	m_StaticMeshRenderer.IndexBuffer = nullptr;
-
-	delete m_StaticMeshRenderer.CameraBuffer;
-	m_StaticMeshRenderer.CameraBuffer = nullptr;
-
-	delete m_Graphics.CommandList;
-	m_Graphics.CommandList = nullptr;
-
-	delete m_Graphics.Device;
-	m_Graphics.Device = nullptr;
+	m_Graphics.CommandList.reset();
+	m_Graphics.Device.reset();
 
 	LogEngineTrace("ShutdownGraphics completed.");
 }
@@ -975,7 +1112,7 @@ bool Engine::CreateTextureResources()
 
 	if (m_Graphics.CurrentApi == GraphicsAPI::DirectX12)
 	{
-		auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device);
+		auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device.get());
 		if (!dx12Device)
 		{
 			return false;
@@ -1108,7 +1245,7 @@ bool Engine::CreateTextureResources()
 		return true;
 	}
 
-	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device);
+	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
 	if (!vulkanDevice)
 	{
 		return false;
@@ -1282,7 +1419,7 @@ void Engine::DestroyTextureResources()
 	m_StaticMeshRenderer.Dx12.ShaderResourceHeap.Reset();
 	m_StaticMeshRenderer.Dx12.MaterialTextures.clear();
 
-	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device);
+	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
 	if (!vulkanDevice)
 	{
 		m_StaticMeshRenderer.Vulkan.MaterialTextures.clear();
@@ -1349,7 +1486,7 @@ bool Engine::CreateImGuiResources()
 
 	if (m_Graphics.CurrentApi == GraphicsAPI::DirectX12)
 	{
-		auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device);
+		auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device.get());
 		if (!dx12Device)
 		{
 			ImGui_ImplWin32_Shutdown();
@@ -1384,7 +1521,7 @@ bool Engine::CreateImGuiResources()
 	}
 	else
 	{
-		auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device);
+		auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
 		if (!vulkanDevice)
 		{
 			ImGui_ImplWin32_Shutdown();
@@ -1478,7 +1615,7 @@ void Engine::DestroyImGuiResources()
 			ImGui_ImplVulkan_Shutdown();
 		}
 
-		auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device);
+		auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
 		if (vulkanDevice && m_VulkanImGui.DescriptorPool != VK_NULL_HANDLE)
 		{
 			// Vulkan backend가 descriptor set을 반납한 뒤, 엔진이 소유한 전용 descriptor pool을 파괴합니다.
@@ -1496,7 +1633,7 @@ void Engine::DestroyImGuiResources()
 	m_ImGuiInitialized = false;
 }
 
-void Engine::RenderImGui()
+void Engine::BeginEditorFrame()
 {
 	if (!m_ImGuiInitialized)
 	{
@@ -1513,26 +1650,70 @@ void Engine::RenderImGui()
 	}
 	ImGui_ImplWin32_NewFrame();
 	ImGui::NewFrame();
+	UpdateEditorCameraFromInput(m_LastDeltaTime);
 
-	Rendering::ImGuiDebugLayer::DrawDebugWindow(
-		m_Graphics.CurrentApi,
-		m_RenderMode,
-		m_Camera,
-		m_Scene,
-		m_SampleMode,
-		m_BenchmarkRunner,
-		m_ShowImGuiDemoWindow,
-		[this](RenderMode renderMode)
+	Editor::EditorContext editorContext{
+		.CurrentApi = m_Graphics.CurrentApi,
+		.CurrentRenderMode = m_RenderMode,
+		.SceneCamera = m_SceneCamera,
+		.GameCamera = m_Camera,
+		.ActiveScene = m_Scene,
+		.SampleMode = m_SampleMode,
+		.BenchmarkRunner = m_BenchmarkRunner,
+		.ShowDemoWindow = m_ShowImGuiDemoWindow,
+		.ViewportWidth = m_ClientWidth,
+		.ViewportHeight = m_ClientHeight,
+		.OnGraphicsApiChanged = [this](GraphicsAPI requestedApi)
+		{
+			if (requestedApi == m_Graphics.CurrentApi && !m_HasPendingGraphicsApiSwitch)
+			{
+				return;
+			}
+
+			m_PendingGraphicsApi = requestedApi;
+			m_HasPendingGraphicsApiSwitch = true;
+		},
+		.OnRenderModeChanged = [this](RenderMode renderMode)
 		{
 			SwitchRenderMode(renderMode);
-		});
+		},
+		.OnFrameSelected = [this]()
+		{
+			FrameSelectedEntityCamera(m_SceneCamera);
+		},
+		.OnScenePick = [this](float mouseX, float mouseY, float viewportWidth, float viewportHeight)
+		{
+			m_Scene.SetSelectedEntity(TryPickEntity(mouseX, mouseY, m_SceneCamera, viewportWidth, viewportHeight));
+		}
+	};
+	m_EditorLayer.Draw(editorContext);
+	SyncGameCameraFromSceneEntity();
+}
+
+void Engine::RenderEditorDrawData()
+{
+	if (!m_ImGuiInitialized)
+	{
+		return;
+	}
 
 	if (m_SampleMode == Samples::Benchmark::SampleMode::EcsBenchmark)
 	{
-		m_BenchmarkRunner.DrawViewportOverlay(m_Camera, static_cast<float>(m_ClientWidth), static_cast<float>(m_ClientHeight));
+		const Editor::ViewportPanelState& gameViewport = m_EditorLayer.GetGameViewport();
+		if (gameViewport.CanRender())
+		{
+			m_BenchmarkRunner.DrawViewportOverlay(
+				m_Camera,
+				gameViewport.Left,
+				gameViewport.Top,
+				gameViewport.Width,
+				gameViewport.Height);
+		}
 	}
 
 	ImGui::Render();
+	m_Graphics.CommandList->SetViewport(0, 0, static_cast<float>(m_ClientWidth), static_cast<float>(m_ClientHeight));
+	m_Graphics.CommandList->SetScissorRect(0, 0, m_ClientWidth, m_ClientHeight);
 
 	if (m_Graphics.CurrentApi == GraphicsAPI::DirectX12)
 	{
@@ -1550,6 +1731,113 @@ void Engine::RenderImGui()
 	}
 }
 
+void Engine::UpdateEditorCameraFromInput(float deltaTime)
+{
+	if (ImGui::GetCurrentContext() == nullptr)
+	{
+		return;
+	}
+
+	const Editor::ViewportPanelState& sceneViewport = m_EditorLayer.GetSceneViewport();
+	if (!sceneViewport.IsVisible)
+	{
+		m_SceneCameraControlActive = false;
+		return;
+	}
+
+	if (sceneViewport.IsHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+	{
+		m_SceneCameraControlActive = true;
+	}
+	if (!ImGui::IsMouseDown(ImGuiMouseButton_Right))
+	{
+		m_SceneCameraControlActive = false;
+	}
+
+	const bool keyboardActive = sceneViewport.IsHovered || sceneViewport.IsFocused || m_SceneCameraControlActive;
+	if (!keyboardActive)
+	{
+		return;
+	}
+
+	const ImGuiIO& io = ImGui::GetIO();
+	const float mouseDeltaX = std::clamp(io.MouseDelta.x, -120.0f, 120.0f);
+	const float mouseDeltaY = std::clamp(io.MouseDelta.y, -120.0f, 120.0f);
+	m_SceneCamera.UpdateFromInputState(
+		deltaTime,
+		ImGui::IsKeyDown(ImGuiKey_W),
+		ImGui::IsKeyDown(ImGuiKey_S),
+		ImGui::IsKeyDown(ImGuiKey_A),
+		ImGui::IsKeyDown(ImGuiKey_D),
+		ImGui::IsKeyDown(ImGuiKey_Q),
+		ImGui::IsKeyDown(ImGuiKey_E),
+		m_SceneCameraControlActive,
+		mouseDeltaX,
+		mouseDeltaY);
+
+	if (m_SceneCameraControlActive)
+	{
+		ImGui::SetMouseCursor(ImGuiMouseCursor_None);
+	}
+}
+
+void Engine::UpdateViewportCameraLenses()
+{
+	const Editor::ViewportPanelState& sceneViewport = m_EditorLayer.GetSceneViewport();
+	if (sceneViewport.CanRender())
+	{
+		m_SceneCamera.SetLens(DirectX::XM_PIDIV4, sceneViewport.AspectRatio(), 0.1f, 1000.0f);
+	}
+
+	const Editor::ViewportPanelState& gameViewport = m_EditorLayer.GetGameViewport();
+	if (gameViewport.CanRender())
+	{
+		if (CameraComponent* camera = m_Scene.GetCameraComponent(m_GameCameraEntity))
+		{
+			m_Camera.SetLens(camera->FovY, gameViewport.AspectRatio(), camera->NearZ, camera->FarZ);
+		}
+		else
+		{
+			m_Camera.SetLens(DirectX::XM_PIDIV4, gameViewport.AspectRatio(), 0.1f, 1000.0f);
+		}
+	}
+}
+
+void Engine::RenderWorldViewport(const Editor::ViewportPanelState& viewport, const Camera& camera)
+{
+	if (!viewport.CanRender())
+	{
+		return;
+	}
+
+	const long left = (std::max)(0L, static_cast<long>(std::floor(viewport.Left)));
+	const long top = (std::max)(0L, static_cast<long>(std::floor(viewport.Top)));
+	const long right = (std::min)(static_cast<long>(m_ClientWidth), static_cast<long>(std::ceil(viewport.Left + viewport.Width)));
+	const long bottom = (std::min)(static_cast<long>(m_ClientHeight), static_cast<long>(std::ceil(viewport.Top + viewport.Height)));
+	if (right <= left || bottom <= top)
+	{
+		return;
+	}
+
+	const float width = static_cast<float>(right - left);
+	const float height = static_cast<float>(bottom - top);
+	m_Graphics.CommandList->SetViewport(static_cast<float>(left), static_cast<float>(top), width, height);
+	m_Graphics.CommandList->SetScissorRect(left, top, right, bottom);
+	m_Graphics.CommandList->SetVertexBuffer(m_StaticMeshRenderer.VertexBuffer.get());
+	m_Graphics.CommandList->SetIndexBuffer(m_StaticMeshRenderer.IndexBuffer.get());
+
+	if (m_Graphics.CurrentApi == GraphicsAPI::DirectX12)
+	{
+		DrawDx12Triangle(camera);
+	}
+	else
+	{
+		DrawVulkanTriangle(camera);
+	}
+
+	DrawBenchmarkInstances(camera);
+}
+
 void Engine::FramePrimaryRenderableCamera()
 {
 	EntityId focusEntity = m_Scene.GetPrimaryRenderableEntity();
@@ -1558,7 +1846,52 @@ void Engine::FramePrimaryRenderableCamera()
 		focusEntity = m_RenderState.RenderEntities.front();
 	}
 
-	const TransformComponent* transform = GetTransformComponent(focusEntity);
+	FrameEntityCamera(m_Camera, focusEntity);
+	m_BenchmarkRunner.SetSpawnView(m_Camera);
+	SyncRuntimeCameraToGameCameraEntity();
+}
+
+void Engine::FrameSelectedEntityCamera()
+{
+	FrameSelectedEntityCamera(m_Camera);
+}
+
+void Engine::FramePrimaryRenderableCamera(Camera& camera)
+{
+	EntityId focusEntity = m_Scene.GetPrimaryRenderableEntity();
+	if (focusEntity == InvalidEntityId && !m_RenderState.RenderEntities.empty())
+	{
+		focusEntity = m_RenderState.RenderEntities.front();
+	}
+
+	FrameEntityCamera(camera, focusEntity);
+}
+
+void Engine::FrameSelectedEntityCamera(Camera& camera)
+{
+	EntityId focusEntity = m_Scene.GetSelectedEntity();
+	if (focusEntity == InvalidEntityId)
+	{
+		focusEntity = m_Scene.GetPrimaryRenderableEntity();
+	}
+	if (focusEntity == InvalidEntityId && !m_RenderState.RenderEntities.empty())
+	{
+		focusEntity = m_RenderState.RenderEntities.front();
+	}
+
+	FrameEntityCamera(camera, focusEntity);
+}
+
+void Engine::FrameEntityCamera(EntityId entityId)
+{
+	FrameEntityCamera(m_Camera, entityId);
+	m_BenchmarkRunner.SetSpawnView(m_Camera);
+	SyncRuntimeCameraToGameCameraEntity();
+}
+
+void Engine::FrameEntityCamera(Camera& camera, EntityId entityId)
+{
+	const TransformComponent* transform = GetTransformComponent(entityId);
 	if (!transform)
 	{
 		return;
@@ -1566,7 +1899,7 @@ void Engine::FramePrimaryRenderableCamera()
 
 	DirectX::XMFLOAT3 localCenter = { 0.0f, 0.0f, 0.0f };
 	float maxExtent = 3.0f;
-	if (const BoundsComponent* bounds = m_Scene.GetBoundsComponent(focusEntity))
+	if (const BoundsComponent* bounds = m_Scene.GetBoundsComponent(entityId))
 	{
 		localCenter = {
 			(bounds->LocalMin.x + bounds->LocalMax.x) * 0.5f,
@@ -1588,14 +1921,13 @@ void Engine::FramePrimaryRenderableCamera()
 			transform->GetWorldXmMatrix()));
 
 	const float cameraDistance = (std::max)(maxExtent * 2.5f, 6.0f);
-	m_Camera.LookAt(
+	camera.LookAt(
 		{ worldCenter.x, worldCenter.y + maxExtent * 0.35f, worldCenter.z - cameraDistance },
 		worldCenter,
 		{ 0.0f, 1.0f, 0.0f });
-	m_BenchmarkRunner.SetSpawnView(m_Camera);
 }
 
-void Engine::DrawBenchmarkInstances()
+void Engine::DrawBenchmarkInstances(const Camera& camera)
 {
 	if (m_SampleMode != Samples::Benchmark::SampleMode::EcsBenchmark)
 	{
@@ -1604,19 +1936,19 @@ void Engine::DrawBenchmarkInstances()
 
 	if (m_Graphics.CurrentApi == GraphicsAPI::DirectX12)
 	{
-		DrawDx12BenchmarkInstances();
+		DrawDx12BenchmarkInstances(camera);
 	}
 	else
 	{
-		DrawVulkanBenchmarkInstances();
+		DrawVulkanBenchmarkInstances(camera);
 	}
 }
 
-void Engine::DrawDx12BenchmarkInstances()
+void Engine::DrawDx12BenchmarkInstances(const Camera& camera)
 {
 	auto native = static_cast<ID3D12GraphicsCommandList*>(m_Graphics.CommandList->GetNativeResource());
 	auto cameraResource = m_StaticMeshRenderer.CameraBuffer ? static_cast<ID3D12Resource*>(m_StaticMeshRenderer.CameraBuffer->GetNativeResource()) : nullptr;
-	auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device);
+	auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device.get());
 	if (!native || !cameraResource || !dx12Device || !m_StaticMeshRenderer.Dx12.PipelineState || !m_StaticMeshRenderer.Dx12.RootSignature)
 	{
 		return;
@@ -1659,12 +1991,16 @@ void Engine::DrawDx12BenchmarkInstances()
 		localScale = config.ObjectType == Samples::Benchmark::BenchmarkObjectType::Spider ? 0.9f : 0.7f;
 	}
 
-	UpdateBenchmarkCameraBuffer(instanceCount, localScale);
-	m_Graphics.CommandList->SetVertexBuffer(m_StaticMeshRenderer.VertexBuffer);
-	m_Graphics.CommandList->SetIndexBuffer(m_StaticMeshRenderer.IndexBuffer);
+	const uint64_t cameraOffset = UpdateBenchmarkCameraBuffer(camera, instanceCount, localScale);
+	if (cameraOffset == InvalidCameraConstantOffset())
+	{
+		return;
+	}
+	m_Graphics.CommandList->SetVertexBuffer(m_StaticMeshRenderer.VertexBuffer.get());
+	m_Graphics.CommandList->SetIndexBuffer(m_StaticMeshRenderer.IndexBuffer.get());
 
 	native->SetGraphicsRootSignature(m_StaticMeshRenderer.Dx12.RootSignature.Get());
-	native->SetGraphicsRootConstantBufferView(0, cameraResource->GetGPUVirtualAddress());
+	native->SetGraphicsRootConstantBufferView(0, cameraResource->GetGPUVirtualAddress() + cameraOffset);
 	ID3D12DescriptorHeap* descriptorHeaps[] = { m_StaticMeshRenderer.Dx12.ShaderResourceHeap.Get() };
 	native->SetDescriptorHeaps(1, descriptorHeaps);
 	native->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1700,7 +2036,7 @@ void Engine::DrawDx12BenchmarkInstances()
 	m_Graphics.CommandList->DrawIndexedInstanced(static_cast<uint32_t>(geometry.Indices.size()), instanceCount, 0, 0, 0);
 }
 
-void Engine::DrawVulkanBenchmarkInstances()
+void Engine::DrawVulkanBenchmarkInstances(const Camera& camera)
 {
 	if (!m_StaticMeshRenderer.Vulkan.IsValid || m_StaticMeshRenderer.Vulkan.DescriptorSets.empty())
 	{
@@ -1746,9 +2082,14 @@ void Engine::DrawVulkanBenchmarkInstances()
 		localScale = config.ObjectType == Samples::Benchmark::BenchmarkObjectType::Spider ? 0.9f : 0.7f;
 	}
 
-	UpdateBenchmarkCameraBuffer(instanceCount, localScale);
-	m_Graphics.CommandList->SetVertexBuffer(m_StaticMeshRenderer.VertexBuffer);
-	m_Graphics.CommandList->SetIndexBuffer(m_StaticMeshRenderer.IndexBuffer);
+	const uint64_t cameraOffset = UpdateBenchmarkCameraBuffer(camera, instanceCount, localScale);
+	if (cameraOffset == InvalidCameraConstantOffset())
+	{
+		return;
+	}
+	const uint32_t cameraDynamicOffset = static_cast<uint32_t>(cameraOffset);
+	m_Graphics.CommandList->SetVertexBuffer(m_StaticMeshRenderer.VertexBuffer.get());
+	m_Graphics.CommandList->SetIndexBuffer(m_StaticMeshRenderer.IndexBuffer.get());
 
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_StaticMeshRenderer.Vulkan.Pipeline);
 
@@ -1764,8 +2105,8 @@ void Engine::DrawVulkanBenchmarkInstances()
 				0,
 				1,
 				&descriptorSet,
-				0,
-				nullptr);
+				1,
+				&cameraDynamicOffset);
 			m_Graphics.CommandList->DrawIndexedInstanced(static_cast<uint32_t>(meshAsset->Indices.size()), instanceCount, 0, 0, 0);
 			return;
 		}
@@ -1781,8 +2122,8 @@ void Engine::DrawVulkanBenchmarkInstances()
 				0,
 				1,
 				&descriptorSet,
-				0,
-				nullptr);
+				1,
+				&cameraDynamicOffset);
 			m_Graphics.CommandList->DrawIndexedInstanced(submesh.IndexCount, instanceCount, submesh.IndexOffset, 0, 0);
 		}
 		return;
@@ -1796,15 +2137,15 @@ void Engine::DrawVulkanBenchmarkInstances()
 		0,
 		1,
 		&descriptorSet,
-		0,
-		nullptr);
+		1,
+		&cameraDynamicOffset);
 	const BenchmarkGeometry& geometry = config.ObjectType == Samples::Benchmark::BenchmarkObjectType::Spider
 		? GetBenchmarkSpiderGlyphGeometry()
 		: GetBenchmarkPrimitiveGeometry();
 	m_Graphics.CommandList->DrawIndexedInstanced(static_cast<uint32_t>(geometry.Indices.size()), instanceCount, 0, 0, 0);
 }
 
-void Engine::UploadBenchmarkGeometry(const std::vector<Asset::StaticMeshVertex>& vertices, const std::vector<uint32_t>& indices)
+void Engine::UploadBenchmarkGeometry(std::span<const Asset::StaticMeshVertex> vertices, std::span<const uint32_t> indices)
 {
 	if (!m_StaticMeshRenderer.VertexBuffer || !m_StaticMeshRenderer.IndexBuffer || vertices.empty() || indices.empty())
 	{
@@ -1828,34 +2169,31 @@ void Engine::UploadBenchmarkGeometry(const std::vector<Asset::StaticMeshVertex>&
 	m_StaticMeshRenderer.IndexBuffer->Unmap();
 }
 
-void Engine::UpdateBenchmarkCameraBuffer(uint32_t instanceCount, float localScale)
+uint64_t Engine::UpdateBenchmarkCameraBuffer(const Camera& camera, uint32_t instanceCount, float localScale)
 {
 	if (!m_StaticMeshRenderer.CameraBuffer)
 	{
-		return;
+		return InvalidCameraConstantOffset();
 	}
 
 	CameraConstants cameraConstants = {};
-	DirectX::XMStoreFloat4x4(&cameraConstants.WorldViewProjection, m_Camera.GetProjectionMatrix());
-	DirectX::XMStoreFloat4x4(&cameraConstants.ViewProjection, m_Camera.GetViewProjectionMatrix());
-	const auto position = m_Camera.GetPosition();
+	DirectX::XMStoreFloat4x4(&cameraConstants.WorldViewProjection, camera.GetProjectionMatrix());
+	DirectX::XMStoreFloat4x4(&cameraConstants.ViewProjection, camera.GetViewProjectionMatrix());
+	const auto position = camera.GetPosition();
 	cameraConstants.CameraPosition = { position.x, position.y, position.z, 1.0f };
 	cameraConstants.BenchmarkParams = {
 		static_cast<float>(instanceCount),
 		localScale,
-		m_Camera.GetFovY(),
-		m_Camera.GetAspect()
+		camera.GetFovY(),
+		camera.GetAspect()
 	};
 
-	void* mappedData = nullptr;
-	m_StaticMeshRenderer.CameraBuffer->Map(&mappedData);
-	std::memcpy(mappedData, &cameraConstants, sizeof(cameraConstants));
-	m_StaticMeshRenderer.CameraBuffer->Unmap();
+	return WriteCameraConstants(cameraConstants);
 }
 
 bool Engine::CreateDx12TriangleResources()
 {
-	auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device);
+	auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device.get());
 	if (!dx12Device)
 	{
 		return false;
@@ -1965,18 +2303,17 @@ void Engine::DestroyDx12TriangleResources()
 	m_StaticMeshRenderer.Dx12.RootSignature.Reset();
 }
 
-void Engine::DrawDx12Triangle()
+void Engine::DrawDx12Triangle(const Camera& camera)
 {
 	auto native = static_cast<ID3D12GraphicsCommandList*>(m_Graphics.CommandList->GetNativeResource());
 	auto cameraResource = m_StaticMeshRenderer.CameraBuffer ? static_cast<ID3D12Resource*>(m_StaticMeshRenderer.CameraBuffer->GetNativeResource()) : nullptr;
-	auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device);
+	auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device.get());
 	if (!native || !cameraResource || !dx12Device || !m_StaticMeshRenderer.Dx12.PipelineState || !m_StaticMeshRenderer.Dx12.RootSignature)
 	{
 		return;
 	}
 
 	native->SetGraphicsRootSignature(m_StaticMeshRenderer.Dx12.RootSignature.Get());
-	native->SetGraphicsRootConstantBufferView(0, cameraResource->GetGPUVirtualAddress());
 	if (!m_StaticMeshRenderer.Dx12.ShaderResourceHeap || m_StaticMeshRenderer.Dx12.MaterialTextures.empty())
 	{
 		return;
@@ -2006,8 +2343,12 @@ void Engine::DrawDx12Triangle()
 		// 공용 upload buffer를 재사용하므로,
 		// entity마다 geometry와 camera 상수를 갱신한 뒤 draw를 이어서 기록합니다.
 		UploadEntityGeometry(entityId);
-		UpdateCameraBuffer(entityId);
-		native->SetGraphicsRootConstantBufferView(0, cameraResource->GetGPUVirtualAddress());
+		const uint64_t cameraOffset = UpdateCameraBuffer(entityId, camera);
+		if (cameraOffset == InvalidCameraConstantOffset())
+		{
+			continue;
+		}
+		native->SetGraphicsRootConstantBufferView(0, cameraResource->GetGPUVirtualAddress() + cameraOffset);
 
 		if (meshAsset->Submeshes.empty())
 		{
@@ -2060,12 +2401,22 @@ void Engine::DrawDx12Triangle()
 
 bool Engine::CreateCameraBuffer()
 {
-	constexpr uint64_t dx12AlignedCameraBufferSize = 256;
-	const uint64_t cameraBufferSize = (std::max)(dx12AlignedCameraBufferSize, static_cast<uint64_t>(sizeof(CameraConstants)));
+	uint64_t alignment = 256;
+	if (auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get()))
+	{
+		VkPhysicalDeviceProperties properties = {};
+		vkGetPhysicalDeviceProperties(vulkanDevice->GetVkPhysicalDevice(), &properties);
+		alignment = (std::max)(alignment, static_cast<uint64_t>(properties.limits.minUniformBufferOffsetAlignment));
+	}
+
+	m_StaticMeshRenderer.CameraBufferStride = AlignUp(static_cast<uint64_t>(sizeof(CameraConstants)), alignment);
+	m_StaticMeshRenderer.CameraBufferCapacity = CameraConstantSlotCount();
+	m_StaticMeshRenderer.CameraBufferCursor = 0;
+	const uint64_t cameraBufferSize = m_StaticMeshRenderer.CameraBufferStride * m_StaticMeshRenderer.CameraBufferCapacity;
 
 	const BufferDesc bufferDesc = {
 		.Size = cameraBufferSize,
-		.Stride = sizeof(CameraConstants),
+		.Stride = static_cast<uint32_t>(sizeof(CameraConstants)),
 		.Heap = HeapType::Upload,
 		.InitialState = ResourceState::GenericRead
 	};
@@ -2074,28 +2425,82 @@ bool Engine::CreateCameraBuffer()
 	return m_StaticMeshRenderer.CameraBuffer != nullptr;
 }
 
-void Engine::UpdateCameraBuffer()
+void Engine::ResetCameraConstantAllocator() noexcept
 {
-	UpdateCameraBuffer(m_Scene.GetPrimaryRenderableEntity());
+	m_StaticMeshRenderer.CameraBufferCursor = 0;
 }
 
-void Engine::UpdateCameraBuffer(EntityId entityId)
+uint64_t Engine::AllocateCameraConstantOffset() noexcept
 {
-	if (!m_StaticMeshRenderer.CameraBuffer)
+	if (!m_StaticMeshRenderer.CameraBuffer || m_StaticMeshRenderer.CameraBufferCapacity == 0)
 	{
-		return;
+		return InvalidCameraConstantOffset();
 	}
 
-	CameraConstants cameraConstants = {};
-	if (!RenderSystem::BuildCameraConstants(m_Scene, m_Camera, entityId, cameraConstants))
+	if (m_StaticMeshRenderer.CameraBufferCursor >= m_StaticMeshRenderer.CameraBufferCapacity)
 	{
-		return;
+		return InvalidCameraConstantOffset();
+	}
+
+	const uint64_t offset = m_StaticMeshRenderer.CameraBufferStride * m_StaticMeshRenderer.CameraBufferCursor;
+	++m_StaticMeshRenderer.CameraBufferCursor;
+	if (offset + sizeof(CameraConstants) > m_StaticMeshRenderer.CameraBuffer->GetSize())
+	{
+		return InvalidCameraConstantOffset();
+	}
+
+	return offset;
+}
+
+uint64_t Engine::WriteCameraConstants(const CameraConstants& cameraConstants)
+{
+	const uint64_t offset = AllocateCameraConstantOffset();
+	if (offset == InvalidCameraConstantOffset())
+	{
+		return InvalidCameraConstantOffset();
 	}
 
 	void* mappedData = nullptr;
 	m_StaticMeshRenderer.CameraBuffer->Map(&mappedData);
-	std::memcpy(mappedData, &cameraConstants, sizeof(cameraConstants));
+	if (!mappedData)
+	{
+		return InvalidCameraConstantOffset();
+	}
+
+	std::memcpy(static_cast<uint8_t*>(mappedData) + offset, &cameraConstants, sizeof(cameraConstants));
 	m_StaticMeshRenderer.CameraBuffer->Unmap();
+	return offset;
+}
+
+uint64_t Engine::UpdateCameraBuffer()
+{
+	return UpdateCameraBuffer(m_Camera);
+}
+
+uint64_t Engine::UpdateCameraBuffer(EntityId entityId)
+{
+	return UpdateCameraBuffer(entityId, m_Camera);
+}
+
+uint64_t Engine::UpdateCameraBuffer(const Camera& camera)
+{
+	return UpdateCameraBuffer(m_Scene.GetPrimaryRenderableEntity(), camera);
+}
+
+uint64_t Engine::UpdateCameraBuffer(EntityId entityId, const Camera& camera)
+{
+	if (!m_StaticMeshRenderer.CameraBuffer)
+	{
+		return InvalidCameraConstantOffset();
+	}
+
+	CameraConstants cameraConstants = {};
+	if (!RenderSystem::BuildCameraConstants(m_Scene, camera, entityId, cameraConstants))
+	{
+		return InvalidCameraConstantOffset();
+	}
+
+	return WriteCameraConstants(cameraConstants);
 }
 
 void Engine::UpdateObjectPicking()
@@ -2128,6 +2533,11 @@ bool Engine::TryPickSpider(float mouseX, float mouseY) const
 
 EntityId Engine::TryPickEntity(float mouseX, float mouseY) const
 {
+	return TryPickEntity(mouseX, mouseY, m_Camera, static_cast<float>(m_ClientWidth), static_cast<float>(m_ClientHeight));
+}
+
+EntityId Engine::TryPickEntity(float mouseX, float mouseY, const Camera& camera, float viewportWidth, float viewportHeight) const
+{
 	for (EntityId entityId : m_RenderState.RenderEntities)
 	{
 		if (entityId == InvalidEntityId)
@@ -2138,11 +2548,11 @@ EntityId Engine::TryPickEntity(float mouseX, float mouseY) const
 		if (PickingSystem::TryPickEntityAabb(
 			m_Scene,
 			entityId,
-			m_Camera,
+			camera,
 			mouseX,
 			mouseY,
-			static_cast<float>(m_ClientWidth),
-			static_cast<float>(m_ClientHeight)))
+			viewportWidth,
+			viewportHeight))
 		{
 			return entityId;
 		}
@@ -2183,13 +2593,13 @@ void Engine::UpdateAnimatedMesh(float deltaTime)
 		m_SpiderEntity,
 		deltaTime,
 		m_AnimationTimeSeconds,
-		m_StaticMeshRenderer.VertexBuffer);
+		m_StaticMeshRenderer.VertexBuffer.get());
 }
 
 bool Engine::CreateVulkanTriangleResources()
 {
-	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device);
-	auto vulkanCameraBuffer = dynamic_cast<VulkanBuffer*>(m_StaticMeshRenderer.CameraBuffer);
+	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
+	auto vulkanCameraBuffer = dynamic_cast<VulkanBuffer*>(m_StaticMeshRenderer.CameraBuffer.get());
 	if (!vulkanDevice || !vulkanCameraBuffer)
 	{
 		return false;
@@ -2239,7 +2649,7 @@ bool Engine::CreateVulkanTriangleResources()
 	// Vulkan 경로는 카메라 상수 버퍼를 uniform buffer + descriptor set으로 바인딩합니다.
 	const VkDescriptorSetLayoutBinding cameraBinding = {
 		.binding = 0,
-		.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+		.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
 		.descriptorCount = 1,
 		.stageFlags = VK_SHADER_STAGE_VERTEX_BIT
 	};
@@ -2266,7 +2676,7 @@ bool Engine::CreateVulkanTriangleResources()
 	const uint32_t materialTextureCount = static_cast<uint32_t>((std::max)(static_cast<size_t>(1), m_StaticMeshRenderer.Vulkan.MaterialTextures.size()));
 
 	const VkDescriptorPoolSize descriptorPoolSize = {
-		.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+		.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
 		.descriptorCount = materialTextureCount
 	};
 	const VkDescriptorPoolSize textureDescriptorPoolSize = {
@@ -2322,7 +2732,7 @@ bool Engine::CreateVulkanTriangleResources()
 			.dstSet = m_StaticMeshRenderer.Vulkan.DescriptorSets[materialIndex],
 			.dstBinding = 0,
 			.descriptorCount = 1,
-			.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+			.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
 			.pBufferInfo = &cameraBufferInfo
 		};
 		const VkWriteDescriptorSet textureWriteDescriptorSet = {
@@ -2509,7 +2919,7 @@ bool Engine::CreateVulkanTriangleResources()
 
 void Engine::DestroyVulkanTriangleResources()
 {
-	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device);
+	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
 	if (!vulkanDevice)
 	{
 		auto savedMaterialTextures = std::move(m_StaticMeshRenderer.Vulkan.MaterialTextures);
@@ -2565,7 +2975,7 @@ void Engine::DestroyVulkanTriangleResources()
 	m_StaticMeshRenderer.Vulkan.MaterialTextures = std::move(savedMaterialTextures);
 }
 
-void Engine::DrawVulkanTriangle()
+void Engine::DrawVulkanTriangle(const Camera& camera)
 {
 	if (!m_StaticMeshRenderer.Vulkan.IsValid)
 	{
@@ -2598,7 +3008,12 @@ void Engine::DrawVulkanTriangle()
 		}
 
 		UploadEntityGeometry(entityId);
-		UpdateCameraBuffer(entityId);
+		const uint64_t cameraOffset = UpdateCameraBuffer(entityId, camera);
+		if (cameraOffset == InvalidCameraConstantOffset())
+		{
+			continue;
+		}
+		const uint32_t cameraDynamicOffset = static_cast<uint32_t>(cameraOffset);
 
 		if (meshAsset->Submeshes.empty())
 		{
@@ -2623,8 +3038,8 @@ void Engine::DrawVulkanTriangle()
 				0,
 				1,
 				&descriptorSet,
-				0,
-				nullptr);
+				1,
+				&cameraDynamicOffset);
 			m_Graphics.CommandList->DrawIndexedInstanced(static_cast<uint32_t>(meshAsset->Indices.size()), 1, 0, 0, 0);
 			continue;
 		}
@@ -2643,8 +3058,8 @@ void Engine::DrawVulkanTriangle()
 				0,
 				1,
 				&descriptorSet,
-				0,
-				nullptr);
+				1,
+				&cameraDynamicOffset);
 			m_Graphics.CommandList->DrawIndexedInstanced(submesh.IndexCount, 1, submesh.IndexOffset, 0, 0);
 		};
 

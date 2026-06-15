@@ -33,8 +33,8 @@ public:
 	void Resize(int width, int height) override;
 
 	// 생성
-	ICommandList* CreateCommandList() override;
-	IBuffer* CreateBuffer(const BufferDesc& desc) override;
+	std::unique_ptr<ICommandList> CreateCommandList() override;
+	std::unique_ptr<IBuffer> CreateBuffer(const BufferDesc& desc) override;
 
 	// 명령 리스트 실행
 	void ExecuteCommandList(ICommandList* cmdList) override;
