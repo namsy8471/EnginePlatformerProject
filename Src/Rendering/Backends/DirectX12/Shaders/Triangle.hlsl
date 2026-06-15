@@ -5,8 +5,12 @@ cbuffer CameraConstants : register(b0)
 {
     row_major float4x4 WorldViewProjection;
     row_major float4x4 ViewProjection;
+    row_major float4x4 World;
     float4 CameraPosition;
     float4 BenchmarkParams; // x: instance count, y: local scale, z: fovY, w: aspect
+    float4 LightDirection; // xyz: normalized vector from surface to directional light, w: enabled
+    float4 LightColorIntensity; // rgb: light color, w: intensity
+    float4 AmbientSpecular; // x: ambient, y: specular strength, z: shininess, w: lighting enabled
 };
 
 Texture2D DiffuseTexture : register(t0);
@@ -25,6 +29,8 @@ struct VSOutput
     float4 Position : SV_Position;
     float2 TexCoord : TEXCOORD0;
     float4 Color : COLOR0;
+    float3 WorldPosition : TEXCOORD1;
+    float3 NormalWorld : TEXCOORD2;
 };
 
 float Hash01(uint value)
@@ -80,23 +86,68 @@ VSOutput VSMain(VSInput input, uint instanceId : SV_InstanceID)
         output.Position = mul(float4(center + localPosition, 1.0f), WorldViewProjection);
         output.TexCoord = input.TexCoord;
         output.Color = input.Color * MakeBenchmarkTint(instanceId);
+        output.WorldPosition = center + localPosition;
+        output.NormalWorld = normalize(input.Normal);
         return output;
     }
 
+    const float4 worldPosition = mul(float4(input.Position, 1.0f), World);
     output.Position = mul(float4(input.Position, 1.0f), WorldViewProjection);
     output.TexCoord = input.TexCoord;
     output.Color = input.Color;
+    output.WorldPosition = worldPosition.xyz;
+    output.NormalWorld = normalize(mul(float4(input.Normal, 0.0f), World).xyz);
     return output;
+}
+
+float4 ApplyPhongLighting(VSOutput input, float4 baseColor)
+{
+    if (BenchmarkParams.x > 0.5f || AmbientSpecular.w < 0.5f)
+    {
+        return baseColor;
+    }
+
+    float3 normal = input.NormalWorld;
+    if (dot(normal, normal) < 0.000001f)
+    {
+        normal = float3(0.0f, 1.0f, 0.0f);
+    }
+    normal = normalize(normal);
+
+    float3 lightDirection = LightDirection.xyz;
+    if (dot(lightDirection, lightDirection) < 0.000001f)
+    {
+        lightDirection = float3(0.0f, 1.0f, 0.0f);
+    }
+    lightDirection = normalize(lightDirection);
+
+    float3 viewDirection = CameraPosition.xyz - input.WorldPosition;
+    if (dot(viewDirection, viewDirection) < 0.000001f)
+    {
+        viewDirection = float3(0.0f, 0.0f, 1.0f);
+    }
+    viewDirection = normalize(viewDirection);
+
+    const float ambient = saturate(AmbientSpecular.x);
+    const float diffuse = max(dot(normal, lightDirection), 0.0f);
+    const float3 reflectedLight = reflect(-lightDirection, normal);
+    const float specularPower = max(AmbientSpecular.z, 1.0f);
+    const float specularStrength = max(AmbientSpecular.y, 0.0f);
+    const float specular = pow(max(dot(viewDirection, reflectedLight), 0.0f), specularPower) * specularStrength;
+    const float3 lightColor = max(LightColorIntensity.rgb * LightColorIntensity.w, float3(0.0f, 0.0f, 0.0f));
+    const float3 litColor = baseColor.rgb * (ambient + diffuse * lightColor) + specular * lightColor;
+    return float4(saturate(litColor), baseColor.a);
 }
 
 float4 PSMain(VSOutput input) : SV_Target
 {
-    if (input.TexCoord.x < 0.0f)
+    float4 baseColor = input.Color;
+    if (input.TexCoord.x >= 0.0f)
     {
-        return input.Color;
+        const float4 sampledColor = DiffuseTexture.Sample(DiffuseSampler, input.TexCoord);
+        clip(sampledColor.a - 0.1f);
+        baseColor = sampledColor * input.Color;
     }
 
-    const float4 sampledColor = DiffuseTexture.Sample(DiffuseSampler, input.TexCoord);
-    clip(sampledColor.a - 0.1f);
-    return sampledColor * input.Color;
+    return ApplyPhongLighting(input, baseColor);
 }

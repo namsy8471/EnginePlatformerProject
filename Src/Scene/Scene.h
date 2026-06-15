@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -78,6 +79,76 @@ public:
 		return true;
 	}
 
+	void Clear()
+	{
+		m_NextEntityId = 1;
+		m_PrimaryRenderableEntity = InvalidEntityId;
+		m_SelectedEntity = InvalidEntityId;
+		m_Entities.clear();
+		m_Components.Clear();
+	}
+
+	[[nodiscard]] bool MoveEntityToIndex(EntityId movedEntityId, size_t targetIndex)
+	{
+		auto movedIt = std::ranges::find_if(m_Entities, [movedEntityId](const SceneEntity& entity)
+			{
+				return entity.Id == movedEntityId;
+			});
+		if (movedIt == m_Entities.end())
+		{
+			return false;
+		}
+
+		SceneEntity movedEntity = *movedIt;
+		const size_t oldIndex = static_cast<size_t>(std::distance(m_Entities.begin(), movedIt));
+		m_Entities.erase(movedIt);
+		if (oldIndex < targetIndex && targetIndex > 0)
+		{
+			--targetIndex;
+		}
+		targetIndex = (std::min)(targetIndex, m_Entities.size());
+		m_Entities.insert(m_Entities.begin() + static_cast<std::ptrdiff_t>(targetIndex), movedEntity);
+		return oldIndex != targetIndex;
+	}
+
+	[[nodiscard]] bool MoveEntityBefore(EntityId movedEntityId, EntityId targetEntityId)
+	{
+		if (movedEntityId == targetEntityId)
+		{
+			return false;
+		}
+
+		const auto targetIt = std::ranges::find_if(m_Entities, [targetEntityId](const SceneEntity& entity)
+			{
+				return entity.Id == targetEntityId;
+			});
+		if (targetIt == m_Entities.end())
+		{
+			return false;
+		}
+
+		return MoveEntityToIndex(movedEntityId, static_cast<size_t>(std::distance(m_Entities.begin(), targetIt)));
+	}
+
+	[[nodiscard]] bool MoveEntityAfter(EntityId movedEntityId, EntityId targetEntityId)
+	{
+		if (movedEntityId == targetEntityId)
+		{
+			return false;
+		}
+
+		const auto targetIt = std::ranges::find_if(m_Entities, [targetEntityId](const SceneEntity& entity)
+			{
+				return entity.Id == targetEntityId;
+			});
+		if (targetIt == m_Entities.end())
+		{
+			return false;
+		}
+
+		return MoveEntityToIndex(movedEntityId, static_cast<size_t>(std::distance(m_Entities.begin(), targetIt)) + 1);
+	}
+
 	[[nodiscard]] EntityId DuplicateEntity(EntityId sourceEntityId, std::string_view newName, const DirectX::XMFLOAT3& transformOffset)
 	{
 		if (!ContainsEntity(sourceEntityId) || newName.empty())
@@ -104,26 +175,49 @@ public:
 				duplicateMesh.Asset = std::make_unique<Asset::StaticMeshAsset>(*sourceMesh->Asset);
 			}
 			duplicateMesh.MaterialTextures = sourceMesh->MaterialTextures;
+			SetComponentEnabled<MeshComponent>(duplicateEntityId, IsComponentEnabled<MeshComponent>(sourceEntityId));
 		}
 
 		if (const AnimatorComponent* sourceAnimator = GetAnimatorComponent(sourceEntityId))
 		{
 			EnsureAnimatorComponent(duplicateEntityId) = *sourceAnimator;
+			SetComponentEnabled<AnimatorComponent>(duplicateEntityId, IsComponentEnabled<AnimatorComponent>(sourceEntityId));
 		}
 
 		if (const BoundsComponent* sourceBounds = GetBoundsComponent(sourceEntityId))
 		{
 			EnsureBoundsComponent(duplicateEntityId) = *sourceBounds;
+			SetComponentEnabled<BoundsComponent>(duplicateEntityId, IsComponentEnabled<BoundsComponent>(sourceEntityId));
 		}
 
 		if (const CameraComponent* sourceCamera = GetCameraComponent(sourceEntityId))
 		{
 			EnsureCameraComponent(duplicateEntityId) = *sourceCamera;
+			SetComponentEnabled<CameraComponent>(duplicateEntityId, IsComponentEnabled<CameraComponent>(sourceEntityId));
 		}
 
 		if (const LightComponent* sourceLight = GetLightComponent(sourceEntityId))
 		{
 			EnsureLightComponent(duplicateEntityId) = *sourceLight;
+			SetComponentEnabled<LightComponent>(duplicateEntityId, IsComponentEnabled<LightComponent>(sourceEntityId));
+		}
+
+		if (const RigidBodyComponent* sourceRigidBody = GetRigidBodyComponent(sourceEntityId))
+		{
+			EnsureRigidBodyComponent(duplicateEntityId) = *sourceRigidBody;
+			SetComponentEnabled<RigidBodyComponent>(duplicateEntityId, IsComponentEnabled<RigidBodyComponent>(sourceEntityId));
+		}
+
+		if (const ColliderComponent* sourceCollider = GetColliderComponent(sourceEntityId))
+		{
+			EnsureColliderComponent(duplicateEntityId) = *sourceCollider;
+			SetComponentEnabled<ColliderComponent>(duplicateEntityId, IsComponentEnabled<ColliderComponent>(sourceEntityId));
+		}
+
+		if (const PhysicsMaterialComponent* sourceMaterial = GetPhysicsMaterialComponent(sourceEntityId))
+		{
+			EnsurePhysicsMaterialComponent(duplicateEntityId) = *sourceMaterial;
+			SetComponentEnabled<PhysicsMaterialComponent>(duplicateEntityId, IsComponentEnabled<PhysicsMaterialComponent>(sourceEntityId));
 		}
 
 		return duplicateEntityId;
@@ -204,7 +298,41 @@ public:
 	template <typename Component>
 	bool RemoveComponent(EntityId entityId)
 	{
+		if constexpr (std::is_same_v<Component, TransformComponent>)
+		{
+			(void)entityId;
+			return false;
+		}
+
 		return m_Components.RemoveComponent<Component>(entityId);
+	}
+
+	template <typename Component>
+	[[nodiscard]] bool IsComponentEnabled(EntityId entityId) const
+	{
+		if constexpr (std::is_same_v<Component, TransformComponent>)
+		{
+			return HasComponent<TransformComponent>(entityId);
+		}
+		else
+		{
+			return m_Components.IsComponentEnabled<Component>(entityId);
+		}
+	}
+
+	template <typename Component>
+	bool SetComponentEnabled(EntityId entityId, bool enabled)
+	{
+		if constexpr (std::is_same_v<Component, TransformComponent>)
+		{
+			(void)entityId;
+			(void)enabled;
+			return false;
+		}
+		else
+		{
+			return m_Components.SetComponentEnabled<Component>(entityId, enabled);
+		}
 	}
 
 	[[nodiscard]] TransformComponent* GetTransformComponent(EntityId entityId)
@@ -250,6 +378,21 @@ public:
 	[[nodiscard]] LightComponent& EnsureLightComponent(EntityId entityId)
 	{
 		return EnsureComponent<LightComponent>(entityId);
+	}
+
+	[[nodiscard]] RigidBodyComponent& EnsureRigidBodyComponent(EntityId entityId)
+	{
+		return EnsureComponent<RigidBodyComponent>(entityId);
+	}
+
+	[[nodiscard]] ColliderComponent& EnsureColliderComponent(EntityId entityId)
+	{
+		return EnsureComponent<ColliderComponent>(entityId);
+	}
+
+	[[nodiscard]] PhysicsMaterialComponent& EnsurePhysicsMaterialComponent(EntityId entityId)
+	{
+		return EnsureComponent<PhysicsMaterialComponent>(entityId);
 	}
 
 	[[nodiscard]] const MeshComponent* GetMeshComponent(EntityId entityId) const
@@ -319,6 +462,141 @@ public:
 	[[nodiscard]] const LightComponent* GetLightComponent(EntityId entityId) const
 	{
 		return GetComponent<LightComponent>(entityId);
+	}
+
+	[[nodiscard]] RigidBodyComponent* GetRigidBodyComponent(EntityId entityId)
+	{
+		return GetComponent<RigidBodyComponent>(entityId);
+	}
+
+	[[nodiscard]] const RigidBodyComponent* GetRigidBodyComponent(EntityId entityId) const
+	{
+		return GetComponent<RigidBodyComponent>(entityId);
+	}
+
+	[[nodiscard]] ColliderComponent* GetColliderComponent(EntityId entityId)
+	{
+		return GetComponent<ColliderComponent>(entityId);
+	}
+
+	[[nodiscard]] const ColliderComponent* GetColliderComponent(EntityId entityId) const
+	{
+		return GetComponent<ColliderComponent>(entityId);
+	}
+
+	[[nodiscard]] PhysicsMaterialComponent* GetPhysicsMaterialComponent(EntityId entityId)
+	{
+		return GetComponent<PhysicsMaterialComponent>(entityId);
+	}
+
+	[[nodiscard]] const PhysicsMaterialComponent* GetPhysicsMaterialComponent(EntityId entityId) const
+	{
+		return GetComponent<PhysicsMaterialComponent>(entityId);
+	}
+
+	bool RemoveRigidBodyComponent(EntityId entityId)
+	{
+		return RemoveComponent<RigidBodyComponent>(entityId);
+	}
+
+	bool RemoveMeshComponent(EntityId entityId)
+	{
+		return RemoveComponent<MeshComponent>(entityId);
+	}
+
+	bool RemoveAnimatorComponent(EntityId entityId)
+	{
+		return RemoveComponent<AnimatorComponent>(entityId);
+	}
+
+	bool RemoveCameraComponent(EntityId entityId)
+	{
+		return RemoveComponent<CameraComponent>(entityId);
+	}
+
+	bool RemoveLightComponent(EntityId entityId)
+	{
+		return RemoveComponent<LightComponent>(entityId);
+	}
+
+	bool RemoveColliderComponent(EntityId entityId)
+	{
+		return RemoveComponent<ColliderComponent>(entityId);
+	}
+
+	bool RemovePhysicsMaterialComponent(EntityId entityId)
+	{
+		return RemoveComponent<PhysicsMaterialComponent>(entityId);
+	}
+
+	[[nodiscard]] bool IsMeshEnabled(EntityId entityId) const
+	{
+		return IsComponentEnabled<MeshComponent>(entityId);
+	}
+
+	[[nodiscard]] bool IsAnimatorEnabled(EntityId entityId) const
+	{
+		return IsComponentEnabled<AnimatorComponent>(entityId);
+	}
+
+	[[nodiscard]] bool IsCameraEnabled(EntityId entityId) const
+	{
+		return IsComponentEnabled<CameraComponent>(entityId);
+	}
+
+	[[nodiscard]] bool IsLightEnabled(EntityId entityId) const
+	{
+		return IsComponentEnabled<LightComponent>(entityId);
+	}
+
+	[[nodiscard]] bool IsRigidBodyEnabled(EntityId entityId) const
+	{
+		return IsComponentEnabled<RigidBodyComponent>(entityId);
+	}
+
+	[[nodiscard]] bool IsColliderEnabled(EntityId entityId) const
+	{
+		return IsComponentEnabled<ColliderComponent>(entityId);
+	}
+
+	[[nodiscard]] bool IsPhysicsMaterialEnabled(EntityId entityId) const
+	{
+		return IsComponentEnabled<PhysicsMaterialComponent>(entityId);
+	}
+
+	bool SetMeshEnabled(EntityId entityId, bool enabled)
+	{
+		return SetComponentEnabled<MeshComponent>(entityId, enabled);
+	}
+
+	bool SetAnimatorEnabled(EntityId entityId, bool enabled)
+	{
+		return SetComponentEnabled<AnimatorComponent>(entityId, enabled);
+	}
+
+	bool SetCameraEnabled(EntityId entityId, bool enabled)
+	{
+		return SetComponentEnabled<CameraComponent>(entityId, enabled);
+	}
+
+	bool SetLightEnabled(EntityId entityId, bool enabled)
+	{
+		return SetComponentEnabled<LightComponent>(entityId, enabled);
+	}
+
+	bool SetRigidBodyEnabled(EntityId entityId, bool enabled)
+	{
+		return SetComponentEnabled<RigidBodyComponent>(entityId, enabled);
+	}
+
+	bool SetColliderEnabled(EntityId entityId, bool enabled)
+	{
+		return SetComponentEnabled<ColliderComponent>(entityId, enabled);
+	}
+
+	bool SetPhysicsMaterialEnabled(EntityId entityId, bool enabled)
+	{
+		return SetComponentEnabled<PhysicsMaterialComponent>(entityId, enabled);
 	}
 
 	[[nodiscard]] const std::string* GetEntityName(EntityId entityId) const

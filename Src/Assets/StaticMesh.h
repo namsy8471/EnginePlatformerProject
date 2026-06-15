@@ -13,6 +13,15 @@
 
 namespace Asset
 {
+	enum class PrimitiveMeshKind : uint8_t
+	{
+		None,
+		Cube,
+		Sphere,
+		Capsule,
+		Plane
+	};
+
 	struct StaticMeshVertex
 	{
 		DirectX::XMFLOAT3 Position = { 0.0f, 0.0f, 0.0f };
@@ -38,6 +47,7 @@ namespace Asset
 	struct StaticMeshMaterial
 	{
 		std::string Name;
+		DirectX::XMFLOAT4 DiffuseColor = { 1.0f, 1.0f, 1.0f, 1.0f };
 		std::filesystem::path DiffuseTexturePath;
 		std::vector<unsigned char> EmbeddedDiffuseTexturePixels;
 		int EmbeddedDiffuseTextureWidth = 0;
@@ -102,6 +112,7 @@ namespace Asset
 	struct StaticMeshAsset
 	{
 		std::filesystem::path SourcePath;
+		PrimitiveMeshKind PrimitiveKind = PrimitiveMeshKind::None;
 		bool IsAnimated = false;
 		uint32_t AnimationCount = 0;
 		uint32_t BoneCount = 0;

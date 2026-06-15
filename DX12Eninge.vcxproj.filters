@@ -144,6 +144,9 @@
     <ClInclude Include="Src\Scene\SceneLoader.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
+    <ClInclude Include="Src\Scene\ScenePersistenceService.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
     <ClInclude Include="Src\Scene\SceneRenderState.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
@@ -195,7 +198,19 @@
     <ClInclude Include="Src\Assets\AssetImportService.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
+    <ClInclude Include="Src\Assets\PrimitiveMeshFactory.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
     <ClInclude Include="Src\Assets\RuntimeAssetRegistry.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Physics\PhysicsComponents.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Physics\PhysicsWorld.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Physics\PhysXBackend.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
   </ItemGroup>
@@ -239,6 +254,9 @@
     <ClCompile Include="Src\Projects\ProjectService.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
+    <ClCompile Include="Src\Scene\ScenePersistenceService.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
     <ClCompile Include="Src\Utilities\ShaderUtils.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
@@ -272,7 +290,16 @@
     <ClCompile Include="Src\Assets\AssetImportService.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
+    <ClCompile Include="Src\Assets\PrimitiveMeshFactory.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
     <ClCompile Include="Src\Assets\RuntimeAssetRegistry.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Physics\PhysicsWorld.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Physics\PhysXBackend.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
   </ItemGroup>

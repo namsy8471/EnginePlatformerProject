@@ -124,6 +124,11 @@ namespace PickingSystem
 
 	[[nodiscard]] inline bool TryPickEntityAabb(const Scene& scene, EntityId entityId, const Camera& camera, float mouseX, float mouseY, float viewportWidth, float viewportHeight)
 	{
+		if (!scene.IsMeshEnabled(entityId))
+		{
+			return false;
+		}
+
 		const Asset::StaticMeshAsset* meshAsset = scene.GetMeshAsset(entityId);
 		const TransformComponent* transform = scene.GetTransformComponent(entityId);
 		const BoundsComponent* bounds = scene.GetBoundsComponent(entityId);

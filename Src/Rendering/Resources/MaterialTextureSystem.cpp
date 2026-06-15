@@ -5,11 +5,20 @@
 #include <stb_image.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <string>
 
 namespace Rendering
 {
+	namespace
+	{
+		[[nodiscard]] uint8_t ToColorByte(float value) noexcept
+		{
+			return static_cast<uint8_t>(std::clamp(value, 0.0f, 1.0f) * 255.0f + 0.5f);
+		}
+	}
+
 	bool MaterialTextureSystem::HasTransparency(const CpuMaterialTexture& materialTexture)
 	{
 		if (materialTexture.Width <= 0 || materialTexture.Height <= 0)
@@ -102,6 +111,17 @@ namespace Rendering
 			}
 
 			const auto& material = meshAsset.Materials[materialIndex];
+			materialTexture.Pixels = {
+				ToColorByte(material.DiffuseColor.x),
+				ToColorByte(material.DiffuseColor.y),
+				ToColorByte(material.DiffuseColor.z),
+				ToColorByte(material.DiffuseColor.w)
+			};
+			if (materialTransparency && materialIndex < materialTransparency->size())
+			{
+				(*materialTransparency)[materialIndex] = materialTexture.Pixels[3] < 250;
+			}
+
 			if (!material.DiffuseTexturePath.empty() && std::filesystem::exists(material.DiffuseTexturePath))
 			{
 				int width = 0;
@@ -112,14 +132,14 @@ namespace Rendering
 				{
 					if (logCallback)
 					{
-						std::string failureLogMessage = "Material texture load failed - MaterialIndex=";
-						failureLogMessage.append(std::to_string(materialIndex));
-						failureLogMessage.append(" Path=");
-						failureLogMessage.append(material.DiffuseTexturePath.string());
-						failureLogMessage.append(" SelectedPath=<fallback white>");
-						logCallback(failureLogMessage);
-					}
-					continue;
+					std::string failureLogMessage = "Material texture load failed - MaterialIndex=";
+					failureLogMessage.append(std::to_string(materialIndex));
+					failureLogMessage.append(" Path=");
+					failureLogMessage.append(material.DiffuseTexturePath.string());
+					failureLogMessage.append(" SelectedPath=<fallback diffuse color>");
+					logCallback(failureLogMessage);
+				}
+				continue;
 				}
 
 				materialTexture.Path = material.DiffuseTexturePath;
@@ -173,7 +193,7 @@ namespace Rendering
 				{
 					std::string fallbackLogMessage = "Material texture fallback - MaterialIndex=";
 					fallbackLogMessage.append(std::to_string(materialIndex));
-					fallbackLogMessage.append(" SelectedPath=<fallback white>");
+					fallbackLogMessage.append(" SelectedPath=<fallback diffuse color>");
 					logCallback(fallbackLogMessage);
 				}
 				continue;

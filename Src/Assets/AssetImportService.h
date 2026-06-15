@@ -26,24 +26,40 @@ namespace Asset
 		bool HasPlacement = true;
 	};
 
+	struct AssetImportRestoreState
+	{
+		bool HasTargetEntity = false;
+		EntityId TargetEntity = InvalidEntityId;
+		std::string EntityName;
+		Math::Transform LocalTransform = Math::Transform::Identity();
+		bool MeshEnabled = true;
+		bool HasAnimator = false;
+		bool AnimatorEnabled = true;
+		AnimatorComponent Animator;
+	};
+
 	struct AssetImportRequest
 	{
 		std::filesystem::path SourcePath;
 		uint64_t Generation = 0;
+		uint64_t SceneGeneration = 0;
 		bool IsReload = false;
 		AssetImportPlacement Placement;
+		AssetImportRestoreState Restore;
 	};
 
 	struct AssetImportResult
 	{
 		std::filesystem::path SourcePath;
 		uint64_t Generation = 0;
+		uint64_t SceneGeneration = 0;
 		bool IsReload = false;
 		bool Success = false;
 		bool IsAnimated = false;
 		std::string ErrorMessage;
 		std::vector<std::string> Diagnostics;
 		AssetImportPlacement Placement;
+		AssetImportRestoreState Restore;
 		std::unique_ptr<StaticMeshAsset> Mesh;
 		std::vector<CpuMaterialTexture> MaterialTextures;
 		std::vector<bool> MaterialTransparency;

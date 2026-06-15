@@ -19,6 +19,7 @@ namespace Editor
 	namespace
 	{
 		constexpr const char* kAssetPathPayload = "ENGINE_ASSET_PATH";
+		constexpr const char* kHierarchyEntityPayload = "ENGINE_HIERARCHY_ENTITY";
 
 		[[nodiscard]] constexpr const char* GraphicsApiName(GraphicsAPI api) noexcept
 		{
@@ -150,6 +151,106 @@ namespace Editor
 				return "Unknown";
 			}
 		}
+
+		[[nodiscard]] constexpr const char* ComponentKindName(SceneComponentKind kind) noexcept
+		{
+			switch (kind)
+			{
+			case SceneComponentKind::Mesh:
+				return "Mesh";
+			case SceneComponentKind::Animator:
+				return "Animator";
+			case SceneComponentKind::Camera:
+				return "Camera";
+			case SceneComponentKind::Light:
+				return "Light";
+			case SceneComponentKind::RigidBody:
+				return "Rigidbody";
+			case SceneComponentKind::Collider:
+				return "Collider";
+			case SceneComponentKind::PhysicsMaterial:
+				return "Physics Material";
+			default:
+				return "Component";
+			}
+		}
+
+		struct ComponentSectionState
+		{
+			bool Open = false;
+			bool Enabled = true;
+			bool Removed = false;
+		};
+
+		template <typename Component>
+		[[nodiscard]] ComponentSectionState BeginComponentSection(
+			EditorContext& context,
+			EntityId entityId,
+			SceneComponentKind kind,
+			const char* label,
+			ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_DefaultOpen)
+		{
+			ComponentSectionState state;
+			state.Enabled = context.ActiveScene.IsComponentEnabled<Component>(entityId);
+
+			ImGui::PushID(label);
+			bool enabled = state.Enabled;
+			if (ImGui::Checkbox("##enabled", &enabled))
+			{
+				state.Enabled = enabled;
+				if (context.OnComponentEnabledChanged)
+				{
+					context.OnComponentEnabledChanged(entityId, kind, enabled);
+				}
+			}
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("Enable component");
+			}
+
+			ImGui::SameLine();
+			state.Open = ImGui::TreeNodeEx("##tree", flags | ImGuiTreeNodeFlags_SpanAvailWidth, "%s", label);
+			ImGui::SameLine();
+			if (ImGui::SmallButton("Remove"))
+			{
+				state.Removed = true;
+				if (context.OnComponentRemoved)
+				{
+					context.OnComponentRemoved(entityId, kind);
+				}
+				if (state.Open)
+				{
+					ImGui::TreePop();
+					state.Open = false;
+				}
+			}
+			ImGui::PopID();
+			return state;
+		}
+
+		template <typename Component>
+		void DrawAddComponentMenuItem(
+			EditorContext& context,
+			EntityId entityId,
+			SceneComponentKind kind,
+			const char* label,
+			bool enabled = true,
+			const char* disabledReason = nullptr)
+		{
+			if (context.ActiveScene.HasComponent<Component>(entityId))
+			{
+				return;
+			}
+
+			if (ImGui::MenuItem(label, nullptr, false, enabled) && context.OnComponentAdded)
+			{
+				context.OnComponentAdded(entityId, kind);
+			}
+			if (!enabled && disabledReason && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			{
+				ImGui::SetTooltip("%s", disabledReason);
+			}
+		}
 	}
 
 	void EditorLayer::Draw(EditorContext& context)
@@ -258,6 +359,64 @@ namespace Editor
 		}
 
 		ImGui::TextUnformatted("EnginePlatformer");
+		if (context.IsSceneDirty)
+		{
+			ImGui::SameLine();
+			ImGui::TextUnformatted("*");
+		}
+		ImGui::Separator();
+
+		if (ImGui::BeginMenu("File"))
+		{
+			if (!context.CanEditProjectScene)
+			{
+				ImGui::BeginDisabled();
+			}
+			if (ImGui::MenuItem("Save Scene", "Ctrl+S") && context.OnSaveScene)
+			{
+				context.OnSaveScene();
+			}
+			if (ImGui::MenuItem("Save Scene As...") && context.OnSaveSceneAs)
+			{
+				context.OnSaveSceneAs();
+			}
+			if (ImGui::MenuItem("Open Scene...") && context.OnOpenSceneDialog)
+			{
+				context.OnOpenSceneDialog();
+			}
+			if (!context.CanEditProjectScene)
+			{
+				ImGui::EndDisabled();
+			}
+			if (ImGui::MenuItem("Reveal Project") && context.OnRevealProject)
+			{
+				context.OnRevealProject();
+			}
+			ImGui::Separator();
+			if (ImGui::MenuItem("Exit") && context.OnExit)
+			{
+				context.OnExit();
+			}
+			ImGui::EndMenu();
+		}
+
+		if (!context.CanEditProjectScene)
+		{
+			ImGui::BeginDisabled();
+		}
+		if (ImGui::Button("Save") && context.OnSaveScene)
+		{
+			context.OnSaveScene();
+		}
+		if (!context.CanEditProjectScene)
+		{
+			ImGui::EndDisabled();
+		}
+		if (!context.CurrentScenePath.empty())
+		{
+			ImGui::SameLine();
+			ImGui::TextUnformatted(context.CurrentScenePath.filename().string().c_str());
+		}
 		ImGui::Separator();
 
 		int apiIndex = context.CurrentApi == GraphicsAPI::DirectX12 ? 0 : 1;
@@ -293,11 +452,47 @@ namespace Editor
 			context.OnFrameSelected();
 		}
 
+		if (ImGui::Button("Align Game Camera") && context.OnAlignGameCameraToScene)
+		{
+			context.OnAlignGameCameraToScene();
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Copy Scene camera view to the Game Camera");
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Align Scene to Game") && context.OnAlignSceneCameraToGame)
+		{
+			context.OnAlignSceneCameraToGame();
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Move Scene camera to the Game Camera view");
+		}
+
 		ImGui::Separator();
 		ImGui::Checkbox("Gizmos", &m_ShowSceneGizmos);
 		if (ImGui::IsItemHovered())
 		{
 			ImGui::SetTooltip("Show Scene View camera gizmos");
+		}
+		ImGui::SameLine();
+		if (!context.CanEditProjectScene)
+		{
+			ImGui::BeginDisabled();
+		}
+		bool simulatePhysics = context.PhysicsSimulationEnabled;
+		if (ImGui::Checkbox("Simulate Physics", &simulatePhysics) && context.OnPhysicsSimulationChanged)
+		{
+			context.OnPhysicsSimulationChanged(simulatePhysics);
+		}
+		if (!context.CanEditProjectScene)
+		{
+			ImGui::EndDisabled();
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Run Project Scene rigid bodies with fixed timestep PhysX simulation");
 		}
 		ImGui::Separator();
 		ImGui::Checkbox("Demo", &context.ShowDemoWindow);
@@ -312,6 +507,10 @@ namespace Editor
 		const EntityId selectedEntity = context.ActiveScene.GetSelectedEntity();
 		EntityId pendingDuplicateEntity = InvalidEntityId;
 		EntityId pendingDeleteEntity = InvalidEntityId;
+		EntityId pendingMoveEntity = InvalidEntityId;
+		EntityId pendingMoveTarget = InvalidEntityId;
+		EntityDropPlacement pendingMovePlacement = EntityDropPlacement::After;
+		Asset::PrimitiveMeshKind pendingPrimitiveKind = Asset::PrimitiveMeshKind::None;
 		for (const SceneEntity& entity : context.ActiveScene.GetEntities())
 		{
 			const bool selected = entity.Id == selectedEntity;
@@ -362,6 +561,59 @@ namespace Editor
 				}
 				ImGui::EndPopup();
 			}
+
+			if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+			{
+				ImGui::SetDragDropPayload(kHierarchyEntityPayload, &entity.Id, sizeof(EntityId));
+				ImGui::Text("Move %s", displayName.c_str());
+				ImGui::EndDragDropSource();
+			}
+
+			if (ImGui::BeginDragDropTarget())
+			{
+				if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kHierarchyEntityPayload))
+				{
+					if (payload->Data && payload->DataSize == sizeof(EntityId))
+					{
+						const EntityId movedEntity = *static_cast<const EntityId*>(payload->Data);
+						if (movedEntity != entity.Id)
+						{
+							const float itemCenterY = (ImGui::GetItemRectMin().y + ImGui::GetItemRectMax().y) * 0.5f;
+							pendingMoveEntity = movedEntity;
+							pendingMoveTarget = entity.Id;
+							pendingMovePlacement = ImGui::GetMousePos().y < itemCenterY
+								? EntityDropPlacement::Before
+								: EntityDropPlacement::After;
+						}
+					}
+				}
+				ImGui::EndDragDropTarget();
+			}
+		}
+
+		if (ImGui::BeginPopupContextWindow("HierarchyBlankContext", ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems))
+		{
+			if (ImGui::BeginMenu("Create"))
+			{
+				if (ImGui::MenuItem("Cube"))
+				{
+					pendingPrimitiveKind = Asset::PrimitiveMeshKind::Cube;
+				}
+				if (ImGui::MenuItem("Sphere"))
+				{
+					pendingPrimitiveKind = Asset::PrimitiveMeshKind::Sphere;
+				}
+				if (ImGui::MenuItem("Capsule"))
+				{
+					pendingPrimitiveKind = Asset::PrimitiveMeshKind::Capsule;
+				}
+				if (ImGui::MenuItem("Plane"))
+				{
+					pendingPrimitiveKind = Asset::PrimitiveMeshKind::Plane;
+				}
+				ImGui::EndMenu();
+			}
+			ImGui::EndPopup();
 		}
 
 		DrawRenamePopup(context);
@@ -374,18 +626,20 @@ namespace Editor
 		{
 			context.OnDeleteEntity(pendingDeleteEntity);
 		}
+		if (pendingMoveEntity != InvalidEntityId && pendingMoveTarget != InvalidEntityId && context.OnMoveEntity)
+		{
+			context.OnMoveEntity(pendingMoveEntity, pendingMoveTarget, pendingMovePlacement);
+		}
+		if (pendingPrimitiveKind != Asset::PrimitiveMeshKind::None && context.OnCreatePrimitive)
+		{
+			context.OnCreatePrimitive(pendingPrimitiveKind);
+		}
 
 		ImGui::End();
 	}
 
 	void EditorLayer::HandleHierarchyShortcuts(EditorContext& context)
 	{
-		const EntityId selectedEntity = context.ActiveScene.GetSelectedEntity();
-		if (selectedEntity == InvalidEntityId)
-		{
-			return;
-		}
-
 		if (m_RenamingEntity != InvalidEntityId || m_ShouldOpenRenamePopup)
 		{
 			return;
@@ -393,6 +647,39 @@ namespace Editor
 
 		const ImGuiIO& io = ImGui::GetIO();
 		if (io.WantTextInput || ImGui::IsAnyItemActive())
+		{
+			return;
+		}
+
+		if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false))
+		{
+			if (context.CanEditProjectScene && context.OnSaveScene)
+			{
+				context.OnSaveScene();
+			}
+			return;
+		}
+
+		if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F, false))
+		{
+			if (context.OnAlignGameCameraToScene)
+			{
+				context.OnAlignGameCameraToScene();
+			}
+			return;
+		}
+
+		if (!io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F, false))
+		{
+			if (context.OnAlignSceneCameraToGame)
+			{
+				context.OnAlignSceneCameraToGame();
+			}
+			return;
+		}
+
+		const EntityId selectedEntity = context.ActiveScene.GetSelectedEntity();
+		if (selectedEntity == InvalidEntityId)
 		{
 			return;
 		}
@@ -568,7 +855,107 @@ namespace Editor
 		const ImVec2 canvasMax(canvasPosition.x + canvasSize.x, canvasPosition.y + canvasSize.y);
 		drawList->PushClipRect(canvasPosition, canvasMax, true);
 		DrawGameCameraFrustumGizmo(context, drawList, canvasPosition, canvasSize);
+		DrawColliderGizmos(context, drawList, canvasPosition, canvasSize);
 		drawList->PopClipRect();
+	}
+
+	void EditorLayer::DrawColliderGizmos(EditorContext& context, ImDrawList* drawList, const ImVec2& canvasPosition, const ImVec2& canvasSize) const
+	{
+		constexpr std::array<std::pair<size_t, size_t>, 12> kBoxEdges = {{
+			{ 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 },
+			{ 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 4 },
+			{ 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 }
+		}};
+		constexpr std::array<std::pair<size_t, size_t>, 4> kPlaneEdges = {{
+			{ 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 }
+		}};
+
+		for (const SceneEntity& entity : context.ActiveScene.GetEntities())
+		{
+			const ColliderComponent* collider = context.ActiveScene.GetColliderComponent(entity.Id);
+			const TransformComponent* transform = context.ActiveScene.GetTransformComponent(entity.Id);
+			if (!collider || !context.ActiveScene.IsColliderEnabled(entity.Id) || !transform)
+			{
+				continue;
+			}
+
+			DirectX::XMFLOAT3 halfExtents = {};
+			switch (collider->Shape)
+			{
+			case Physics::ColliderShape::Sphere:
+				halfExtents = { collider->Radius, collider->Radius, collider->Radius };
+				break;
+			case Physics::ColliderShape::Capsule:
+				halfExtents = { collider->Radius, collider->Height * 0.5f, collider->Radius };
+				break;
+			case Physics::ColliderShape::Plane:
+				halfExtents = { (std::max)(collider->Size.x * 0.5f, 0.5f), 0.0f, (std::max)(collider->Size.z * 0.5f, 0.5f) };
+				break;
+			case Physics::ColliderShape::Box:
+			default:
+				halfExtents = { collider->Size.x * 0.5f, collider->Size.y * 0.5f, collider->Size.z * 0.5f };
+				break;
+			}
+
+			const DirectX::XMFLOAT3 center = collider->Offset;
+			std::array<DirectX::XMFLOAT3, 8> localCorners = {{
+				{ center.x - halfExtents.x, center.y + halfExtents.y, center.z - halfExtents.z },
+				{ center.x + halfExtents.x, center.y + halfExtents.y, center.z - halfExtents.z },
+				{ center.x + halfExtents.x, center.y + halfExtents.y, center.z + halfExtents.z },
+				{ center.x - halfExtents.x, center.y + halfExtents.y, center.z + halfExtents.z },
+				{ center.x - halfExtents.x, center.y - halfExtents.y, center.z - halfExtents.z },
+				{ center.x + halfExtents.x, center.y - halfExtents.y, center.z - halfExtents.z },
+				{ center.x + halfExtents.x, center.y - halfExtents.y, center.z + halfExtents.z },
+				{ center.x - halfExtents.x, center.y - halfExtents.y, center.z + halfExtents.z }
+			}};
+
+			if (collider->Shape == Physics::ColliderShape::Plane)
+			{
+				localCorners[0] = { center.x - halfExtents.x, center.y, center.z - halfExtents.z };
+				localCorners[1] = { center.x + halfExtents.x, center.y, center.z - halfExtents.z };
+				localCorners[2] = { center.x + halfExtents.x, center.y, center.z + halfExtents.z };
+				localCorners[3] = { center.x - halfExtents.x, center.y, center.z + halfExtents.z };
+			}
+
+			const DirectX::XMMATRIX worldMatrix = transform->WorldTransform.ToXmMatrix();
+			std::array<ImVec2, 8> projectedCorners = {};
+			std::array<bool, 8> projected = {};
+			const size_t cornerCount = collider->Shape == Physics::ColliderShape::Plane ? 4 : 8;
+			for (size_t cornerIndex = 0; cornerIndex < cornerCount; ++cornerIndex)
+			{
+				DirectX::XMFLOAT3 worldCorner = {};
+				DirectX::XMStoreFloat3(
+					&worldCorner,
+					DirectX::XMVector3Transform(DirectX::XMLoadFloat3(&localCorners[cornerIndex]), worldMatrix));
+				projected[cornerIndex] = ProjectWorldToSceneCanvas(context.SceneCamera, worldCorner, canvasPosition, canvasSize, projectedCorners[cornerIndex]);
+			}
+
+			const bool selected = entity.Id == context.ActiveScene.GetSelectedEntity();
+			const ImU32 color = selected ? IM_COL32(124, 255, 154, 235) : IM_COL32(91, 221, 255, 150);
+			const float thickness = selected ? 1.8f : 1.2f;
+			const auto drawEdge = [&](size_t begin, size_t end)
+				{
+					if (projected[begin] && projected[end])
+					{
+						drawList->AddLine(projectedCorners[begin], projectedCorners[end], color, thickness);
+					}
+				};
+
+			if (collider->Shape == Physics::ColliderShape::Plane)
+			{
+				for (const auto& [begin, end] : kPlaneEdges)
+				{
+					drawEdge(begin, end);
+				}
+			}
+			else
+			{
+				for (const auto& [begin, end] : kBoxEdges)
+				{
+					drawEdge(begin, end);
+				}
+			}
+		}
 	}
 
 	void EditorLayer::DrawGameCameraFrustumGizmo(EditorContext& context, ImDrawList* drawList, const ImVec2& canvasPosition, const ImVec2& canvasSize) const
@@ -759,6 +1146,32 @@ namespace Editor
 		ImGui::Text("ID: %u", selectedEntity);
 		ImGui::Separator();
 
+		if (ImGui::Button("+ Add Component"))
+		{
+			ImGui::OpenPopup("AddComponentPopup");
+		}
+		if (ImGui::BeginPopup("AddComponentPopup"))
+		{
+			DrawAddComponentMenuItem<MeshComponent>(context, selectedEntity, SceneComponentKind::Mesh, ComponentKindName(SceneComponentKind::Mesh));
+			DrawAddComponentMenuItem<CameraComponent>(context, selectedEntity, SceneComponentKind::Camera, ComponentKindName(SceneComponentKind::Camera));
+			DrawAddComponentMenuItem<LightComponent>(context, selectedEntity, SceneComponentKind::Light, ComponentKindName(SceneComponentKind::Light));
+			DrawAddComponentMenuItem<RigidBodyComponent>(context, selectedEntity, SceneComponentKind::RigidBody, ComponentKindName(SceneComponentKind::RigidBody));
+			DrawAddComponentMenuItem<ColliderComponent>(context, selectedEntity, SceneComponentKind::Collider, ComponentKindName(SceneComponentKind::Collider));
+			DrawAddComponentMenuItem<PhysicsMaterialComponent>(context, selectedEntity, SceneComponentKind::PhysicsMaterial, ComponentKindName(SceneComponentKind::PhysicsMaterial));
+
+			const Asset::StaticMeshAsset* meshAsset = context.ActiveScene.GetMeshAsset(selectedEntity);
+			const bool canAddAnimator = meshAsset && meshAsset->IsAnimated && !meshAsset->Animations.empty();
+			DrawAddComponentMenuItem<AnimatorComponent>(
+				context,
+				selectedEntity,
+				SceneComponentKind::Animator,
+				ComponentKindName(SceneComponentKind::Animator),
+				canAddAnimator,
+				"Animator requires an animated mesh.");
+			ImGui::EndPopup();
+		}
+		ImGui::Separator();
+
 		if (TransformComponent* transform = context.ActiveScene.GetTransformComponent(selectedEntity))
 		{
 			if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen))
@@ -771,49 +1184,216 @@ namespace Editor
 				{
 					transform->LocalTransform.Rotation = Math::NormalizeQuaternionOrIdentity(transform->LocalTransform.Rotation);
 					transform->UpdateWorld();
+					if (context.OnSceneEdited)
+					{
+						context.OnSceneEdited();
+					}
+					if (context.OnPhysicsActorDirty)
+					{
+						context.OnPhysicsActorDirty(selectedEntity);
+					}
 				}
 			}
 		}
 
 		if (CameraComponent* camera = context.ActiveScene.GetCameraComponent(selectedEntity))
 		{
-			if (ImGui::CollapsingHeader("Camera Component", ImGuiTreeNodeFlags_DefaultOpen))
+			const ComponentSectionState section = BeginComponentSection<CameraComponent>(
+				context,
+				selectedEntity,
+				SceneComponentKind::Camera,
+				"Camera");
+			if (section.Open && !section.Removed)
 			{
-				float fovDegrees = DirectX::XMConvertToDegrees(camera->FovY);
-				if (ImGui::DragFloat("FOV", &fovDegrees, 0.25f, 1.0f, 179.0f, "%.1f deg"))
 				{
-					camera->FovY = DirectX::XMConvertToRadians((std::clamp)(fovDegrees, 1.0f, 179.0f));
-				}
-				ImGui::DragFloat("Near", &camera->NearZ, 0.01f, 0.001f, 100.0f, "%.3f");
-				ImGui::DragFloat("Far", &camera->FarZ, 1.0f, 1.0f, 100000.0f, "%.1f");
-				ImGui::Text("Role: %s", camera->IsGameCamera ? "Game Camera" : "Camera");
+					ImGui::BeginDisabled(!section.Enabled);
+					bool cameraChanged = false;
+					float fovDegrees = DirectX::XMConvertToDegrees(camera->FovY);
+					if (ImGui::DragFloat("FOV", &fovDegrees, 0.25f, 1.0f, 179.0f, "%.1f deg"))
+					{
+						camera->FovY = DirectX::XMConvertToRadians((std::clamp)(fovDegrees, 1.0f, 179.0f));
+						cameraChanged = true;
+					}
+					cameraChanged |= ImGui::DragFloat("Near", &camera->NearZ, 0.01f, 0.001f, 100.0f, "%.3f");
+					cameraChanged |= ImGui::DragFloat("Far", &camera->FarZ, 1.0f, 1.0f, 100000.0f, "%.1f");
+					ImGui::Text("Role: %s", camera->IsGameCamera ? "Game Camera" : "Camera");
 
-				const DirectX::XMFLOAT3 position = context.GameCamera.GetPosition();
-				ImGui::Text("Runtime Position: %.2f, %.2f, %.2f", position.x, position.y, position.z);
-				ImGui::Text("Runtime Aspect: %.3f", context.GameCamera.GetAspect());
+					const DirectX::XMFLOAT3 position = context.GameCamera.GetPosition();
+					ImGui::Text("Runtime Position: %.2f, %.2f, %.2f", position.x, position.y, position.z);
+					ImGui::Text("Runtime Aspect: %.3f", context.GameCamera.GetAspect());
+					if (cameraChanged && context.OnSceneEdited)
+					{
+						context.OnSceneEdited();
+					}
+					ImGui::EndDisabled();
+				}
+				ImGui::TreePop();
 			}
 		}
 
 		if (LightComponent* light = context.ActiveScene.GetLightComponent(selectedEntity))
 		{
-			if (ImGui::CollapsingHeader("Light Component", ImGuiTreeNodeFlags_DefaultOpen))
+			const ComponentSectionState section = BeginComponentSection<LightComponent>(
+				context,
+				selectedEntity,
+				SceneComponentKind::Light,
+				"Light");
+			if (section.Open && !section.Removed)
 			{
-				ImGui::Checkbox("Enabled", &light->Enabled);
+				ImGui::BeginDisabled(!section.Enabled);
+				bool lightChanged = false;
+				lightChanged |= ImGui::Checkbox("Emits Light", &light->Enabled);
 				int typeIndex = std::to_underlying(light->Type);
 				if (ImGui::Combo("Type", &typeIndex, "Directional\0Point\0Spot\0"))
 				{
 					light->Type = static_cast<LightType>((std::clamp)(typeIndex, 0, 2));
+					lightChanged = true;
 				}
-				ImGui::ColorEdit3("Color", &light->Color.x);
-				ImGui::DragFloat("Intensity", &light->Intensity, 0.05f, 0.0f, 100.0f);
-				ImGui::DragFloat("Range", &light->Range, 1.0f, 0.0f, 10000.0f);
+				lightChanged |= ImGui::ColorEdit3("Color", &light->Color.x);
+				lightChanged |= ImGui::DragFloat("Intensity", &light->Intensity, 0.05f, 0.0f, 100.0f);
+				lightChanged |= ImGui::DragFloat("Range", &light->Range, 1.0f, 0.0f, 10000.0f);
 
 				float spotAngleDegrees = DirectX::XMConvertToDegrees(light->SpotAngle);
 				if (ImGui::DragFloat("Spot Angle", &spotAngleDegrees, 0.25f, 1.0f, 179.0f, "%.1f deg"))
 				{
 					light->SpotAngle = DirectX::XMConvertToRadians((std::clamp)(spotAngleDegrees, 1.0f, 179.0f));
+					lightChanged = true;
 				}
 				ImGui::Text("Resolved Type: %s", LightTypeName(light->Type));
+				if (lightChanged && context.OnSceneEdited)
+				{
+					context.OnSceneEdited();
+				}
+				ImGui::EndDisabled();
+				ImGui::TreePop();
+			}
+		}
+
+		if (RigidBodyComponent* rigidBody = context.ActiveScene.GetRigidBodyComponent(selectedEntity))
+		{
+			const ComponentSectionState section = BeginComponentSection<RigidBodyComponent>(
+				context,
+				selectedEntity,
+				SceneComponentKind::RigidBody,
+				"Rigidbody");
+			if (section.Open && !section.Removed)
+			{
+				ImGui::BeginDisabled(!section.Enabled);
+				bool physicsChanged = false;
+				const bool colliderEnabled = context.ActiveScene.IsColliderEnabled(selectedEntity);
+				ImGui::Text("State: %s", Physics::ToString(rigidBody->Type).data());
+				ImGui::Text("Simulation: %s", context.PhysicsSimulationEnabled ? "On" : "Off");
+				ImGui::Text("Gravity: %s", rigidBody->UseGravity && rigidBody->Type == Physics::RigidBodyType::Dynamic ? "Enabled" : "Inactive");
+				if (!context.ActiveScene.GetColliderComponent(selectedEntity) || !colliderEnabled)
+				{
+					ImGui::TextUnformatted("No enabled collider: actor will not be dynamic.");
+				}
+				int bodyTypeIndex = static_cast<int>(Physics::ToIndex(rigidBody->Type));
+				if (ImGui::Combo("Body Type", &bodyTypeIndex, "Static\0Dynamic\0Kinematic\0"))
+				{
+					rigidBody->Type = static_cast<Physics::RigidBodyType>((std::clamp)(bodyTypeIndex, 0, 2));
+					physicsChanged = true;
+				}
+				physicsChanged |= ImGui::DragFloat("Mass", &rigidBody->Mass, 0.05f, 0.001f, 10000.0f);
+				physicsChanged |= ImGui::DragFloat("Linear Damping", &rigidBody->LinearDamping, 0.01f, 0.0f, 100.0f);
+				physicsChanged |= ImGui::DragFloat("Angular Damping", &rigidBody->AngularDamping, 0.01f, 0.0f, 100.0f);
+				physicsChanged |= ImGui::Checkbox("Use Gravity", &rigidBody->UseGravity);
+				physicsChanged |= ImGui::DragFloat3("Linear Velocity", &rigidBody->LinearVelocity.x, 0.05f);
+				physicsChanged |= ImGui::DragFloat3("Angular Velocity", &rigidBody->AngularVelocity.x, 0.05f);
+				if (physicsChanged)
+				{
+					if (context.OnSceneEdited)
+					{
+						context.OnSceneEdited();
+					}
+					if (context.OnPhysicsActorDirty)
+					{
+						context.OnPhysicsActorDirty(selectedEntity);
+					}
+				}
+				ImGui::EndDisabled();
+				ImGui::TreePop();
+			}
+		}
+
+		if (ColliderComponent* collider = context.ActiveScene.GetColliderComponent(selectedEntity))
+		{
+			const ComponentSectionState section = BeginComponentSection<ColliderComponent>(
+				context,
+				selectedEntity,
+				SceneComponentKind::Collider,
+				"Collider");
+			if (section.Open && !section.Removed)
+			{
+				ImGui::BeginDisabled(!section.Enabled);
+				bool physicsChanged = false;
+				ImGui::Text("Simulation: %s", context.PhysicsSimulationEnabled ? "On" : "Off");
+				if (!context.ActiveScene.GetRigidBodyComponent(selectedEntity) || !context.ActiveScene.IsRigidBodyEnabled(selectedEntity))
+				{
+					ImGui::TextUnformatted("No enabled Rigidbody: collider behaves as static.");
+				}
+				if (collider->Shape == Physics::ColliderShape::Plane)
+				{
+					ImGui::TextUnformatted("Plane collider: infinite PhysX plane.");
+				}
+				int shapeIndex = static_cast<int>(Physics::ToIndex(collider->Shape));
+				if (ImGui::Combo("Shape", &shapeIndex, "Box\0Sphere\0Capsule\0Plane\0"))
+				{
+					collider->Shape = static_cast<Physics::ColliderShape>((std::clamp)(shapeIndex, 0, 3));
+					physicsChanged = true;
+				}
+				physicsChanged |= ImGui::DragFloat3("Collider Size", &collider->Size.x, 0.05f, 0.001f, 10000.0f);
+				physicsChanged |= ImGui::DragFloat("Radius", &collider->Radius, 0.01f, 0.001f, 10000.0f);
+				physicsChanged |= ImGui::DragFloat("Height", &collider->Height, 0.01f, 0.001f, 10000.0f);
+				physicsChanged |= ImGui::DragFloat3("Offset", &collider->Offset.x, 0.01f);
+				physicsChanged |= ImGui::Checkbox("Trigger", &collider->IsTrigger);
+				if (physicsChanged)
+				{
+					if (context.OnSceneEdited)
+					{
+						context.OnSceneEdited();
+					}
+					if (context.OnPhysicsActorDirty)
+					{
+						context.OnPhysicsActorDirty(selectedEntity);
+					}
+				}
+				ImGui::EndDisabled();
+				ImGui::TreePop();
+			}
+		}
+
+		if (PhysicsMaterialComponent* physicsMaterial = context.ActiveScene.GetPhysicsMaterialComponent(selectedEntity))
+		{
+			const ComponentSectionState section = BeginComponentSection<PhysicsMaterialComponent>(
+				context,
+				selectedEntity,
+				SceneComponentKind::PhysicsMaterial,
+				"Physics Material");
+			if (section.Open && !section.Removed)
+			{
+				ImGui::BeginDisabled(!section.Enabled);
+				bool physicsChanged = false;
+				if (!context.ActiveScene.GetColliderComponent(selectedEntity) || !context.ActiveScene.IsColliderEnabled(selectedEntity))
+				{
+					ImGui::TextUnformatted("No enabled collider: material is ignored.");
+				}
+				physicsChanged |= ImGui::DragFloat("Static Friction", &physicsMaterial->StaticFriction, 0.01f, 0.0f, 10.0f);
+				physicsChanged |= ImGui::DragFloat("Dynamic Friction", &physicsMaterial->DynamicFriction, 0.01f, 0.0f, 10.0f);
+				physicsChanged |= ImGui::DragFloat("Restitution", &physicsMaterial->Restitution, 0.01f, 0.0f, 1.0f);
+				if (physicsChanged)
+				{
+					if (context.OnSceneEdited)
+					{
+						context.OnSceneEdited();
+					}
+					if (context.OnPhysicsActorDirty)
+					{
+						context.OnPhysicsActorDirty(selectedEntity);
+					}
+				}
+				ImGui::EndDisabled();
+				ImGui::TreePop();
 			}
 		}
 
@@ -826,35 +1406,57 @@ namespace Editor
 			}
 		}
 
-		if (const Asset::StaticMeshAsset* mesh = context.ActiveScene.GetMeshAsset(selectedEntity))
+		if (MeshComponent* meshComponent = context.ActiveScene.GetMeshComponent(selectedEntity))
 		{
-			if (ImGui::CollapsingHeader("Mesh", ImGuiTreeNodeFlags_DefaultOpen))
+			const ComponentSectionState section = BeginComponentSection<MeshComponent>(
+				context,
+				selectedEntity,
+				SceneComponentKind::Mesh,
+				"Mesh");
+			if (section.Open && !section.Removed)
 			{
-				ImGui::Text("Vertices: %d", static_cast<int>(mesh->Vertices.size()));
-				ImGui::Text("Indices: %d", static_cast<int>(mesh->Indices.size()));
-				ImGui::Text("Submeshes: %d", static_cast<int>(mesh->Submeshes.size()));
-				ImGui::Text("Materials: %d", static_cast<int>(mesh->Materials.size()));
-				ImGui::Text("Animated: %s", mesh->IsAnimated ? "true" : "false");
-				if (mesh->IsAnimated)
+				ImGui::BeginDisabled(!section.Enabled);
+				const Asset::StaticMeshAsset* mesh = meshComponent->Asset.get();
+				if (!mesh)
 				{
-					ImGui::Text("Animation Clips: %d", static_cast<int>(mesh->Animations.size()));
-					ImGui::Text("Bones: %d", static_cast<int>(mesh->Bones.size()));
+					ImGui::TextUnformatted("No mesh asset assigned.");
 				}
-			}
-
-			if (mesh->IsAnimated && !mesh->Animations.empty())
-			{
-				AnimatorComponent* animator = context.ActiveScene.GetAnimatorComponent(selectedEntity);
-				if (!animator)
+				else
 				{
-					if (ImGui::Button("Add Animator"))
+					ImGui::Text("Vertices: %d", static_cast<int>(mesh->Vertices.size()));
+					ImGui::Text("Indices: %d", static_cast<int>(mesh->Indices.size()));
+					ImGui::Text("Submeshes: %d", static_cast<int>(mesh->Submeshes.size()));
+					ImGui::Text("Materials: %d", static_cast<int>(mesh->Materials.size()));
+					ImGui::Text("Animated: %s", mesh->IsAnimated ? "true" : "false");
+					if (mesh->IsAnimated)
 					{
-						animator = &context.ActiveScene.EnsureAnimatorComponent(selectedEntity);
+						ImGui::Text("Animation Clips: %d", static_cast<int>(mesh->Animations.size()));
+						ImGui::Text("Bones: %d", static_cast<int>(mesh->Bones.size()));
 					}
 				}
+				ImGui::EndDisabled();
+				ImGui::TreePop();
+			}
+		}
 
-				if (animator && ImGui::CollapsingHeader("Animator", ImGuiTreeNodeFlags_DefaultOpen))
+		if (AnimatorComponent* animator = context.ActiveScene.GetAnimatorComponent(selectedEntity))
+		{
+			const ComponentSectionState section = BeginComponentSection<AnimatorComponent>(
+				context,
+				selectedEntity,
+				SceneComponentKind::Animator,
+				"Animator");
+			if (section.Open && !section.Removed)
+			{
+				ImGui::BeginDisabled(!section.Enabled);
+				const Asset::StaticMeshAsset* mesh = context.ActiveScene.GetMeshAsset(selectedEntity);
+				if (!mesh || !mesh->IsAnimated || mesh->Animations.empty())
 				{
+					ImGui::TextUnformatted("Animator requires an animated mesh.");
+				}
+				else
+				{
+					bool animatorChanged = false;
 					const uint32_t lastClipIndex = static_cast<uint32_t>(mesh->Animations.size() - 1);
 					animator->CurrentClipIndex = (std::min)(animator->CurrentClipIndex, lastClipIndex);
 					const Asset::AnimationClip& currentClip = mesh->Animations[animator->CurrentClipIndex];
@@ -875,6 +1477,7 @@ namespace Editor
 							{
 								animator->CurrentClipIndex = clipIndex;
 								animator->TimeSeconds = 0.0f;
+								animatorChanged = true;
 							}
 							if (selectedClip)
 							{
@@ -884,10 +1487,10 @@ namespace Editor
 						ImGui::EndCombo();
 					}
 
-					ImGui::Checkbox("Playing", &animator->Playing);
+					animatorChanged |= ImGui::Checkbox("Playing", &animator->Playing);
 					ImGui::SameLine();
-					ImGui::Checkbox("Loop", &animator->Loop);
-					ImGui::DragFloat("Speed", &animator->Speed, 0.01f, 0.0f, 10.0f, "%.2f");
+					animatorChanged |= ImGui::Checkbox("Loop", &animator->Loop);
+					animatorChanged |= ImGui::DragFloat("Speed", &animator->Speed, 0.01f, 0.0f, 10.0f, "%.2f");
 
 					const double ticksPerSecond = currentClip.TicksPerSecond > 0.0 ? currentClip.TicksPerSecond : 25.0;
 					const float durationSeconds = currentClip.DurationTicks > 0.0
@@ -896,7 +1499,7 @@ namespace Editor
 					if (durationSeconds > 0.0f)
 					{
 						animator->TimeSeconds = (std::clamp)(animator->TimeSeconds, 0.0f, durationSeconds);
-						ImGui::SliderFloat("Time", &animator->TimeSeconds, 0.0f, durationSeconds, "%.3f sec");
+						animatorChanged |= ImGui::SliderFloat("Time", &animator->TimeSeconds, 0.0f, durationSeconds, "%.3f sec");
 					}
 					else
 					{
@@ -906,9 +1509,18 @@ namespace Editor
 					ImGui::Text("Duration: %.3f sec / %.1f ticks", durationSeconds, currentClip.DurationTicks);
 					ImGui::Text("Ticks/sec: %.2f", ticksPerSecond);
 					ImGui::Text("Channels: %d", static_cast<int>(currentClip.Channels.size()));
+					if (animatorChanged && context.OnSceneEdited)
+					{
+						context.OnSceneEdited();
+					}
 				}
+				ImGui::EndDisabled();
+				ImGui::TreePop();
 			}
+		}
 
+		if (const Asset::StaticMeshAsset* mesh = context.ActiveScene.GetMeshAsset(selectedEntity))
+		{
 			if (ImGui::CollapsingHeader("Materials"))
 			{
 				for (size_t materialIndex = 0; materialIndex < mesh->Materials.size(); ++materialIndex)

@@ -49,6 +49,12 @@ namespace Editor
 		External
 	};
 
+	enum class EntityDropPlacement : uint8_t
+	{
+		Before,
+		After
+	};
+
 	struct EditorContext
 	{
 		GraphicsAPI CurrentApi;
@@ -63,12 +69,24 @@ namespace Editor
 		int ViewportHeight = 0;
 		std::string ProjectName = "Development";
 		std::filesystem::path ProjectRootPath;
+		std::filesystem::path CurrentScenePath;
 		std::shared_ptr<const Asset::AssetFileSnapshot> ProjectSnapshot;
 		const std::vector<std::string>* AssetLogLines = nullptr;
 		bool ProjectRefreshInProgress = false;
+		bool IsSceneDirty = false;
+		bool CanEditProjectScene = false;
+		bool PhysicsSimulationEnabled = false;
 		std::function<void(GraphicsAPI)> OnGraphicsApiChanged;
 		std::function<void(RenderMode)> OnRenderModeChanged;
+		std::function<void()> OnSaveScene;
+		std::function<void()> OnSaveSceneAs;
+		std::function<void()> OnOpenSceneDialog;
+		std::function<void(const std::filesystem::path&)> OnOpenScene;
+		std::function<void()> OnRevealProject;
+		std::function<void()> OnExit;
 		std::function<void()> OnFrameSelected;
+		std::function<void()> OnAlignGameCameraToScene;
+		std::function<void()> OnAlignSceneCameraToGame;
 		std::function<void(float, float, float, float)> OnScenePick;
 		std::function<void(const std::filesystem::path&)> OnAssetOpen;
 		std::function<void(const std::filesystem::path&)> OnAssetReveal;
@@ -77,6 +95,14 @@ namespace Editor
 		std::function<void(EntityId, std::string_view)> OnRenameEntity;
 		std::function<void(EntityId)> OnDuplicateEntity;
 		std::function<void(EntityId)> OnDeleteEntity;
+		std::function<void(Asset::PrimitiveMeshKind)> OnCreatePrimitive;
+		std::function<void(EntityId, EntityId, EntityDropPlacement)> OnMoveEntity;
+		std::function<void(EntityId, SceneComponentKind)> OnComponentAdded;
+		std::function<void(EntityId, SceneComponentKind)> OnComponentRemoved;
+		std::function<void(EntityId, SceneComponentKind, bool)> OnComponentEnabledChanged;
+		std::function<void()> OnSceneEdited;
+		std::function<void(bool)> OnPhysicsSimulationChanged;
+		std::function<void(EntityId)> OnPhysicsActorDirty;
 	};
 
 	class EditorLayer
@@ -98,6 +124,7 @@ namespace Editor
 		void DrawConsole(const EditorContext& context);
 		void DrawSceneGizmos(EditorContext& context, ImDrawList* drawList, const ImVec2& canvasPosition, const ImVec2& canvasSize) const;
 		void DrawGameCameraFrustumGizmo(EditorContext& context, ImDrawList* drawList, const ImVec2& canvasPosition, const ImVec2& canvasSize) const;
+		void DrawColliderGizmos(EditorContext& context, ImDrawList* drawList, const ImVec2& canvasPosition, const ImVec2& canvasSize) const;
 		[[nodiscard]] bool ProjectWorldToSceneCanvas(
 			const Camera& sceneCamera,
 			const DirectX::XMFLOAT3& worldPosition,

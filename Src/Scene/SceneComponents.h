@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Assets/StaticMesh.h"
+#include "Physics/PhysicsComponents.h"
 #include "Scene/TransformComponent.h"
 
 #include <DirectXMath.h>
@@ -68,4 +69,19 @@ struct LightComponent
 	float Range = 200.0f;
 	float SpotAngle = DirectX::XM_PIDIV4;
 	bool Enabled = true;
+};
+
+using RigidBodyComponent = Physics::RigidBodyComponent;
+using ColliderComponent = Physics::ColliderComponent;
+using PhysicsMaterialComponent = Physics::PhysicsMaterialComponent;
+
+enum class SceneComponentKind : uint8_t
+{
+	Mesh,
+	Animator,
+	Camera,
+	Light,
+	RigidBody,
+	Collider,
+	PhysicsMaterial
 };

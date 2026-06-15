@@ -219,8 +219,10 @@ namespace Asset
 		AssetImportResult result;
 		result.SourcePath = NormalizePath(request.SourcePath);
 		result.Generation = request.Generation;
+		result.SceneGeneration = request.SceneGeneration;
 		result.IsReload = request.IsReload;
 		result.Placement = request.Placement;
+		result.Restore = request.Restore;
 
 		if (!IsModelAssetPath(result.SourcePath))
 		{

@@ -107,12 +107,17 @@
       <PreprocessorDefinitions>_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
-      <AdditionalIncludeDirectories>$(SolutionDir)\Src;$(SolutionDir)\Src\App\Win32;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)\Src;$(SolutionDir)\Src\App\Win32;$(SolutionDir)\External\PhysX\physx\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalLibraryDirectories>$(SolutionDir)\External\PhysX\physx\bin\bin\win.x86_64.vc143.md\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>PhysX_64.lib;PhysXCommon_64.lib;PhysXFoundation_64.lib;PhysXExtensions_static_64.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PostBuildEvent>
+      <Command>xcopy /Y /D "$(SolutionDir)External\PhysX\physx\bin\bin\win.x86_64.vc143.md\$(Configuration)\PhysX*.dll" "$(OutDir)"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -123,18 +128,24 @@
       <PreprocessorDefinitions>NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
-      <AdditionalIncludeDirectories>$(SolutionDir)\Src;$(SolutionDir)\Src\App\Win32;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)\Src;$(SolutionDir)\Src\App\Win32;$(SolutionDir)\External\PhysX\physx\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalLibraryDirectories>$(SolutionDir)\External\PhysX\physx\bin\bin\win.x86_64.vc143.md\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>PhysX_64.lib;PhysXCommon_64.lib;PhysXFoundation_64.lib;PhysXExtensions_static_64.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PostBuildEvent>
+      <Command>xcopy /Y /D "$(SolutionDir)External\PhysX\physx\bin\bin\win.x86_64.vc143.md\$(Configuration)\PhysX*.dll" "$(OutDir)"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="Src\Assets\AssetFileSystem.h" />
     <ClInclude Include="Src\Assets\AssetHotReloadService.h" />
     <ClInclude Include="Src\Assets\AssetImportService.h" />
     <ClInclude Include="Src\Assets\AssimpModelLoader.h" />
+    <ClInclude Include="Src\Assets\PrimitiveMeshFactory.h" />
     <ClInclude Include="Src\Assets\RuntimeAssetRegistry.h" />
     <ClInclude Include="Src\Assets\StaticMesh.h" />
     <ClInclude Include="Src\Animation\AnimationSystem.h" />
@@ -151,6 +162,7 @@
     <ClInclude Include="Src\Scene\SceneComponentStore.h" />
     <ClInclude Include="Src\Scene\Scene.h" />
     <ClInclude Include="Src\Scene\SceneLoader.h" />
+    <ClInclude Include="Src\Scene\ScenePersistenceService.h" />
     <ClInclude Include="Src\Scene\SceneRenderState.h" />
     <ClInclude Include="Src\Scene\SceneTypes.h" />
     <ClInclude Include="Src\Scene\TransformComponent.h" />
@@ -158,6 +170,9 @@
     <ClInclude Include="Src\Math\Camera.h" />
     <ClInclude Include="Src\Math\MathHelpers.h" />
     <ClInclude Include="Src\Math\Transform.h" />
+    <ClInclude Include="Src\Physics\PhysicsComponents.h" />
+    <ClInclude Include="Src\Physics\PhysicsWorld.h" />
+    <ClInclude Include="Src\Physics\PhysXBackend.h" />
     <ClInclude Include="Src\Projects\ProjectService.h" />
     <ClInclude Include="Src\Rendering\Backends\DirectX12\DX12Buffer.h" />
     <ClInclude Include="Src\Rendering\Backends\DirectX12\DX12CommandList.h" />
@@ -198,11 +213,15 @@
     <ClCompile Include="Src\Assets\AssetHotReloadService.cpp" />
     <ClCompile Include="Src\Assets\AssetImportService.cpp" />
     <ClCompile Include="Src\Assets\AssimpModelLoader.cpp" />
+    <ClCompile Include="Src\Assets\PrimitiveMeshFactory.cpp" />
     <ClCompile Include="Src\Assets\RuntimeAssetRegistry.cpp" />
     <ClCompile Include="Src\Core\Engine\Engine.cpp" />
     <ClCompile Include="Src\Input\InputSystem.cpp" />
     <ClCompile Include="Src\Math\Camera.cpp" />
+    <ClCompile Include="Src\Physics\PhysicsWorld.cpp" />
+    <ClCompile Include="Src\Physics\PhysXBackend.cpp" />
     <ClCompile Include="Src\Projects\ProjectService.cpp" />
+    <ClCompile Include="Src\Scene\ScenePersistenceService.cpp" />
     <ClCompile Include="Src\Rendering\Backends\DirectX12\DX12Buffer.cpp" />
     <ClCompile Include="Src\Rendering\Backends\DirectX12\DX12CommandList.cpp" />
     <ClCompile Include="Src\App\Win32\GameApp.cpp" />

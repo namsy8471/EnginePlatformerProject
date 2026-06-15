@@ -55,6 +55,11 @@ namespace Asset
 		return removedSourcePaths;
 	}
 
+	void RuntimeAssetRegistry::Clear()
+	{
+		m_Records.clear();
+	}
+
 	void RuntimeAssetRegistry::UpdateStatus(const std::filesystem::path& sourcePath, std::string status)
 	{
 		const std::filesystem::path normalizedPath = NormalizePath(sourcePath);

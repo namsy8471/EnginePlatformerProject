@@ -7,8 +7,10 @@
 #include "Assets/RuntimeAssetRegistry.h"
 #include "Editor/EditorLayer.h"
 #include "Core/Engine/EngineStartupOptions.h"
+#include "Physics/PhysicsWorld.h"
 #include "Projects/ProjectService.h"
 #include "Scene/Scene.h"
+#include "Scene/ScenePersistenceService.h"
 #include "Rendering/RHI/IGraphicsDevice.h"
 #include "Rendering/RHI/ICommandList.h"
 #include "Rendering/RHI/IBuffer.h"
@@ -27,6 +29,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 #include <wrl.h>
@@ -111,17 +114,41 @@ private:
 	void UploadBenchmarkGeometry(std::span<const Asset::StaticMeshVertex> vertices, std::span<const uint32_t> indices);
 	[[nodiscard]] uint64_t UpdateBenchmarkCameraBuffer(const Camera& camera, uint32_t instanceCount, float localScale);
 	void QueueModelImport(const std::filesystem::path& sourcePath, const Camera& placementCamera, bool isReload);
+	void QueueModelImportForSceneEntity(const ScenePersistence::LoadedSceneEntity& loadedEntity, EntityId targetEntity);
 	void QueueModelImportFromDrop(const std::filesystem::path& sourcePath, Editor::AssetDropTarget target);
 	void QueueModelReload(const std::filesystem::path& sourcePath, const std::filesystem::path& changedPath);
 	void DrainCompletedAssetJobs();
 	void ApplyImportedModel(Asset::AssetImportResult result);
 	void ApplyReloadedAsset(Asset::AssetImportResult result);
 	void HandleDroppedFiles(HDROP dropHandle);
-	void OpenAssetPath(const std::filesystem::path& path) const;
+	void OpenAssetPath(const std::filesystem::path& path);
 	void RevealAssetPath(const std::filesystem::path& path) const;
 	void AppendAssetLog(std::string message);
 	[[nodiscard]] Math::Transform BuildDroppedModelTransform(const Asset::AssetImportResult& result) const;
 	[[nodiscard]] static std::vector<std::filesystem::path> CollectWatchedTexturePaths(const std::vector<CpuMaterialTexture>& materialTextures);
+	[[nodiscard]] bool SaveCurrentScene();
+	[[nodiscard]] bool SaveCurrentSceneAs();
+	[[nodiscard]] bool OpenSceneFromDialog();
+	[[nodiscard]] bool OpenSceneFromPath(const std::filesystem::path& scenePath, bool promptForDirtyScene);
+	[[nodiscard]] bool ConfirmSaveDirtyScene();
+	[[nodiscard]] std::optional<std::filesystem::path> ShowOpenSceneDialog() const;
+	[[nodiscard]] std::optional<std::filesystem::path> ShowSaveSceneDialog() const;
+	[[nodiscard]] std::filesystem::path GetDefaultScenePath() const;
+	void ClearProjectSceneRuntimeState();
+	void MarkSceneDirty();
+	void SetSceneDirty(bool dirty);
+	void MoveEntityInHierarchy(EntityId movedEntity, EntityId targetEntity, Editor::EntityDropPlacement placement);
+	void AlignGameCameraToSceneCamera();
+	void AlignSceneCameraToGameCamera();
+	void SetPhysicsSimulationEnabled(bool enabled);
+	void RebuildPhysicsWorldFromScene();
+	void MarkPhysicsActorDirty(EntityId entityId);
+	void CreateDefaultColliderForPrimitive(EntityId entityId, Asset::PrimitiveMeshKind kind);
+	[[nodiscard]] EntityId CreatePrimitiveEntity(Asset::PrimitiveMeshKind kind);
+	[[nodiscard]] bool ApplyPrimitiveMeshToEntity(EntityId entityId, Asset::PrimitiveMeshKind kind, const Math::Transform& localTransform, bool createDefaultCollider = true);
+	void AddComponentToEntity(EntityId entityId, SceneComponentKind kind);
+	void RemoveComponentFromEntity(EntityId entityId, SceneComponentKind kind);
+	void SetComponentEnabledForEntity(EntityId entityId, SceneComponentKind kind, bool enabled);
 	void RenameEntityFromHierarchy(EntityId entityId, std::string_view name);
 	void DuplicateEntityFromHierarchy(EntityId entityId);
 	void DeleteEntityFromHierarchy(EntityId entityId);
@@ -171,14 +198,20 @@ private:
 	Samples::Benchmark::BenchmarkRunner m_BenchmarkRunner;
 	EngineStartupOptions m_StartupOptions;
 	std::optional<Projects::ProjectDescriptor> m_Project;
+	std::filesystem::path m_CurrentScenePath;
+	uint64_t m_AssetSceneGeneration = 1;
 	Editor::EditorLayer m_EditorLayer;
 	Asset::AssetFileSystem m_AssetFileSystem;
 	Asset::AssetImportService m_AssetImportService;
 	Asset::AssetHotReloadService m_AssetHotReloadService;
 	Asset::RuntimeAssetRegistry m_RuntimeAssetRegistry;
+	Physics::PhysicsWorld m_PhysicsWorld;
+	std::unordered_map<EntityId, Math::Transform> m_PhysicsSimulationSnapshot;
 	std::vector<std::string> m_AssetLogLines;
 	float m_LastDeltaTime = 1.0f / 60.0f;
 	bool m_SceneCameraControlActive = false;
+	bool m_SceneDirty = false;
+	bool m_PhysicsSimulationEnabled = false;
 
 	// 현재 렌더 모드 상태
 	RenderMode m_RenderMode = RenderMode::Forward;

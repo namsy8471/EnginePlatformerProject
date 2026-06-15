@@ -6,6 +6,7 @@
 #include <typeindex>
 #include <typeinfo>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 class SceneComponentStore
@@ -20,6 +21,7 @@ public:
 		auto& components = EnsurePool<Component>().Components;
 		auto [componentIt, inserted] = components.insert_or_assign(entityId, std::move(component));
 		(void)inserted;
+		EnsurePool<Component>().SetEnabled(entityId, true);
 		return componentIt->second;
 	}
 
@@ -28,7 +30,10 @@ public:
 	{
 		auto& components = EnsurePool<Component>().Components;
 		auto [componentIt, inserted] = components.try_emplace(entityId);
-		(void)inserted;
+		if (inserted)
+		{
+			EnsurePool<Component>().SetEnabled(entityId, true);
+		}
 		return componentIt->second;
 	}
 
@@ -71,6 +76,26 @@ public:
 		return pool ? pool->Remove(entityId) : false;
 	}
 
+	template <typename Component>
+	[[nodiscard]] bool IsComponentEnabled(EntityId entityId) const
+	{
+		const auto* pool = FindPool<Component>();
+		return pool ? pool->IsEnabled(entityId) : false;
+	}
+
+	template <typename Component>
+	bool SetComponentEnabled(EntityId entityId, bool enabled)
+	{
+		auto* pool = FindPool<Component>();
+		if (!pool || !pool->Components.contains(entityId))
+		{
+			return false;
+		}
+
+		pool->SetEnabled(entityId, enabled);
+		return true;
+	}
+
 	void RemoveEntity(EntityId entityId)
 	{
 		for (auto& [type, pool] : m_Pools)
@@ -78,6 +103,11 @@ public:
 			(void)type;
 			pool->Remove(entityId);
 		}
+	}
+
+	void Clear() noexcept
+	{
+		m_Pools.clear();
 	}
 
 	template <typename Component>
@@ -110,10 +140,28 @@ private:
 	struct ComponentPool final : IComponentPool
 	{
 		ComponentMap<Component> Components;
+		std::unordered_set<EntityId> DisabledEntities;
 
 		bool Remove(EntityId entityId) override
 		{
+			DisabledEntities.erase(entityId);
 			return Components.erase(entityId) > 0;
+		}
+
+		[[nodiscard]] bool IsEnabled(EntityId entityId) const
+		{
+			return Components.contains(entityId) && !DisabledEntities.contains(entityId);
+		}
+
+		void SetEnabled(EntityId entityId, bool enabled)
+		{
+			if (enabled)
+			{
+				DisabledEntities.erase(entityId);
+				return;
+			}
+
+			DisabledEntities.insert(entityId);
 		}
 	};
 

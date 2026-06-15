@@ -26,6 +26,7 @@ namespace Asset
 		[[nodiscard]] uint64_t NextGeneration(const std::filesystem::path& sourcePath);
 		void RegisterEntity(const std::filesystem::path& sourcePath, EntityId entityId, std::vector<std::filesystem::path> texturePaths, std::string status);
 		[[nodiscard]] std::vector<std::filesystem::path> UnregisterEntity(EntityId entityId);
+		void Clear();
 		void UpdateStatus(const std::filesystem::path& sourcePath, std::string status);
 		[[nodiscard]] uint64_t GetGeneration(const std::filesystem::path& sourcePath) const;
 		[[nodiscard]] std::vector<EntityId> GetEntities(const std::filesystem::path& sourcePath) const;

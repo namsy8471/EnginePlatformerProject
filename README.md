@@ -1,6 +1,6 @@
 # Engine Platformer Project
 
-Win32 기반의 실시간 렌더링 엔진 프로토타입입니다. DirectX 12와 Vulkan을 모두 지원하는 RHI(Render Hardware Interface)를 중심으로, Assimp 모델 로딩, ImGui 기반 Unity 스타일 에디터 셸, Scene/Game 뷰 분리, ECS 벤치마크 샘플을 실험하고 있습니다.
+Win32 기반의 실시간 렌더링 엔진 프로토타입입니다. DirectX 12와 Vulkan을 모두 지원하는 RHI(Render Hardware Interface)를 중심으로, Assimp 모델 로딩, ImGui 기반 Unity 스타일 에디터 셸, Scene/Game 뷰 분리, 프로젝트 런처, 실시간 asset import/hot reload, PhysX 기반 물리, ECS 벤치마크 샘플을 실험하고 있습니다.
 
 현재 목표는 “작게 동작하는 렌더링 엔진”에서 출발해, 에디터와 런타임 구조를 점진적으로 분리하고 확장 가능한 엔진 아키텍처로 발전시키는 것입니다.
 
@@ -14,12 +14,34 @@ Win32 기반의 실시간 렌더링 엔진 프로토타입입니다. DirectX 12�
 - **Unity 스타일 ImGui 에디터 셸**
   - DockSpace 기반 `Scene`, `Game`, `Hierarchy`, `Inspector`, `Project`, `Benchmark`, `Console` 패널
   - Scene 카메라와 Game 카메라 분리
-  - Hierarchy 선택, Inspector Transform 편집, Project asset browse 지원
+  - Hierarchy 선택, 우클릭 context menu, 단축키 rename/duplicate/delete 지원
+  - Inspector Transform 편집, Add Component, component on/off, component remove 지원
+  - Scene View에서 GameCamera frustum과 collider gizmo 표시
 
-- **Scene / Asset / Rendering 분리**
+- **Scene / Asset / Rendering / Physics 분리**
   - 엔티티, Transform, Bounds, Mesh, Camera, Light 컴포넌트 기반 Scene 구조
-  - Assimp 기반 Spider 샘플 모델 로딩
+  - Animator, Rigidbody, Collider, PhysicsMaterial 컴포넌트 지원
+  - Assimp 기반 FBX/OBJ/GLTF/GLB 모델 import
   - diffuse/base color 텍스처 resolve 및 GPU 업로드
+  - primitive 생성, white diffuse fallback, Phong illumination 지원
+
+- **프로젝트 런처와 Scene 저장**
+  - `EngineLauncher.exe`에서 새 프로젝트 생성, 기존 프로젝트 열기, 최근 프로젝트 실행 지원
+  - `EnginePlatformer.exe --project "<project.engineproject>"` 프로젝트 모드 지원
+  - `.scene` JSON 저장/불러오기, dirty state, save/open/reveal project 메뉴 지원
+  - 프로젝트 모드에서는 빈 Project Scene + 기본 Camera/Light로 시작
+
+- **실시간 Asset File System**
+  - Project 패널에서 project `Assets` 트리 캐시 표시
+  - 모델 파일 drag/drop import 및 Windows Explorer drop 지원
+  - import worker thread와 completion queue 기반 비동기 모델 로딩
+  - 현재 scene에 로드된 모델/텍스처 대상 hot reload 지원
+
+- **PhysX 기반 Physics v1**
+  - static/dynamic/kinematic Rigidbody, Box/Sphere/Capsule/Plane Collider 지원
+  - fixed timestep simulation, gravity, Transform 동기화
+  - Inspector 물리 컴포넌트 편집과 simulate on/off snapshot restore 지원
+  - primitive 생성 시 Unity식 Collider-only static 기본값 적용
 
 - **ECS 벤치마크**
   - Non-ECS AoS 방식과 ECS 방식 비교
@@ -41,13 +63,14 @@ Win32 기반의 실시간 렌더링 엔진 프로토타입입니다. DirectX 12�
 - **에디터와 런타임을 함께 검증**
   - 단순 샘플 렌더링이 아니라 Scene/Game/Inspector/Hierarchy를 통해 실제 엔진 편집 흐름을 실험합니다.
   - Scene 카메라와 Game 카메라를 분리해 에디터형 워크플로우의 기본 구조를 갖췄습니다.
+  - 프로젝트 단위 asset root, scene 저장, hierarchy 편집, component 편집을 한 흐름에서 검증할 수 있습니다.
 
 - **성능 실험 기반**
   - ECS Benchmark를 통해 데이터 구조와 시스템 업데이트 비용을 비교할 수 있습니다.
   - 대량 오브젝트 렌더링에서는 CPU materialized count와 GPU/procedural draw 의미를 분리해 관찰할 수 있습니다.
 
 - **확장 가능한 폴더 구조**
-  - `Core`, `Rendering`, `Scene`, `Assets`, `Editor`, `ECS`, `Samples` 등 도메인별로 코드가 나뉘어 있습니다.
+  - `Core`, `Rendering`, `Scene`, `Assets`, `Editor`, `Physics`, `Projects`, `ECS`, `Samples` 등 도메인별로 코드가 나뉘어 있습니다.
 
 ## 기술 스택
 
@@ -57,8 +80,10 @@ Win32 기반의 실시간 렌더링 엔진 프로토타입입니다. DirectX 12�
 - Vulkan
 - ImGui docking
 - Assimp
+- PhysX
 - glslang
 - stb
+- rapidjson
 - vcpkg
 
 ## 프로젝트 구조
@@ -69,8 +94,10 @@ Src/
   Core/Engine               엔진 생명주기, 렌더 루프, API 전환
   Rendering                 RHI, DX12/Vulkan backend, 렌더 리소스
   Scene                     엔티티, 컴포넌트, 피킹, 씬 상태
-  Assets                    Assimp 모델 로더와 StaticMesh 데이터
+  Assets                    Assimp 모델 로더, asset file system, import/hot reload
   Editor                    ImGui 기반 에디터 셸
+  Physics                   PhysX backend, PhysicsWorld, physics components
+  Projects                  프로젝트 descriptor와 생성/로드 서비스
   ECS                       ECS v1/v2 실험 구조
   Samples/Spider            Spider 샘플 씬
   Samples/Benchmark         ECS / Non-ECS 비교 벤치마크
@@ -107,13 +134,38 @@ vcpkg install --triplet x64-windows
 Visual Studio에서 `EningePlatformer.slnx`를 열어 빌드하거나, MSBuild로 빌드할 수 있습니다.
 
 ```powershell
-MSBuild DX12Eninge.vcxproj /t:Build /p:Configuration=Debug /p:Platform=x64
-MSBuild DX12Eninge.vcxproj /t:Build /p:Configuration=Release /p:Platform=x64
+MSBuild EningePlatformer.slnx /p:Configuration=Debug /p:Platform=x64
+MSBuild EningePlatformer.slnx /p:Configuration=Release /p:Platform=x64
 ```
 
-빌드 산출물은 `x64/Debug/EnginePlatformer.exe` 또는 `x64/Release/EnginePlatformer.exe`에 생성됩니다.
+빌드 산출물은 `x64/Debug/EnginePlatformer.exe`, `x64/Debug/EngineLauncher.exe` 또는 `x64/Release` 아래에 생성됩니다.
+
+### 실행
+
+엔진을 직접 실행하면 개발용 기본 모드로 열립니다.
+
+```powershell
+x64/Debug/EnginePlatformer.exe
+```
+
+런처를 실행하면 새 프로젝트 생성, 기존 프로젝트 열기, 최근 프로젝트 실행을 사용할 수 있습니다.
+
+```powershell
+x64/Debug/EngineLauncher.exe
+```
+
+프로젝트 파일을 직접 지정해 엔진을 열 수도 있습니다.
+
+```powershell
+x64/Debug/EnginePlatformer.exe --project "D:/Projects/MyGame/MyGame.engineproject"
+```
 
 ## 현재 샘플
+
+- **Project Scene**
+  - 프로젝트 모드의 기본 작업 씬입니다.
+  - Camera/Light/primitive/model entity를 만들고, Inspector에서 component를 추가/비활성/삭제할 수 있습니다.
+  - `.scene` 저장/로드, hierarchy reorder, asset drag/drop import, hot reload, physics simulation을 검증합니다.
 
 - **Spider Sample**
   - Assimp로 Spider 모델을 로드하고, 여러 복제 오브젝트와 투명 머티리얼을 렌더링합니다.
@@ -127,8 +179,9 @@ MSBuild DX12Eninge.vcxproj /t:Build /p:Configuration=Release /p:Platform=x64
 
 - **에디터 고도화**
   - Scene/Game을 실제 offscreen render texture로 분리
-  - transform gizmo, asset drag/drop, prefab/scene 저장 기능 추가
+  - transform gizmo, prefab, parent/child hierarchy 기능 추가
   - Inspector rotation을 quaternion 직접 편집에서 Euler/gizmo 기반으로 개선
+  - Undo/Redo command stack과 Play/Edit mode 분리
 
 - **렌더링 확장**
   - PBR material pipeline
@@ -140,6 +193,10 @@ MSBuild DX12Eninge.vcxproj /t:Build /p:Configuration=Release /p:Platform=x64
   - benchmark 전용 ECS를 실제 Scene runtime과 단계적으로 연결
   - archetype/chunk query 기반 시스템 확장
   - serialization, editor integration, job system 검토
+
+- **Asset / Animation 확장**
+  - Animator Controller, blend tree, animation event
+  - mesh collider, prefab asset, asset dependency graph
 
 - **엔진 안정화**
   - 렌더러/에디터/샘플 간 책임 분리 강화
