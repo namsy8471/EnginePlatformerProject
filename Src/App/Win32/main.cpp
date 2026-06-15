@@ -2,9 +2,47 @@
 
 #include "Core/Engine/Engine.h"
 
+#include <shellapi.h>
+
+#include <filesystem>
+#include <string_view>
+
 #if defined(DEBUG) || defined(_DEBUG)
 #include <crtdbg.h>
 #endif
+
+namespace
+{
+	[[nodiscard]] EngineStartupOptions ParseStartupOptions()
+	{
+		EngineStartupOptions options;
+		int argumentCount = 0;
+		LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argumentCount);
+		if (!arguments)
+		{
+			return options;
+		}
+
+		for (int argumentIndex = 1; argumentIndex < argumentCount; ++argumentIndex)
+		{
+			const std::wstring_view argument(arguments[argumentIndex]);
+			constexpr std::wstring_view projectPrefix = L"--project=";
+			if (argument == L"--project" && argumentIndex + 1 < argumentCount)
+			{
+				options.ProjectFilePath = std::filesystem::path(arguments[++argumentIndex]);
+				continue;
+			}
+
+			if (argument.starts_with(projectPrefix))
+			{
+				options.ProjectFilePath = std::filesystem::path(argument.substr(projectPrefix.size()));
+			}
+		}
+
+		LocalFree(arguments);
+		return options;
+	}
+}
 
 int APIENTRY wWinMain(
 	_In_ HINSTANCE hInstance,
@@ -21,7 +59,7 @@ int APIENTRY wWinMain(
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 #endif
 
-	Engine engine(hInstance);
+	Engine engine(hInstance, ParseStartupOptions());
 
 	if (!engine.Init())
 	{

@@ -10,8 +10,9 @@ namespace Samples::Benchmark
 {
 	enum class SampleMode
 	{
-		SpiderSample = 0,
-		EcsBenchmark = 1
+		ProjectScene = 0,
+		SpiderSample = 1,
+		EcsBenchmark = 2
 	};
 
 	enum class BenchmarkMode
@@ -78,6 +79,8 @@ namespace Samples::Benchmark
 	{
 		switch (mode)
 		{
+		case SampleMode::ProjectScene:
+			return "Project Scene";
 		case SampleMode::SpiderSample:
 			return "Spider Sample";
 		case SampleMode::EcsBenchmark:

@@ -20,6 +20,7 @@
 #include <imgui_impl_dx12.h>
 #include <imgui_impl_vulkan.h>
 #include <imgui_impl_win32.h>
+#include <shellapi.h>
 
 #if __has_include(<dstorage.h>)
 #include <dstorage.h>
@@ -36,10 +37,12 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <limits>
 #include <memory>
 #include <span>
 #include <string_view>
+#include <system_error>
 
 using Microsoft::WRL::ComPtr;
 
@@ -56,6 +59,12 @@ namespace
 		}
 
 		InputSystem::Get().ProcessMessage(msg, wParam, lParam);
+
+		if (msg == WM_DROPFILES)
+		{
+			SendMessageW(GetParent(hWnd), msg, wParam, lParam);
+			return 0;
+		}
 
 		if (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN)
 		{
@@ -454,7 +463,9 @@ namespace
 	}
 }
 
-Engine::Engine(HINSTANCE hInstance) : GameApp(hInstance)
+Engine::Engine(HINSTANCE hInstance, EngineStartupOptions startupOptions)
+	: GameApp(hInstance),
+	m_StartupOptions(std::move(startupOptions))
 {
 }
 
@@ -510,10 +521,426 @@ bool Engine::IsMaterialTransparent(EntityId entityId, size_t materialIndex) cons
 	return m_RenderState.IsMaterialTransparent(m_Scene, entityId, materialIndex);
 }
 
+void Engine::QueueModelImport(const std::filesystem::path& sourcePath, const Camera& placementCamera, bool isReload)
+{
+	Asset::AssetImportPlacement placement;
+	placement.CameraPosition = placementCamera.GetPosition();
+	placement.CameraForward = placementCamera.GetForward();
+	placement.HasPlacement = !isReload;
+
+	const uint64_t generation = m_RuntimeAssetRegistry.NextGeneration(sourcePath);
+	Asset::AssetImportRequest request;
+	request.SourcePath = sourcePath;
+	request.Generation = generation;
+	request.IsReload = isReload;
+	request.Placement = placement;
+	m_AssetImportService.Queue(std::move(request));
+
+	AppendAssetLog(std::format("{} queued: {}", isReload ? "Reload" : "Import", sourcePath.string()));
+}
+
+void Engine::QueueModelImportFromDrop(const std::filesystem::path& sourcePath, Editor::AssetDropTarget target)
+{
+	if (!Asset::IsModelAssetPath(sourcePath))
+	{
+		AppendAssetLog(std::format("Unsupported drop ignored: {}", sourcePath.string()));
+		return;
+	}
+
+	const Camera& placementCamera = target == Editor::AssetDropTarget::Scene ? m_SceneCamera : m_Camera;
+	QueueModelImport(sourcePath, placementCamera, false);
+}
+
+void Engine::QueueModelReload(const std::filesystem::path& sourcePath, const std::filesystem::path& changedPath)
+{
+	if (m_RuntimeAssetRegistry.GetEntities(sourcePath).empty())
+	{
+		return;
+	}
+
+	Asset::AssetImportPlacement placement;
+	placement.HasPlacement = false;
+
+	const uint64_t generation = m_RuntimeAssetRegistry.NextGeneration(sourcePath);
+	Asset::AssetImportRequest request;
+	request.SourcePath = sourcePath;
+	request.Generation = generation;
+	request.IsReload = true;
+	request.Placement = placement;
+	m_AssetImportService.Queue(std::move(request));
+	AppendAssetLog(std::format("Hot reload queued: {} changed {}", sourcePath.string(), changedPath.filename().string()));
+}
+
+void Engine::DrainCompletedAssetJobs()
+{
+	Asset::AssetImportResult result;
+	while (m_AssetImportService.TryPopCompleted(result))
+	{
+		if (result.IsReload && result.Generation != m_RuntimeAssetRegistry.GetGeneration(result.SourcePath))
+		{
+			AppendAssetLog(std::format("Stale reload discarded: {}", result.SourcePath.string()));
+			continue;
+		}
+
+		if (!result.Success)
+		{
+			m_RuntimeAssetRegistry.UpdateStatus(result.SourcePath, result.ErrorMessage);
+			AppendAssetLog(std::format("Asset job failed: {}", result.ErrorMessage));
+			for (const std::string& diagnostic : result.Diagnostics)
+			{
+				AppendAssetLog(std::format("  {}", diagnostic));
+			}
+			continue;
+		}
+
+		if (result.IsReload)
+		{
+			ApplyReloadedAsset(std::move(result));
+		}
+		else
+		{
+			ApplyImportedModel(std::move(result));
+		}
+	}
+}
+
+void Engine::ApplyImportedModel(Asset::AssetImportResult result)
+{
+	if (!result.Mesh)
+	{
+		return;
+	}
+
+	BoundsComponent bounds;
+	bounds.LocalMin = result.LocalMin;
+	bounds.LocalMax = result.LocalMax;
+
+	const std::string entityName = result.SourcePath.stem().string().empty()
+		? "Imported Model"
+		: result.SourcePath.stem().string();
+	const EntityId entityId = m_Scene.CreateModelEntity(
+		entityName,
+		BuildDroppedModelTransform(result),
+		std::move(result.Mesh),
+		std::move(result.MaterialTextures),
+		bounds);
+
+	m_RenderState.RenderEntities.push_back(entityId);
+	m_RenderState.EntityMaterialTransparency[entityId] = result.MaterialTransparency;
+	m_Scene.SetSelectedEntity(entityId);
+
+	const Asset::StaticMeshAsset* importedMesh = m_Scene.GetMeshAsset(entityId);
+	if (importedMesh && !EnsureGeometryBufferCapacity(importedMesh->Vertices.size(), importedMesh->Indices.size()))
+	{
+		AppendAssetLog(std::format("Geometry buffer resize failed for entity {}", entityId));
+	}
+
+	if (!CreateTextureResourcesForEntity(entityId))
+	{
+		AppendAssetLog(std::format("GPU texture upload failed for entity {}", entityId));
+	}
+
+	std::vector<std::filesystem::path> watchedTexturePaths = CollectWatchedTexturePaths(*m_Scene.GetMaterialTextures(entityId));
+	m_RuntimeAssetRegistry.RegisterEntity(result.SourcePath, entityId, watchedTexturePaths, "Loaded");
+	m_AssetHotReloadService.WatchLoadedAsset(result.SourcePath, watchedTexturePaths);
+	AppendAssetLog(std::format("Imported model entity {}: {}", entityId, result.SourcePath.string()));
+}
+
+void Engine::ApplyReloadedAsset(Asset::AssetImportResult result)
+{
+	if (!result.Mesh)
+	{
+		return;
+	}
+
+	const std::vector<EntityId> entities = m_RuntimeAssetRegistry.GetEntities(result.SourcePath);
+	if (entities.empty())
+	{
+		return;
+	}
+
+	BoundsComponent bounds;
+	bounds.LocalMin = result.LocalMin;
+	bounds.LocalMax = result.LocalMax;
+
+	for (EntityId entityId : entities)
+	{
+		auto meshCopy = std::make_unique<Asset::StaticMeshAsset>(*result.Mesh);
+		m_Scene.ReplaceEntityModel(entityId, std::move(meshCopy), result.MaterialTextures, bounds);
+		m_RenderState.EntityMaterialTransparency[entityId] = result.MaterialTransparency;
+		const Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId);
+		if (meshAsset && !EnsureGeometryBufferCapacity(meshAsset->Vertices.size(), meshAsset->Indices.size()))
+		{
+			AppendAssetLog(std::format("Geometry buffer resize failed for entity {}", entityId));
+		}
+		if (!RecreateTextureResourcesForEntity(entityId))
+		{
+			AppendAssetLog(std::format("GPU texture reload failed for entity {}", entityId));
+		}
+	}
+
+	std::vector<std::filesystem::path> watchedTexturePaths = CollectWatchedTexturePaths(result.MaterialTextures);
+	for (EntityId entityId : entities)
+	{
+		m_RuntimeAssetRegistry.RegisterEntity(result.SourcePath, entityId, watchedTexturePaths, "Reloaded");
+	}
+	m_AssetHotReloadService.WatchLoadedAsset(result.SourcePath, watchedTexturePaths);
+	AppendAssetLog(std::format("Hot reloaded {} entity instance(s): {}", entities.size(), result.SourcePath.string()));
+}
+
+void Engine::HandleDroppedFiles(HDROP dropHandle)
+{
+	const UINT fileCount = DragQueryFileW(dropHandle, 0xFFFFFFFF, nullptr, 0);
+	for (UINT fileIndex = 0; fileIndex < fileCount; ++fileIndex)
+	{
+		const UINT characterCount = DragQueryFileW(dropHandle, fileIndex, nullptr, 0);
+		std::wstring pathText(characterCount + 1, L'\0');
+		DragQueryFileW(dropHandle, fileIndex, pathText.data(), characterCount + 1);
+		pathText.resize(characterCount);
+		QueueModelImportFromDrop(std::filesystem::path(pathText), Editor::AssetDropTarget::External);
+	}
+	DragFinish(dropHandle);
+}
+
+void Engine::OpenAssetPath(const std::filesystem::path& path) const
+{
+	ShellExecuteW(m_hMainWnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+void Engine::RevealAssetPath(const std::filesystem::path& path) const
+{
+	std::error_code errorCode;
+	if (std::filesystem::is_directory(path, errorCode))
+	{
+		ShellExecuteW(m_hMainWnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+		return;
+	}
+
+	std::wstring parameters = L"/select,\"";
+	parameters.append(path.wstring());
+	parameters.push_back(L'"');
+	ShellExecuteW(m_hMainWnd, L"open", L"explorer.exe", parameters.c_str(), nullptr, SW_SHOWNORMAL);
+}
+
+void Engine::AppendAssetLog(std::string message)
+{
+	LogEngineTrace(message);
+	m_AssetLogLines.push_back(std::move(message));
+	if (m_AssetLogLines.size() > 200)
+	{
+		m_AssetLogLines.erase(m_AssetLogLines.begin(), m_AssetLogLines.begin() + static_cast<std::ptrdiff_t>(m_AssetLogLines.size() - 200));
+	}
+}
+
+Math::Transform Engine::BuildDroppedModelTransform(const Asset::AssetImportResult& result) const
+{
+	const DirectX::XMFLOAT3 center = {
+		(result.LocalMin.x + result.LocalMax.x) * 0.5f,
+		(result.LocalMin.y + result.LocalMax.y) * 0.5f,
+		(result.LocalMin.z + result.LocalMax.z) * 0.5f
+	};
+	const float extentX = result.LocalMax.x - result.LocalMin.x;
+	const float extentY = result.LocalMax.y - result.LocalMin.y;
+	const float extentZ = result.LocalMax.z - result.LocalMin.z;
+	const float maxExtent = (std::max)(1.0f, (std::max)(extentX, (std::max)(extentY, extentZ)));
+	const float distance = (std::max)(maxExtent * 2.25f, 6.0f);
+
+	DirectX::XMVECTOR cameraPosition = DirectX::XMLoadFloat3(&result.Placement.CameraPosition);
+	DirectX::XMVECTOR cameraForward = DirectX::XMVector3Normalize(DirectX::XMLoadFloat3(&result.Placement.CameraForward));
+	const DirectX::XMVECTOR target = DirectX::XMVectorAdd(cameraPosition, DirectX::XMVectorScale(cameraForward, distance));
+	const DirectX::XMVECTOR localCenter = DirectX::XMLoadFloat3(&center);
+	DirectX::XMFLOAT3 translation = {};
+	DirectX::XMStoreFloat3(&translation, DirectX::XMVectorSubtract(target, localCenter));
+
+	return Math::Transform(translation, Math::IdentityQuaternion(), Math::OneVector3());
+}
+
+std::vector<std::filesystem::path> Engine::CollectWatchedTexturePaths(const std::vector<CpuMaterialTexture>& materialTextures)
+{
+	std::vector<std::filesystem::path> paths;
+	for (const auto& materialTexture : materialTextures)
+	{
+		if (!materialTexture.Path.empty() && std::ranges::find(paths, materialTexture.Path) == paths.end())
+		{
+			paths.push_back(materialTexture.Path);
+		}
+	}
+	return paths;
+}
+
+void Engine::RenameEntityFromHierarchy(EntityId entityId, std::string_view name)
+{
+	if (name.empty())
+	{
+		return;
+	}
+
+	if (m_Scene.RenameEntity(entityId, name))
+	{
+		AppendAssetLog(std::format("Renamed entity {} to {}", entityId, name));
+	}
+}
+
+void Engine::DuplicateEntityFromHierarchy(EntityId entityId)
+{
+	if (!m_Scene.ContainsEntity(entityId))
+	{
+		return;
+	}
+
+	const EntityId duplicateEntityId = m_Scene.DuplicateEntity(entityId, MakeDuplicateEntityName(entityId), { 0.75f, 0.0f, 0.75f });
+	if (duplicateEntityId == InvalidEntityId)
+	{
+		return;
+	}
+
+	if (entityId == m_GameCameraEntity)
+	{
+		if (CameraComponent* camera = m_Scene.GetCameraComponent(duplicateEntityId))
+		{
+			camera->IsGameCamera = false;
+		}
+	}
+
+	if (std::ranges::find(m_RenderState.RenderEntities, entityId) != m_RenderState.RenderEntities.end())
+	{
+		m_RenderState.RenderEntities.push_back(duplicateEntityId);
+	}
+	if (m_RenderState.TransparentEntities.find(entityId) != m_RenderState.TransparentEntities.end())
+	{
+		m_RenderState.TransparentEntities.insert(duplicateEntityId);
+	}
+	if (const auto transparencyIt = m_RenderState.EntityMaterialTransparency.find(entityId);
+		transparencyIt != m_RenderState.EntityMaterialTransparency.end())
+	{
+		m_RenderState.EntityMaterialTransparency[duplicateEntityId] = transparencyIt->second;
+	}
+	else if (entityId == m_Scene.GetPrimaryRenderableEntity())
+	{
+		m_RenderState.EntityMaterialTransparency[duplicateEntityId] = m_RenderState.PrimaryMaterialTransparency;
+	}
+
+	if (const Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(duplicateEntityId))
+	{
+		if (!EnsureGeometryBufferCapacity(meshAsset->Vertices.size(), meshAsset->Indices.size()))
+		{
+			AppendAssetLog(std::format("Geometry buffer resize failed for duplicated entity {}", duplicateEntityId));
+		}
+		if (!CreateTextureResourcesForEntity(duplicateEntityId))
+		{
+			AppendAssetLog(std::format("GPU texture upload failed for duplicated entity {}", duplicateEntityId));
+		}
+	}
+
+	if (const auto sourcePath = m_RuntimeAssetRegistry.FindSourcePathForEntity(entityId))
+	{
+		const auto* materialTextures = m_Scene.GetMaterialTextures(duplicateEntityId);
+		std::vector<std::filesystem::path> watchedTexturePaths = materialTextures
+			? CollectWatchedTexturePaths(*materialTextures)
+			: std::vector<std::filesystem::path>{};
+		m_RuntimeAssetRegistry.RegisterEntity(*sourcePath, duplicateEntityId, watchedTexturePaths, "Duplicated");
+		m_AssetHotReloadService.WatchLoadedAsset(*sourcePath, watchedTexturePaths);
+	}
+
+	m_Scene.SetSelectedEntity(duplicateEntityId);
+	AppendAssetLog(std::format("Duplicated entity {} -> {}", entityId, duplicateEntityId));
+}
+
+void Engine::DeleteEntityFromHierarchy(EntityId entityId)
+{
+	if (!m_Scene.ContainsEntity(entityId))
+	{
+		return;
+	}
+
+	const bool wasPrimaryRenderable = m_Scene.GetPrimaryRenderableEntity() == entityId;
+	const bool wasGameCamera = m_GameCameraEntity == entityId;
+	const bool wasSpider = m_SpiderEntity == entityId;
+	const bool wasKeyLight = m_KeyLightEntity == entityId;
+
+	DestroyTextureResourcesForEntity(entityId);
+	for (const auto& removedSourcePath : m_RuntimeAssetRegistry.UnregisterEntity(entityId))
+	{
+		m_AssetHotReloadService.UnwatchLoadedAsset(removedSourcePath);
+	}
+	RemoveEntityFromRenderState(entityId);
+
+	if (!m_Scene.DeleteEntity(entityId))
+	{
+		return;
+	}
+
+	if (wasPrimaryRenderable)
+	{
+		const EntityId fallbackPrimary = m_RenderState.RenderEntities.empty()
+			? InvalidEntityId
+			: m_RenderState.RenderEntities.front();
+		m_Scene.SetPrimaryRenderableEntity(fallbackPrimary);
+	}
+	if (wasGameCamera)
+	{
+		m_GameCameraEntity = InvalidEntityId;
+	}
+	if (wasSpider)
+	{
+		m_SpiderEntity = InvalidEntityId;
+	}
+	if (wasKeyLight)
+	{
+		m_KeyLightEntity = InvalidEntityId;
+	}
+
+	AppendAssetLog(std::format("Deleted entity {}", entityId));
+}
+
+std::string Engine::MakeDuplicateEntityName(EntityId entityId) const
+{
+	const std::string* sourceName = m_Scene.GetEntityName(entityId);
+	const std::string baseName = sourceName && !sourceName->empty() ? *sourceName : "Entity";
+
+	auto nameExists = [this](const std::string& candidate)
+	{
+		return std::ranges::any_of(m_Scene.GetEntities(), [this, &candidate](const SceneEntity& entity)
+			{
+				const std::string* entityName = m_Scene.GetEntityName(entity.Id);
+				return entityName && *entityName == candidate;
+			});
+	};
+
+	std::string candidate = baseName + "_Copy";
+	if (!nameExists(candidate))
+	{
+		return candidate;
+	}
+
+	for (uint32_t copyIndex = 2; copyIndex < 10000; ++copyIndex)
+	{
+		candidate = std::format("{}_Copy{}", baseName, copyIndex);
+		if (!nameExists(candidate))
+		{
+			return candidate;
+		}
+	}
+
+	return std::format("{}_Copy{}", baseName, m_Scene.GetEntities().size());
+}
+
+void Engine::RemoveEntityFromRenderState(EntityId entityId)
+{
+	std::erase(m_RenderState.RenderEntities, entityId);
+	m_RenderState.TransparentEntities.erase(entityId);
+	m_RenderState.EntityMaterialTransparency.erase(entityId);
+}
+
 void Engine::UploadEntityGeometry(EntityId entityId)
 {
 	const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
 	if (!meshAsset || !m_StaticMeshRenderer.VertexBuffer || !m_StaticMeshRenderer.IndexBuffer)
+	{
+		return;
+	}
+
+	if (!EnsureGeometryBufferCapacity(meshAsset->Vertices.size(), meshAsset->Indices.size()))
 	{
 		return;
 	}
@@ -535,21 +962,42 @@ bool Engine::Init()
 	{
 		return false;
 	}
+	DragAcceptFiles(m_hMainWnd, TRUE);
+
+	if (m_StartupOptions.ProjectFilePath)
+	{
+		Projects::ProjectResult projectResult = Projects::ProjectService::LoadProject(*m_StartupOptions.ProjectFilePath);
+		if (!projectResult.Success)
+		{
+			const std::wstring message(projectResult.ErrorMessage.begin(), projectResult.ErrorMessage.end());
+			MessageBoxW(m_hMainWnd, message.c_str(), L"Project Error", MB_OK | MB_ICONERROR);
+			return false;
+		}
+
+		m_Project = std::move(projectResult.Descriptor);
+		m_SampleMode = Samples::Benchmark::SampleMode::ProjectScene;
+		m_LastSampleMode = m_SampleMode;
+		m_AssetFileSystem.SetRootPath(m_Project->RootPath / m_Project->AssetRoot);
+		AppendAssetLog(std::format("Project loaded: {}", m_Project->ProjectFilePath.string()));
+	}
+	else
+	{
+		m_AssetFileSystem.SetRootPath("Assets");
+	}
 
 	if (!glslang_initialize_process())
 	{
 		return false;
 	}
 
-	if (!LoadSpiderStaticMesh())
+	if (m_Project)
 	{
-		return false;
+		InitializeProjectScene();
 	}
-
-	FramePrimaryRenderableCamera();
-	FramePrimaryRenderableCamera(m_SceneCamera);
-	CreateEditorSceneEntities();
-	SyncRuntimeCameraToGameCameraEntity();
+	else
+	{
+		InitializeProjectScene();
+	}
 
 	if (!SwitchGraphicsAPI(m_Graphics.CurrentApi))
 	{
@@ -561,6 +1009,12 @@ bool Engine::Init()
 
 LRESULT Engine::MsgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+	if (msg == WM_DROPFILES)
+	{
+		HandleDroppedFiles(reinterpret_cast<HDROP>(wParam));
+		return 0;
+	}
+
 	if (ImGui::GetCurrentContext() != nullptr && ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
 	{
 		return 1;
@@ -620,8 +1074,25 @@ void Engine::Update(float deltaTime)
 	m_LastDeltaTime = deltaTime;
 	ProcessPendingGraphicsApiSwitch();
 
+	for (const auto& hotReloadEvent : m_AssetHotReloadService.ConsumeEvents())
+	{
+		QueueModelReload(hotReloadEvent.SourcePath, hotReloadEvent.ChangedPath);
+	}
+	DrainCompletedAssetJobs();
+
 	if (m_LastSampleMode != m_SampleMode)
 	{
+		if (m_SampleMode == Samples::Benchmark::SampleMode::SpiderSample && m_SpiderEntity == InvalidEntityId)
+		{
+			if (LoadSpiderStaticMesh())
+			{
+				if (const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(m_SpiderEntity))
+				{
+					static_cast<void>(EnsureGeometryBufferCapacity(meshAsset->Vertices.size(), meshAsset->Indices.size()));
+				}
+				static_cast<void>(CreateTextureResourcesForEntity(m_SpiderEntity));
+			}
+		}
 		FramePrimaryRenderableCamera();
 		FramePrimaryRenderableCamera(m_SceneCamera);
 		m_LastSampleMode = m_SampleMode;
@@ -792,6 +1263,13 @@ bool Engine::SwitchGraphicsAPI(GraphicsAPI api)
 		return false;
 	}
 
+	if (!RecreateDynamicTextureResources())
+	{
+		LogEngineTrace("SwitchGraphicsAPI failed during dynamic texture resource recreation.");
+		ShutdownGraphics();
+		return false;
+	}
+
 	if (!CreateImGuiResources())
 	{
 		LogEngineTrace("SwitchGraphicsAPI failed during ImGui initialization.");
@@ -886,6 +1364,22 @@ void Engine::CreateEditorSceneEntities()
 	}
 }
 
+void Engine::InitializeProjectScene()
+{
+	m_RenderState.Reset();
+	m_Camera.LookAt(
+		{ 0.0f, 2.5f, -8.0f },
+		{ 0.0f, 0.0f, 0.0f },
+		{ 0.0f, 1.0f, 0.0f });
+	m_SceneCamera.LookAt(
+		{ 0.0f, 3.5f, -9.0f },
+		{ 0.0f, 0.0f, 0.0f },
+		{ 0.0f, 1.0f, 0.0f });
+	CreateEditorSceneEntities();
+	SyncRuntimeCameraToGameCameraEntity();
+	m_Scene.ResetSelection();
+}
+
 void Engine::SyncRuntimeCameraToGameCameraEntity()
 {
 	if (m_GameCameraEntity == InvalidEntityId)
@@ -964,8 +1458,14 @@ void Engine::RebuildWindowTitleBase()
 {
 	const std::wstring_view apiName = m_Graphics.CurrentApi == GraphicsAPI::DirectX12 ? L"DirectX12" : L"Vulkan";
 	m_WindowTitleBase.clear();
-	m_WindowTitleBase.reserve(64);
+	m_WindowTitleBase.reserve(96);
 	m_WindowTitleBase.append(L"EnginePlatformer - ");
+	if (m_Project)
+	{
+		const std::wstring projectName(m_Project->Name.begin(), m_Project->Name.end());
+		m_WindowTitleBase.append(projectName);
+		m_WindowTitleBase.append(L" - ");
+	}
 	m_WindowTitleBase.append(apiName);
 	m_WindowTitleBase.append(L" - ");
 	m_WindowTitleBase.append(RenderModeToWideString(m_RenderMode));
@@ -1040,6 +1540,7 @@ bool Engine::CreateRenderWindow()
 		return false;
 	}
 
+	DragAcceptFiles(m_hRenderWnd, TRUE);
 	ResizeRenderWindow();
 	return true;
 }
@@ -1102,10 +1603,11 @@ bool Engine::LoadMaterialTextures()
 
 bool Engine::CreateTextureResources()
 {
+	const std::vector<CpuMaterialTexture> fallbackMaterialTextures = { CpuMaterialTexture{} };
 	const auto* materialTextures = GetMaterialTextures(m_Scene.GetPrimaryRenderableEntity());
 	if (!materialTextures)
 	{
-		return false;
+		materialTextures = &fallbackMaterialTextures;
 	}
 
 	const size_t textureCount = (std::max)(static_cast<size_t>(1), materialTextures->size());
@@ -1418,11 +1920,13 @@ void Engine::DestroyTextureResources()
 {
 	m_StaticMeshRenderer.Dx12.ShaderResourceHeap.Reset();
 	m_StaticMeshRenderer.Dx12.MaterialTextures.clear();
+	m_StaticMeshRenderer.Dx12.EntityMaterials.clear();
 
 	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
 	if (!vulkanDevice)
 	{
 		m_StaticMeshRenderer.Vulkan.MaterialTextures.clear();
+		m_StaticMeshRenderer.Vulkan.EntityMaterials.clear();
 		return;
 	}
 
@@ -1456,6 +1960,471 @@ void Engine::DestroyTextureResources()
 	}
 
 	m_StaticMeshRenderer.Vulkan.MaterialTextures.clear();
+
+	for (auto& [entityId, entityResources] : m_StaticMeshRenderer.Vulkan.EntityMaterials)
+	{
+		(void)entityId;
+		if (entityResources.DescriptorPool != VK_NULL_HANDLE)
+		{
+			vkDestroyDescriptorPool(vulkanDevice->GetVkDevice(), entityResources.DescriptorPool, nullptr);
+			entityResources.DescriptorPool = VK_NULL_HANDLE;
+		}
+
+		for (auto& materialTexture : entityResources.MaterialTextures)
+		{
+			if (materialTexture.Sampler != VK_NULL_HANDLE)
+			{
+				vkDestroySampler(vulkanDevice->GetVkDevice(), materialTexture.Sampler, nullptr);
+				materialTexture.Sampler = VK_NULL_HANDLE;
+			}
+
+			if (materialTexture.ImageView != VK_NULL_HANDLE)
+			{
+				vkDestroyImageView(vulkanDevice->GetVkDevice(), materialTexture.ImageView, nullptr);
+				materialTexture.ImageView = VK_NULL_HANDLE;
+			}
+
+			if (materialTexture.Image != VK_NULL_HANDLE)
+			{
+				vkDestroyImage(vulkanDevice->GetVkDevice(), materialTexture.Image, nullptr);
+				materialTexture.Image = VK_NULL_HANDLE;
+			}
+
+			if (materialTexture.ImageMemory != VK_NULL_HANDLE)
+			{
+				vkFreeMemory(vulkanDevice->GetVkDevice(), materialTexture.ImageMemory, nullptr);
+				materialTexture.ImageMemory = VK_NULL_HANDLE;
+			}
+		}
+	}
+	m_StaticMeshRenderer.Vulkan.EntityMaterials.clear();
+}
+
+bool Engine::CreateTextureResourcesForEntity(EntityId entityId)
+{
+	const auto* materialTextures = GetMaterialTextures(entityId);
+	if (!materialTextures)
+	{
+		return false;
+	}
+
+	const size_t textureCount = (std::max)(static_cast<size_t>(1), materialTextures->size());
+	DestroyTextureResourcesForEntity(entityId);
+
+	if (m_Graphics.CurrentApi == GraphicsAPI::DirectX12)
+	{
+		auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device.get());
+		if (!dx12Device)
+		{
+			return false;
+		}
+
+		auto& entityResources = m_StaticMeshRenderer.Dx12.EntityMaterials[entityId];
+		entityResources.MaterialTextures.resize(textureCount);
+
+		ComPtr<ID3D12CommandAllocator> commandAllocator;
+		ComPtr<ID3D12GraphicsCommandList> commandList;
+		if (FAILED(dx12Device->GetD3DDevice()->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&commandAllocator))) ||
+			FAILED(dx12Device->GetD3DDevice()->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, commandAllocator.Get(), nullptr, IID_PPV_ARGS(&commandList))))
+		{
+			return false;
+		}
+
+		for (size_t textureIndex = 0; textureIndex < textureCount; ++textureIndex)
+		{
+			const auto& materialTexture = (*materialTextures)[textureIndex];
+			auto& dx12MaterialTexture = entityResources.MaterialTextures[textureIndex];
+			const UINT64 rowPitch = static_cast<UINT64>(materialTexture.Width) * 4;
+			const D3D12_RESOURCE_DESC textureDesc = CD3DX12_RESOURCE_DESC::Tex2D(
+				DXGI_FORMAT_R8G8B8A8_UNORM,
+				static_cast<UINT64>(materialTexture.Width),
+				static_cast<UINT>(materialTexture.Height));
+			const CD3DX12_HEAP_PROPERTIES defaultHeapProperties(D3D12_HEAP_TYPE_DEFAULT);
+
+			if (FAILED(dx12Device->GetD3DDevice()->CreateCommittedResource(
+				&defaultHeapProperties,
+				D3D12_HEAP_FLAG_NONE,
+				&textureDesc,
+				D3D12_RESOURCE_STATE_COPY_DEST,
+				nullptr,
+				IID_PPV_ARGS(&dx12MaterialTexture.Texture))))
+			{
+				return false;
+			}
+
+			const UINT64 uploadBufferSize = GetRequiredIntermediateSize(dx12MaterialTexture.Texture.Get(), 0, 1);
+			const CD3DX12_HEAP_PROPERTIES uploadHeapProperties(D3D12_HEAP_TYPE_UPLOAD);
+			const auto uploadBufferDesc = CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize);
+			if (FAILED(dx12Device->GetD3DDevice()->CreateCommittedResource(
+				&uploadHeapProperties,
+				D3D12_HEAP_FLAG_NONE,
+				&uploadBufferDesc,
+				D3D12_RESOURCE_STATE_GENERIC_READ,
+				nullptr,
+				IID_PPV_ARGS(&dx12MaterialTexture.TextureUpload))))
+			{
+				return false;
+			}
+
+			D3D12_SUBRESOURCE_DATA textureData = {};
+			textureData.pData = materialTexture.Pixels.data();
+			textureData.RowPitch = static_cast<LONG_PTR>(rowPitch);
+			textureData.SlicePitch = static_cast<LONG_PTR>(rowPitch * static_cast<UINT64>(materialTexture.Height));
+			UpdateSubresources(commandList.Get(), dx12MaterialTexture.Texture.Get(), dx12MaterialTexture.TextureUpload.Get(), 0, 0, 1, &textureData);
+
+			auto textureTransitionBarrier = CD3DX12_RESOURCE_BARRIER::Transition(
+				dx12MaterialTexture.Texture.Get(),
+				D3D12_RESOURCE_STATE_COPY_DEST,
+				D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			commandList->ResourceBarrier(1, &textureTransitionBarrier);
+		}
+
+		commandList->Close();
+		ID3D12CommandList* commandLists[] = { commandList.Get() };
+		dx12Device->GetCommandQueue()->ExecuteCommandLists(1, commandLists);
+		dx12Device->WaitForGPU();
+
+		const D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {
+			.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+			.NumDescriptors = static_cast<UINT>(textureCount),
+			.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE
+		};
+		if (FAILED(dx12Device->GetD3DDevice()->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&entityResources.ShaderResourceHeap))))
+		{
+			return false;
+		}
+
+		const UINT descriptorSize = dx12Device->GetD3DDevice()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+		auto cpuHandle = entityResources.ShaderResourceHeap->GetCPUDescriptorHandleForHeapStart();
+		for (size_t textureIndex = 0; textureIndex < textureCount; ++textureIndex)
+		{
+			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+			srvDesc.Texture2D.MipLevels = 1;
+			dx12Device->GetD3DDevice()->CreateShaderResourceView(
+				entityResources.MaterialTextures[textureIndex].Texture.Get(),
+				&srvDesc,
+				cpuHandle);
+			cpuHandle.ptr += descriptorSize;
+		}
+
+		return true;
+	}
+
+	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
+	if (!vulkanDevice)
+	{
+		return false;
+	}
+
+	auto& entityResources = m_StaticMeshRenderer.Vulkan.EntityMaterials[entityId];
+	entityResources.MaterialTextures.resize(textureCount);
+
+	for (size_t textureIndex = 0; textureIndex < textureCount; ++textureIndex)
+	{
+		const auto& materialTexture = (*materialTextures)[textureIndex];
+		auto& vulkanMaterialTexture = entityResources.MaterialTextures[textureIndex];
+
+		VkImageCreateInfo imageCreateInfo = {};
+		imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageCreateInfo.extent.width = static_cast<uint32_t>(materialTexture.Width);
+		imageCreateInfo.extent.height = static_cast<uint32_t>(materialTexture.Height);
+		imageCreateInfo.extent.depth = 1;
+		imageCreateInfo.mipLevels = 1;
+		imageCreateInfo.arrayLayers = 1;
+		imageCreateInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
+		imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+
+		if (vkCreateImage(vulkanDevice->GetVkDevice(), &imageCreateInfo, nullptr, &vulkanMaterialTexture.Image) != VK_SUCCESS)
+		{
+			return false;
+		}
+
+		VkMemoryRequirements memoryRequirements = {};
+		vkGetImageMemoryRequirements(vulkanDevice->GetVkDevice(), vulkanMaterialTexture.Image, &memoryRequirements);
+
+		VkMemoryAllocateInfo allocateInfo = {};
+		allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		allocateInfo.allocationSize = memoryRequirements.size;
+		allocateInfo.memoryTypeIndex = vulkanDevice->FindMemoryTypeForTexture(memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+		if (vkAllocateMemory(vulkanDevice->GetVkDevice(), &allocateInfo, nullptr, &vulkanMaterialTexture.ImageMemory) != VK_SUCCESS)
+		{
+			return false;
+		}
+		vkBindImageMemory(vulkanDevice->GetVkDevice(), vulkanMaterialTexture.Image, vulkanMaterialTexture.ImageMemory, 0);
+
+		BufferDesc stagingDesc = {};
+		stagingDesc.Size = static_cast<uint64_t>(materialTexture.Pixels.size());
+		stagingDesc.Stride = 4;
+		stagingDesc.Heap = HeapType::Upload;
+		stagingDesc.InitialState = ResourceState::GenericRead;
+		VulkanBuffer stagingBuffer(vulkanDevice, stagingDesc);
+		void* mappedData = nullptr;
+		stagingBuffer.Map(&mappedData);
+		std::memcpy(mappedData, materialTexture.Pixels.data(), materialTexture.Pixels.size());
+		stagingBuffer.Unmap();
+
+		VkCommandBufferAllocateInfo commandBufferAllocateInfo = {};
+		commandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		commandBufferAllocateInfo.commandPool = vulkanDevice->GetVkCommandPool();
+		commandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		commandBufferAllocateInfo.commandBufferCount = 1;
+		VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+		vkAllocateCommandBuffers(vulkanDevice->GetVkDevice(), &commandBufferAllocateInfo, &commandBuffer);
+
+		VkCommandBufferBeginInfo commandBufferBeginInfo = {};
+		commandBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		commandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		vkBeginCommandBuffer(commandBuffer, &commandBufferBeginInfo);
+
+		VkImageMemoryBarrier toTransferBarrier = {};
+		toTransferBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		toTransferBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		toTransferBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		toTransferBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		toTransferBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		toTransferBarrier.image = vulkanMaterialTexture.Image;
+		toTransferBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		toTransferBarrier.subresourceRange.baseMipLevel = 0;
+		toTransferBarrier.subresourceRange.levelCount = 1;
+		toTransferBarrier.subresourceRange.baseArrayLayer = 0;
+		toTransferBarrier.subresourceRange.layerCount = 1;
+		toTransferBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toTransferBarrier);
+
+		VkBufferImageCopy copyRegion = {};
+		copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		copyRegion.imageSubresource.mipLevel = 0;
+		copyRegion.imageSubresource.baseArrayLayer = 0;
+		copyRegion.imageSubresource.layerCount = 1;
+		copyRegion.imageExtent = { static_cast<uint32_t>(materialTexture.Width), static_cast<uint32_t>(materialTexture.Height), 1 };
+		vkCmdCopyBufferToImage(commandBuffer, stagingBuffer.GetVkBuffer(), vulkanMaterialTexture.Image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+
+		VkImageMemoryBarrier toShaderReadBarrier = {};
+		toShaderReadBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		toShaderReadBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		toShaderReadBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		toShaderReadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		toShaderReadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		toShaderReadBarrier.image = vulkanMaterialTexture.Image;
+		toShaderReadBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		toShaderReadBarrier.subresourceRange.baseMipLevel = 0;
+		toShaderReadBarrier.subresourceRange.levelCount = 1;
+		toShaderReadBarrier.subresourceRange.baseArrayLayer = 0;
+		toShaderReadBarrier.subresourceRange.layerCount = 1;
+		toShaderReadBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		toShaderReadBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toShaderReadBarrier);
+
+		vkEndCommandBuffer(commandBuffer);
+
+		VkSubmitInfo submitInfo = {};
+		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &commandBuffer;
+		vkQueueSubmit(vulkanDevice->GetVkGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE);
+		vkQueueWaitIdle(vulkanDevice->GetVkGraphicsQueue());
+		vkFreeCommandBuffers(vulkanDevice->GetVkDevice(), vulkanDevice->GetVkCommandPool(), 1, &commandBuffer);
+
+		VkImageViewCreateInfo imageViewCreateInfo = {};
+		imageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		imageViewCreateInfo.image = vulkanMaterialTexture.Image;
+		imageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		imageViewCreateInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
+		imageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		imageViewCreateInfo.subresourceRange.levelCount = 1;
+		imageViewCreateInfo.subresourceRange.layerCount = 1;
+		if (vkCreateImageView(vulkanDevice->GetVkDevice(), &imageViewCreateInfo, nullptr, &vulkanMaterialTexture.ImageView) != VK_SUCCESS)
+		{
+			return false;
+		}
+
+		VkSamplerCreateInfo samplerCreateInfo = {};
+		samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+		samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
+		samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+		samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		samplerCreateInfo.maxAnisotropy = 1.0f;
+		samplerCreateInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+		samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
+		samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+		if (vkCreateSampler(vulkanDevice->GetVkDevice(), &samplerCreateInfo, nullptr, &vulkanMaterialTexture.Sampler) != VK_SUCCESS)
+		{
+			return false;
+		}
+	}
+
+	return RecreateVulkanEntityDescriptorSets();
+}
+
+void Engine::DestroyTextureResourcesForEntity(EntityId entityId)
+{
+	m_StaticMeshRenderer.Dx12.EntityMaterials.erase(entityId);
+
+	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
+	auto entityResourcesIt = m_StaticMeshRenderer.Vulkan.EntityMaterials.find(entityId);
+	if (entityResourcesIt == m_StaticMeshRenderer.Vulkan.EntityMaterials.end())
+	{
+		return;
+	}
+
+	if (vulkanDevice)
+	{
+		auto& entityResources = entityResourcesIt->second;
+		if (entityResources.DescriptorPool != VK_NULL_HANDLE)
+		{
+			vkDestroyDescriptorPool(vulkanDevice->GetVkDevice(), entityResources.DescriptorPool, nullptr);
+			entityResources.DescriptorPool = VK_NULL_HANDLE;
+		}
+
+		for (auto& materialTexture : entityResources.MaterialTextures)
+		{
+			if (materialTexture.Sampler != VK_NULL_HANDLE)
+			{
+				vkDestroySampler(vulkanDevice->GetVkDevice(), materialTexture.Sampler, nullptr);
+			}
+			if (materialTexture.ImageView != VK_NULL_HANDLE)
+			{
+				vkDestroyImageView(vulkanDevice->GetVkDevice(), materialTexture.ImageView, nullptr);
+			}
+			if (materialTexture.Image != VK_NULL_HANDLE)
+			{
+				vkDestroyImage(vulkanDevice->GetVkDevice(), materialTexture.Image, nullptr);
+			}
+			if (materialTexture.ImageMemory != VK_NULL_HANDLE)
+			{
+				vkFreeMemory(vulkanDevice->GetVkDevice(), materialTexture.ImageMemory, nullptr);
+			}
+		}
+	}
+
+	m_StaticMeshRenderer.Vulkan.EntityMaterials.erase(entityResourcesIt);
+}
+
+bool Engine::RecreateTextureResourcesForEntity(EntityId entityId)
+{
+	DestroyTextureResourcesForEntity(entityId);
+	return CreateTextureResourcesForEntity(entityId);
+}
+
+bool Engine::RecreateDynamicTextureResources()
+{
+	bool success = true;
+	for (const auto& record : m_RuntimeAssetRegistry.GetRecords())
+	{
+		for (EntityId entityId : record.Entities)
+		{
+			if (m_Scene.GetMeshComponent(entityId))
+			{
+				success = CreateTextureResourcesForEntity(entityId) && success;
+			}
+		}
+	}
+	return success;
+}
+
+bool Engine::RecreateVulkanEntityDescriptorSets()
+{
+	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
+	auto vulkanCameraBuffer = dynamic_cast<VulkanBuffer*>(m_StaticMeshRenderer.CameraBuffer.get());
+	if (!vulkanDevice || !vulkanCameraBuffer || m_StaticMeshRenderer.Vulkan.DescriptorSetLayout == VK_NULL_HANDLE)
+	{
+		return true;
+	}
+
+	const VkDescriptorBufferInfo cameraBufferInfo = {
+		.buffer = vulkanCameraBuffer->GetVkBuffer(),
+		.offset = 0,
+		.range = sizeof(CameraConstants)
+	};
+
+	for (auto& [entityId, entityResources] : m_StaticMeshRenderer.Vulkan.EntityMaterials)
+	{
+		(void)entityId;
+		if (entityResources.DescriptorPool != VK_NULL_HANDLE)
+		{
+			vkDestroyDescriptorPool(vulkanDevice->GetVkDevice(), entityResources.DescriptorPool, nullptr);
+			entityResources.DescriptorPool = VK_NULL_HANDLE;
+		}
+		entityResources.DescriptorSets.clear();
+
+		const uint32_t materialTextureCount = static_cast<uint32_t>((std::max)(static_cast<size_t>(1), entityResources.MaterialTextures.size()));
+		const VkDescriptorPoolSize descriptorPoolSize = {
+			.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+			.descriptorCount = materialTextureCount
+		};
+		const VkDescriptorPoolSize textureDescriptorPoolSize = {
+			.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			.descriptorCount = materialTextureCount
+		};
+		const VkDescriptorPoolSize descriptorPoolSizes[] = { descriptorPoolSize, textureDescriptorPoolSize };
+		const VkDescriptorPoolCreateInfo descriptorPoolCreateInfo = {
+			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+			.maxSets = materialTextureCount,
+			.poolSizeCount = static_cast<uint32_t>(std::size(descriptorPoolSizes)),
+			.pPoolSizes = descriptorPoolSizes
+		};
+
+		if (vkCreateDescriptorPool(vulkanDevice->GetVkDevice(), &descriptorPoolCreateInfo, nullptr, &entityResources.DescriptorPool) != VK_SUCCESS)
+		{
+			return false;
+		}
+
+		std::vector<VkDescriptorSetLayout> descriptorSetLayouts(materialTextureCount, m_StaticMeshRenderer.Vulkan.DescriptorSetLayout);
+		const VkDescriptorSetAllocateInfo descriptorSetAllocateInfo = {
+			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+			.descriptorPool = entityResources.DescriptorPool,
+			.descriptorSetCount = materialTextureCount,
+			.pSetLayouts = descriptorSetLayouts.data()
+		};
+		entityResources.DescriptorSets.resize(materialTextureCount);
+
+		if (vkAllocateDescriptorSets(vulkanDevice->GetVkDevice(), &descriptorSetAllocateInfo, entityResources.DescriptorSets.data()) != VK_SUCCESS)
+		{
+			return false;
+		}
+
+		for (uint32_t materialIndex = 0; materialIndex < materialTextureCount; ++materialIndex)
+		{
+			const auto& materialTexture = entityResources.MaterialTextures[materialIndex];
+			const VkDescriptorImageInfo textureImageInfo = {
+				.sampler = materialTexture.Sampler,
+				.imageView = materialTexture.ImageView,
+				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+			};
+
+			const VkWriteDescriptorSet writeDescriptorSet = {
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = entityResources.DescriptorSets[materialIndex],
+				.dstBinding = 0,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+				.pBufferInfo = &cameraBufferInfo
+			};
+			const VkWriteDescriptorSet textureWriteDescriptorSet = {
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = entityResources.DescriptorSets[materialIndex],
+				.dstBinding = 1,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				.pImageInfo = &textureImageInfo
+			};
+			const VkWriteDescriptorSet writeDescriptorSets[] = { writeDescriptorSet, textureWriteDescriptorSet };
+
+			vkUpdateDescriptorSets(vulkanDevice->GetVkDevice(), static_cast<uint32_t>(std::size(writeDescriptorSets)), writeDescriptorSets, 0, nullptr);
+		}
+	}
+
+	return true;
 }
 
 bool Engine::CreateImGuiResources()
@@ -1663,6 +2632,11 @@ void Engine::BeginEditorFrame()
 		.ShowDemoWindow = m_ShowImGuiDemoWindow,
 		.ViewportWidth = m_ClientWidth,
 		.ViewportHeight = m_ClientHeight,
+		.ProjectName = m_Project ? m_Project->Name : "Development",
+		.ProjectRootPath = m_Project ? m_Project->RootPath : std::filesystem::current_path(),
+		.ProjectSnapshot = m_AssetFileSystem.GetSnapshot(),
+		.AssetLogLines = &m_AssetLogLines,
+		.ProjectRefreshInProgress = m_AssetFileSystem.IsRefreshInProgress(),
 		.OnGraphicsApiChanged = [this](GraphicsAPI requestedApi)
 		{
 			if (requestedApi == m_Graphics.CurrentApi && !m_HasPendingGraphicsApiSwitch)
@@ -1684,6 +2658,34 @@ void Engine::BeginEditorFrame()
 		.OnScenePick = [this](float mouseX, float mouseY, float viewportWidth, float viewportHeight)
 		{
 			m_Scene.SetSelectedEntity(TryPickEntity(mouseX, mouseY, m_SceneCamera, viewportWidth, viewportHeight));
+		},
+		.OnAssetOpen = [this](const std::filesystem::path& path)
+		{
+			OpenAssetPath(path);
+		},
+		.OnAssetReveal = [this](const std::filesystem::path& path)
+		{
+			RevealAssetPath(path);
+		},
+		.OnModelDrop = [this](const std::filesystem::path& path, Editor::AssetDropTarget target)
+		{
+			QueueModelImportFromDrop(path, target);
+		},
+		.OnProjectRefresh = [this]()
+		{
+			m_AssetFileSystem.RequestRefresh();
+		},
+		.OnRenameEntity = [this](EntityId entityId, std::string_view name)
+		{
+			RenameEntityFromHierarchy(entityId, name);
+		},
+		.OnDuplicateEntity = [this](EntityId entityId)
+		{
+			DuplicateEntityFromHierarchy(entityId);
+		},
+		.OnDeleteEntity = [this](EntityId entityId)
+		{
+			DeleteEntityFromHierarchy(entityId);
 		}
 	};
 	m_EditorLayer.Draw(editorContext);
@@ -2319,12 +3321,9 @@ void Engine::DrawDx12Triangle(const Camera& camera)
 		return;
 	}
 
-	ID3D12DescriptorHeap* descriptorHeaps[] = { m_StaticMeshRenderer.Dx12.ShaderResourceHeap.Get() };
-	native->SetDescriptorHeaps(1, descriptorHeaps);
 	native->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 	const UINT descriptorSize = dx12Device->GetD3DDevice()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-	const D3D12_GPU_DESCRIPTOR_HANDLE baseHandle = m_StaticMeshRenderer.Dx12.ShaderResourceHeap->GetGPUDescriptorHandleForHeapStart();
 	const bool drawTransparentInSecondPass = (m_RenderMode == RenderMode::Forward || m_RenderMode == RenderMode::ForwardPlus) && m_StaticMeshRenderer.Dx12.TransparentPipelineState;
 	const bool drawOpaquePass = true;
 	if (drawOpaquePass)
@@ -2350,6 +3349,25 @@ void Engine::DrawDx12Triangle(const Camera& camera)
 		}
 		native->SetGraphicsRootConstantBufferView(0, cameraResource->GetGPUVirtualAddress() + cameraOffset);
 
+		ID3D12DescriptorHeap* selectedHeap = m_StaticMeshRenderer.Dx12.ShaderResourceHeap.Get();
+		size_t selectedTextureCount = m_StaticMeshRenderer.Dx12.MaterialTextures.size();
+		if (auto entityMaterialIt = m_StaticMeshRenderer.Dx12.EntityMaterials.find(entityId);
+			entityMaterialIt != m_StaticMeshRenderer.Dx12.EntityMaterials.end()
+			&& entityMaterialIt->second.ShaderResourceHeap
+			&& !entityMaterialIt->second.MaterialTextures.empty())
+		{
+			selectedHeap = entityMaterialIt->second.ShaderResourceHeap.Get();
+			selectedTextureCount = entityMaterialIt->second.MaterialTextures.size();
+		}
+		if (!selectedHeap || selectedTextureCount == 0)
+		{
+			continue;
+		}
+
+		ID3D12DescriptorHeap* descriptorHeaps[] = { selectedHeap };
+		native->SetDescriptorHeaps(1, descriptorHeaps);
+		const D3D12_GPU_DESCRIPTOR_HANDLE baseHandle = selectedHeap->GetGPUDescriptorHandleForHeapStart();
+
 		if (meshAsset->Submeshes.empty())
 		{
 			const bool entityIsTransparent = IsMaterialTransparent(entityId, 0);
@@ -2366,7 +3384,7 @@ void Engine::DrawDx12Triangle(const Camera& camera)
 
 		auto drawSubmesh = [&](const Asset::StaticMeshSubmesh& submesh)
 		{
-			const size_t materialIndex = submesh.MaterialIndex < m_StaticMeshRenderer.Dx12.MaterialTextures.size() ? submesh.MaterialIndex : 0;
+			const size_t materialIndex = submesh.MaterialIndex < selectedTextureCount ? submesh.MaterialIndex : 0;
 			D3D12_GPU_DESCRIPTOR_HANDLE materialHandle = baseHandle;
 			materialHandle.ptr += static_cast<SIZE_T>(descriptorSize) * materialIndex;
 			native->SetGraphicsRootDescriptorTable(1, materialHandle);
@@ -2588,12 +3606,13 @@ EntityId Engine::TryPickEntity(float mouseX, float mouseY, const Camera& camera,
 
 void Engine::UpdateAnimatedMesh(float deltaTime)
 {
-	AnimationSystem::UpdateAnimatedMesh(
-		m_Scene,
-		m_SpiderEntity,
-		deltaTime,
-		m_AnimationTimeSeconds,
-		m_StaticMeshRenderer.VertexBuffer.get());
+	for (EntityId entityId : m_RenderState.RenderEntities)
+	{
+		if (AnimatorComponent* animator = m_Scene.GetAnimatorComponent(entityId))
+		{
+			AnimationSystem::UpdateAnimatedMesh(m_Scene, entityId, deltaTime, *animator);
+		}
+	}
 }
 
 bool Engine::CreateVulkanTriangleResources()
@@ -2913,6 +3932,11 @@ bool Engine::CreateVulkanTriangleResources()
 		return false;
 	}
 
+	if (!RecreateVulkanEntityDescriptorSets())
+	{
+		return false;
+	}
+
 	m_StaticMeshRenderer.Vulkan.IsValid = true;
 	return true;
 }
@@ -2923,10 +3947,12 @@ void Engine::DestroyVulkanTriangleResources()
 	if (!vulkanDevice)
 	{
 		auto savedMaterialTextures = std::move(m_StaticMeshRenderer.Vulkan.MaterialTextures);
+		auto savedEntityMaterials = std::move(m_StaticMeshRenderer.Vulkan.EntityMaterials);
 
 		m_StaticMeshRenderer.Vulkan = {};
 
 		m_StaticMeshRenderer.Vulkan.MaterialTextures = std::move(savedMaterialTextures);
+		m_StaticMeshRenderer.Vulkan.EntityMaterials = std::move(savedEntityMaterials);
 		return;
 	}
 
@@ -2965,14 +3991,27 @@ void Engine::DestroyVulkanTriangleResources()
 		vkDestroyShaderModule(vulkanDevice->GetVkDevice(), m_StaticMeshRenderer.Vulkan.PixelShader, nullptr);
 	}
 
+	for (auto& [entityId, entityResources] : m_StaticMeshRenderer.Vulkan.EntityMaterials)
+	{
+		(void)entityId;
+		if (entityResources.DescriptorPool != VK_NULL_HANDLE)
+		{
+			vkDestroyDescriptorPool(vulkanDevice->GetVkDevice(), entityResources.DescriptorPool, nullptr);
+			entityResources.DescriptorPool = VK_NULL_HANDLE;
+		}
+		entityResources.DescriptorSets.clear();
+	}
+
 	// 파이프라인 관련 핸들만 초기화합니다.
 	// Vulkan material texture는 DestroyTextureResources()가 담당하므로, 리사이즈 중에는 벡터를 보존해야
 	// descriptor set과 pipeline만 재생성하면서 기존 텍스처를 다시 사용할 수 있습니다.
 	auto savedMaterialTextures = std::move(m_StaticMeshRenderer.Vulkan.MaterialTextures);
+	auto savedEntityMaterials = std::move(m_StaticMeshRenderer.Vulkan.EntityMaterials);
 
 	m_StaticMeshRenderer.Vulkan = {};
 
 	m_StaticMeshRenderer.Vulkan.MaterialTextures = std::move(savedMaterialTextures);
+	m_StaticMeshRenderer.Vulkan.EntityMaterials = std::move(savedEntityMaterials);
 }
 
 void Engine::DrawVulkanTriangle(const Camera& camera)
@@ -3015,6 +4054,18 @@ void Engine::DrawVulkanTriangle(const Camera& camera)
 		}
 		const uint32_t cameraDynamicOffset = static_cast<uint32_t>(cameraOffset);
 
+		const std::vector<VkDescriptorSet>* selectedDescriptorSets = &m_StaticMeshRenderer.Vulkan.DescriptorSets;
+		if (auto entityMaterialIt = m_StaticMeshRenderer.Vulkan.EntityMaterials.find(entityId);
+			entityMaterialIt != m_StaticMeshRenderer.Vulkan.EntityMaterials.end()
+			&& !entityMaterialIt->second.DescriptorSets.empty())
+		{
+			selectedDescriptorSets = &entityMaterialIt->second.DescriptorSets;
+		}
+		if (!selectedDescriptorSets || selectedDescriptorSets->empty())
+		{
+			continue;
+		}
+
 		if (meshAsset->Submeshes.empty())
 		{
 			const bool entityIsTransparent = IsMaterialTransparent(entityId, 0);
@@ -3030,7 +4081,7 @@ void Engine::DrawVulkanTriangle(const Camera& camera)
 				entityIsTransparent ? m_StaticMeshRenderer.Vulkan.TransparentPipeline : m_StaticMeshRenderer.Vulkan.Pipeline);
 
 			// Vulkan fallback 경로에서는 첫 번째 material descriptor set을 사용해 전체 메시를 그립니다.
-			const VkDescriptorSet descriptorSet = m_StaticMeshRenderer.Vulkan.DescriptorSets.front();
+			const VkDescriptorSet descriptorSet = selectedDescriptorSets->front();
 			vkCmdBindDescriptorSets(
 				commandBuffer,
 				VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -3046,8 +4097,8 @@ void Engine::DrawVulkanTriangle(const Camera& camera)
 
 		auto drawSubmesh = [&](const Asset::StaticMeshSubmesh& submesh)
 		{
-			const size_t materialIndex = submesh.MaterialIndex < m_StaticMeshRenderer.Vulkan.DescriptorSets.size() ? submesh.MaterialIndex : 0;
-			const VkDescriptorSet descriptorSet = m_StaticMeshRenderer.Vulkan.DescriptorSets[materialIndex];
+			const size_t materialIndex = submesh.MaterialIndex < selectedDescriptorSets->size() ? submesh.MaterialIndex : 0;
+			const VkDescriptorSet descriptorSet = (*selectedDescriptorSets)[materialIndex];
 
 			// Vulkan 경로는 submesh.MaterialIndex에 대응하는 descriptor set을 바인딩해 material별 texture를 선택합니다.
 			// 그런 다음 해당 submesh의 index 범위만 DrawIndexedInstanced로 기록해 멀티 머티리얼 메시를 올바르게 렌더링합니다.
@@ -3099,7 +4150,14 @@ bool Engine::CreateTriangleVertexBuffer()
 	const Asset::StaticMeshAsset* spiderMesh = RenderSystem::GetPrimaryRenderableMesh(m_Scene);
 	if (!spiderMesh || spiderMesh->Vertices.empty())
 	{
-		return false;
+		const BufferDesc bufferDesc = {
+			.Size = sizeof(Asset::StaticMeshVertex),
+			.Stride = sizeof(Asset::StaticMeshVertex),
+			.Heap = HeapType::Upload,
+			.InitialState = ResourceState::GenericRead
+		};
+		m_StaticMeshRenderer.VertexBuffer = m_Graphics.Device->CreateBuffer(bufferDesc);
+		return m_StaticMeshRenderer.VertexBuffer != nullptr;
 	}
 
 	const BufferDesc bufferDesc = {
@@ -3128,7 +4186,14 @@ bool Engine::CreateIndexBuffer()
 	const Asset::StaticMeshAsset* spiderMesh = RenderSystem::GetPrimaryRenderableMesh(m_Scene);
 	if (!spiderMesh || spiderMesh->Indices.empty())
 	{
-		return false;
+		const BufferDesc bufferDesc = {
+			.Size = sizeof(uint32_t),
+			.Stride = sizeof(uint32_t),
+			.Heap = HeapType::Upload,
+			.InitialState = ResourceState::GenericRead
+		};
+		m_StaticMeshRenderer.IndexBuffer = m_Graphics.Device->CreateBuffer(bufferDesc);
+		return m_StaticMeshRenderer.IndexBuffer != nullptr;
 	}
 
 	const BufferDesc bufferDesc = {
@@ -3148,6 +4213,49 @@ bool Engine::CreateIndexBuffer()
 	m_StaticMeshRenderer.IndexBuffer->Map(&mappedData);
 	std::memcpy(mappedData, spiderMesh->Indices.data(), static_cast<size_t>(bufferDesc.Size));
 	m_StaticMeshRenderer.IndexBuffer->Unmap();
+	return true;
+}
+
+bool Engine::EnsureGeometryBufferCapacity(size_t vertexCount, size_t indexCount)
+{
+	if (!m_Graphics.Device || vertexCount == 0 || indexCount == 0)
+	{
+		return false;
+	}
+
+	const uint64_t requiredVertexBytes = static_cast<uint64_t>(vertexCount * sizeof(Asset::StaticMeshVertex));
+	const uint64_t requiredIndexBytes = static_cast<uint64_t>(indexCount * sizeof(uint32_t));
+
+	if (!m_StaticMeshRenderer.VertexBuffer || m_StaticMeshRenderer.VertexBuffer->GetSize() < requiredVertexBytes)
+	{
+		const BufferDesc bufferDesc = {
+			.Size = requiredVertexBytes,
+			.Stride = sizeof(Asset::StaticMeshVertex),
+			.Heap = HeapType::Upload,
+			.InitialState = ResourceState::GenericRead
+		};
+		m_StaticMeshRenderer.VertexBuffer = m_Graphics.Device->CreateBuffer(bufferDesc);
+		if (!m_StaticMeshRenderer.VertexBuffer)
+		{
+			return false;
+		}
+	}
+
+	if (!m_StaticMeshRenderer.IndexBuffer || m_StaticMeshRenderer.IndexBuffer->GetSize() < requiredIndexBytes)
+	{
+		const BufferDesc bufferDesc = {
+			.Size = requiredIndexBytes,
+			.Stride = sizeof(uint32_t),
+			.Heap = HeapType::Upload,
+			.InitialState = ResourceState::GenericRead
+		};
+		m_StaticMeshRenderer.IndexBuffer = m_Graphics.Device->CreateBuffer(bufferDesc);
+		if (!m_StaticMeshRenderer.IndexBuffer)
+		{
+			return false;
+		}
+	}
+
 	return true;
 }
 

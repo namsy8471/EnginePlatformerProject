@@ -68,6 +68,10 @@ namespace SceneLoader
 				result.IsAnimated = isAnimated;
 				meshComponent.Asset = std::move(loadedMesh);
 				meshComponent.MaterialTextures.clear();
+				if (isAnimated)
+				{
+					static_cast<void>(scene.EnsureAnimatorComponent(entityId));
+				}
 				return true;
 			}
 

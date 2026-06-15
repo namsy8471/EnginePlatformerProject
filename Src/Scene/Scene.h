@@ -1,71 +1,18 @@
 #pragma once
 
-#include "Assets/StaticMesh.h"
-#include "Scene/TransformComponent.h"
+#include "Scene/SceneComponents.h"
+#include "Scene/SceneComponentStore.h"
+#include "Scene/SceneTypes.h"
 
 #include <DirectXMath.h>
 
-#include <cstdint>
-#include <filesystem>
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
-
-struct CpuMaterialTexture
-{
-	std::filesystem::path Path;
-	std::vector<unsigned char> Pixels = { 255, 255, 255, 255 };
-	int Width = 1;
-	int Height = 1;
-};
-
-using EntityId = uint32_t;
-constexpr EntityId InvalidEntityId = 0;
-
-struct SceneEntity
-{
-	EntityId Id = InvalidEntityId;
-	std::string Name;
-};
-
-struct MeshComponent
-{
-	std::unique_ptr<Asset::StaticMeshAsset> Asset;
-	std::vector<CpuMaterialTexture> MaterialTextures;
-};
-
-struct BoundsComponent
-{
-	DirectX::XMFLOAT3 LocalMin = { 0.0f, 0.0f, 0.0f };
-	DirectX::XMFLOAT3 LocalMax = { 0.0f, 0.0f, 0.0f };
-};
-
-struct CameraComponent
-{
-	float FovY = DirectX::XM_PIDIV4;
-	float NearZ = 0.1f;
-	float FarZ = 1000.0f;
-	bool IsGameCamera = false;
-};
-
-enum class LightType : uint8_t
-{
-	Directional,
-	Point,
-	Spot
-};
-
-struct LightComponent
-{
-	LightType Type = LightType::Directional;
-	DirectX::XMFLOAT3 Color = { 1.0f, 0.96f, 0.86f };
-	float Intensity = 2.5f;
-	float Range = 200.0f;
-	float SpotAngle = DirectX::XM_PIDIV4;
-	bool Enabled = true;
-};
 
 class Scene
 {
@@ -73,57 +20,251 @@ public:
 	[[nodiscard]] EntityId CreateEntity(std::string_view name)
 	{
 		const EntityId entityId = m_NextEntityId++;
-		m_Entities.push_back({ entityId, std::string(name) });
+		m_Entities.push_back({ entityId });
+		static_cast<void>(AddComponent(entityId, NameComponent{ std::string(name) }));
 		return entityId;
+	}
+
+	[[nodiscard]] bool ContainsEntity(EntityId entityId) const
+	{
+		return std::ranges::any_of(m_Entities, [entityId](const SceneEntity& entity)
+			{
+				return entity.Id == entityId;
+			});
+	}
+
+	[[nodiscard]] bool RenameEntity(EntityId entityId, std::string_view name)
+	{
+		if (name.empty())
+		{
+			return false;
+		}
+
+		if (!ContainsEntity(entityId))
+		{
+			return false;
+		}
+
+		EnsureComponent<NameComponent>(entityId).Name = name;
+		return true;
+	}
+
+	[[nodiscard]] bool DeleteEntity(EntityId entityId)
+	{
+		if (entityId == InvalidEntityId)
+		{
+			return false;
+		}
+
+		const auto oldEntityCount = m_Entities.size();
+		std::erase_if(m_Entities, [entityId](const SceneEntity& entity)
+			{
+				return entity.Id == entityId;
+			});
+		if (m_Entities.size() == oldEntityCount)
+		{
+			return false;
+		}
+
+		m_Components.RemoveEntity(entityId);
+		if (m_SelectedEntity == entityId)
+		{
+			m_SelectedEntity = InvalidEntityId;
+		}
+		if (m_PrimaryRenderableEntity == entityId)
+		{
+			m_PrimaryRenderableEntity = InvalidEntityId;
+		}
+		return true;
+	}
+
+	[[nodiscard]] EntityId DuplicateEntity(EntityId sourceEntityId, std::string_view newName, const DirectX::XMFLOAT3& transformOffset)
+	{
+		if (!ContainsEntity(sourceEntityId) || newName.empty())
+		{
+			return InvalidEntityId;
+		}
+
+		const EntityId duplicateEntityId = CreateEntity(newName);
+		if (const TransformComponent* sourceTransform = GetTransformComponent(sourceEntityId))
+		{
+			TransformComponent& duplicateTransform = EnsureTransformComponent(duplicateEntityId);
+			duplicateTransform = *sourceTransform;
+			duplicateTransform.LocalTransform.Translation.x += transformOffset.x;
+			duplicateTransform.LocalTransform.Translation.y += transformOffset.y;
+			duplicateTransform.LocalTransform.Translation.z += transformOffset.z;
+			duplicateTransform.UpdateWorld();
+		}
+
+		if (const MeshComponent* sourceMesh = GetMeshComponent(sourceEntityId))
+		{
+			MeshComponent& duplicateMesh = EnsureMeshComponent(duplicateEntityId);
+			if (sourceMesh->Asset)
+			{
+				duplicateMesh.Asset = std::make_unique<Asset::StaticMeshAsset>(*sourceMesh->Asset);
+			}
+			duplicateMesh.MaterialTextures = sourceMesh->MaterialTextures;
+		}
+
+		if (const AnimatorComponent* sourceAnimator = GetAnimatorComponent(sourceEntityId))
+		{
+			EnsureAnimatorComponent(duplicateEntityId) = *sourceAnimator;
+		}
+
+		if (const BoundsComponent* sourceBounds = GetBoundsComponent(sourceEntityId))
+		{
+			EnsureBoundsComponent(duplicateEntityId) = *sourceBounds;
+		}
+
+		if (const CameraComponent* sourceCamera = GetCameraComponent(sourceEntityId))
+		{
+			EnsureCameraComponent(duplicateEntityId) = *sourceCamera;
+		}
+
+		if (const LightComponent* sourceLight = GetLightComponent(sourceEntityId))
+		{
+			EnsureLightComponent(duplicateEntityId) = *sourceLight;
+		}
+
+		return duplicateEntityId;
+	}
+
+	[[nodiscard]] EntityId CreateModelEntity(
+		std::string_view name,
+		const Math::Transform& localTransform,
+		std::unique_ptr<Asset::StaticMeshAsset> meshAsset,
+		std::vector<CpuMaterialTexture> materialTextures,
+		const BoundsComponent& bounds)
+	{
+		const EntityId entityId = CreateEntity(name);
+		TransformComponent& transform = EnsureTransformComponent(entityId);
+		transform.LocalTransform = localTransform;
+		transform.UpdateWorld();
+
+		MeshComponent& mesh = EnsureMeshComponent(entityId);
+		mesh.Asset = std::move(meshAsset);
+		mesh.MaterialTextures = std::move(materialTextures);
+		EnsureAnimatorForMesh(entityId);
+
+		BoundsComponent& storedBounds = EnsureBoundsComponent(entityId);
+		storedBounds = bounds;
+		return entityId;
+	}
+
+	void ReplaceEntityModel(
+		EntityId entityId,
+		std::unique_ptr<Asset::StaticMeshAsset> meshAsset,
+		std::vector<CpuMaterialTexture> materialTextures,
+		const BoundsComponent& bounds)
+	{
+		if (entityId == InvalidEntityId)
+		{
+			return;
+		}
+
+		MeshComponent& mesh = EnsureMeshComponent(entityId);
+		mesh.Asset = std::move(meshAsset);
+		mesh.MaterialTextures = std::move(materialTextures);
+		EnsureAnimatorForMesh(entityId);
+
+		BoundsComponent& storedBounds = EnsureBoundsComponent(entityId);
+		storedBounds = bounds;
+	}
+
+	template <typename Component>
+	[[nodiscard]] Component& AddComponent(EntityId entityId, Component component)
+	{
+		return m_Components.AddComponent<Component>(entityId, std::move(component));
+	}
+
+	template <typename Component>
+	[[nodiscard]] Component& EnsureComponent(EntityId entityId)
+	{
+		return m_Components.EnsureComponent<Component>(entityId);
+	}
+
+	template <typename Component>
+	[[nodiscard]] Component* GetComponent(EntityId entityId)
+	{
+		return m_Components.GetComponent<Component>(entityId);
+	}
+
+	template <typename Component>
+	[[nodiscard]] const Component* GetComponent(EntityId entityId) const
+	{
+		return m_Components.GetComponent<Component>(entityId);
+	}
+
+	template <typename Component>
+	[[nodiscard]] bool HasComponent(EntityId entityId) const
+	{
+		return m_Components.HasComponent<Component>(entityId);
+	}
+
+	template <typename Component>
+	bool RemoveComponent(EntityId entityId)
+	{
+		return m_Components.RemoveComponent<Component>(entityId);
 	}
 
 	[[nodiscard]] TransformComponent* GetTransformComponent(EntityId entityId)
 	{
-		auto transformIt = m_Transforms.find(entityId);
-		return transformIt != m_Transforms.end() ? &transformIt->second : nullptr;
+		return GetComponent<TransformComponent>(entityId);
 	}
 
 	[[nodiscard]] const TransformComponent* GetTransformComponent(EntityId entityId) const
 	{
-		auto transformIt = m_Transforms.find(entityId);
-		return transformIt != m_Transforms.end() ? &transformIt->second : nullptr;
+		return GetComponent<TransformComponent>(entityId);
 	}
 
 	[[nodiscard]] MeshComponent* GetMeshComponent(EntityId entityId)
 	{
-		auto meshIt = m_Meshes.find(entityId);
-		return meshIt != m_Meshes.end() ? &meshIt->second : nullptr;
+		return GetComponent<MeshComponent>(entityId);
 	}
 
 	[[nodiscard]] TransformComponent& EnsureTransformComponent(EntityId entityId)
 	{
-		return m_Transforms[entityId];
+		return EnsureComponent<TransformComponent>(entityId);
 	}
 
 	[[nodiscard]] MeshComponent& EnsureMeshComponent(EntityId entityId)
 	{
-		return m_Meshes[entityId];
+		return EnsureComponent<MeshComponent>(entityId);
 	}
 
 	[[nodiscard]] BoundsComponent& EnsureBoundsComponent(EntityId entityId)
 	{
-		return m_Bounds[entityId];
+		return EnsureComponent<BoundsComponent>(entityId);
+	}
+
+	[[nodiscard]] AnimatorComponent& EnsureAnimatorComponent(EntityId entityId)
+	{
+		return EnsureComponent<AnimatorComponent>(entityId);
 	}
 
 	[[nodiscard]] CameraComponent& EnsureCameraComponent(EntityId entityId)
 	{
-		return m_Cameras[entityId];
+		return EnsureComponent<CameraComponent>(entityId);
 	}
 
 	[[nodiscard]] LightComponent& EnsureLightComponent(EntityId entityId)
 	{
-		return m_Lights[entityId];
+		return EnsureComponent<LightComponent>(entityId);
 	}
 
 	[[nodiscard]] const MeshComponent* GetMeshComponent(EntityId entityId) const
 	{
-		auto meshIt = m_Meshes.find(entityId);
-		return meshIt != m_Meshes.end() ? &meshIt->second : nullptr;
+		return GetComponent<MeshComponent>(entityId);
+	}
+
+	[[nodiscard]] AnimatorComponent* GetAnimatorComponent(EntityId entityId)
+	{
+		return GetComponent<AnimatorComponent>(entityId);
+	}
+
+	[[nodiscard]] const AnimatorComponent* GetAnimatorComponent(EntityId entityId) const
+	{
+		return GetComponent<AnimatorComponent>(entityId);
 	}
 
 	[[nodiscard]] Asset::StaticMeshAsset* GetMeshAsset(EntityId entityId)
@@ -152,51 +293,38 @@ public:
 
 	[[nodiscard]] BoundsComponent* GetBoundsComponent(EntityId entityId)
 	{
-		auto boundsIt = m_Bounds.find(entityId);
-		return boundsIt != m_Bounds.end() ? &boundsIt->second : nullptr;
+		return GetComponent<BoundsComponent>(entityId);
 	}
 
 	[[nodiscard]] const BoundsComponent* GetBoundsComponent(EntityId entityId) const
 	{
-		auto boundsIt = m_Bounds.find(entityId);
-		return boundsIt != m_Bounds.end() ? &boundsIt->second : nullptr;
+		return GetComponent<BoundsComponent>(entityId);
 	}
 
 	[[nodiscard]] CameraComponent* GetCameraComponent(EntityId entityId)
 	{
-		auto cameraIt = m_Cameras.find(entityId);
-		return cameraIt != m_Cameras.end() ? &cameraIt->second : nullptr;
+		return GetComponent<CameraComponent>(entityId);
 	}
 
 	[[nodiscard]] const CameraComponent* GetCameraComponent(EntityId entityId) const
 	{
-		auto cameraIt = m_Cameras.find(entityId);
-		return cameraIt != m_Cameras.end() ? &cameraIt->second : nullptr;
+		return GetComponent<CameraComponent>(entityId);
 	}
 
 	[[nodiscard]] LightComponent* GetLightComponent(EntityId entityId)
 	{
-		auto lightIt = m_Lights.find(entityId);
-		return lightIt != m_Lights.end() ? &lightIt->second : nullptr;
+		return GetComponent<LightComponent>(entityId);
 	}
 
 	[[nodiscard]] const LightComponent* GetLightComponent(EntityId entityId) const
 	{
-		auto lightIt = m_Lights.find(entityId);
-		return lightIt != m_Lights.end() ? &lightIt->second : nullptr;
+		return GetComponent<LightComponent>(entityId);
 	}
 
 	[[nodiscard]] const std::string* GetEntityName(EntityId entityId) const
 	{
-		for (const SceneEntity& entity : m_Entities)
-		{
-			if (entity.Id == entityId)
-			{
-				return &entity.Name;
-			}
-		}
-
-		return nullptr;
+		const NameComponent* name = GetComponent<NameComponent>(entityId);
+		return name ? &name->Name : nullptr;
 	}
 
 	[[nodiscard]] const std::vector<SceneEntity>& GetEntities() const noexcept
@@ -229,29 +357,40 @@ public:
 		m_SelectedEntity = entityId;
 	}
 
-	[[nodiscard]] std::unordered_map<EntityId, TransformComponent>& GetTransforms() noexcept
+	[[nodiscard]] std::unordered_map<EntityId, TransformComponent>& GetTransforms()
 	{
-		return m_Transforms;
+		return m_Components.GetComponents<TransformComponent>();
 	}
 
-	[[nodiscard]] std::unordered_map<EntityId, BoundsComponent>& GetBounds() noexcept
+	[[nodiscard]] std::unordered_map<EntityId, BoundsComponent>& GetBounds()
 	{
-		return m_Bounds;
+		return m_Components.GetComponents<BoundsComponent>();
 	}
 
 	[[nodiscard]] const std::unordered_map<EntityId, BoundsComponent>& GetBounds() const noexcept
 	{
-		return m_Bounds;
+		return m_Components.GetComponents<BoundsComponent>();
 	}
 
 private:
+	void EnsureAnimatorForMesh(EntityId entityId)
+	{
+		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+		if (!meshAsset || !meshAsset->IsAnimated || meshAsset->Animations.empty())
+		{
+			RemoveComponent<AnimatorComponent>(entityId);
+			return;
+		}
+
+		AnimatorComponent& animator = EnsureAnimatorComponent(entityId);
+		const uint32_t lastClipIndex = static_cast<uint32_t>(meshAsset->Animations.size() - 1);
+		animator.CurrentClipIndex = (std::min)(animator.CurrentClipIndex, lastClipIndex);
+		animator.TimeSeconds = (std::max)(animator.TimeSeconds, 0.0f);
+	}
+
 	EntityId m_NextEntityId = 1;
 	EntityId m_PrimaryRenderableEntity = InvalidEntityId;
 	EntityId m_SelectedEntity = InvalidEntityId;
 	std::vector<SceneEntity> m_Entities;
-	std::unordered_map<EntityId, TransformComponent> m_Transforms;
-	std::unordered_map<EntityId, MeshComponent> m_Meshes;
-	std::unordered_map<EntityId, BoundsComponent> m_Bounds;
-	std::unordered_map<EntityId, CameraComponent> m_Cameras;
-	std::unordered_map<EntityId, LightComponent> m_Lights;
+	SceneComponentStore m_Components;
 };

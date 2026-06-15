@@ -1,13 +1,23 @@
 #pragma once
 
+#include "Assets/AssetFileSystem.h"
 #include "Math/Camera.h"
 #include "Rendering/RHI/GraphicsCommon.h"
 #include "Rendering/RenderMode.h"
 #include "Samples/Benchmark/BenchmarkRunner.h"
 #include "Scene/Scene.h"
 
+#include <array>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
+
+struct ImDrawList;
+struct ImVec2;
 
 namespace Editor
 {
@@ -32,6 +42,13 @@ namespace Editor
 		}
 	};
 
+	enum class AssetDropTarget : uint8_t
+	{
+		Scene,
+		Game,
+		External
+	};
+
 	struct EditorContext
 	{
 		GraphicsAPI CurrentApi;
@@ -44,10 +61,22 @@ namespace Editor
 		bool& ShowDemoWindow;
 		int ViewportWidth = 0;
 		int ViewportHeight = 0;
+		std::string ProjectName = "Development";
+		std::filesystem::path ProjectRootPath;
+		std::shared_ptr<const Asset::AssetFileSnapshot> ProjectSnapshot;
+		const std::vector<std::string>* AssetLogLines = nullptr;
+		bool ProjectRefreshInProgress = false;
 		std::function<void(GraphicsAPI)> OnGraphicsApiChanged;
 		std::function<void(RenderMode)> OnRenderModeChanged;
 		std::function<void()> OnFrameSelected;
 		std::function<void(float, float, float, float)> OnScenePick;
+		std::function<void(const std::filesystem::path&)> OnAssetOpen;
+		std::function<void(const std::filesystem::path&)> OnAssetReveal;
+		std::function<void(const std::filesystem::path&, AssetDropTarget)> OnModelDrop;
+		std::function<void()> OnProjectRefresh;
+		std::function<void(EntityId, std::string_view)> OnRenameEntity;
+		std::function<void(EntityId)> OnDuplicateEntity;
+		std::function<void(EntityId)> OnDeleteEntity;
 	};
 
 	class EditorLayer
@@ -64,17 +93,34 @@ namespace Editor
 		void DrawSceneView(EditorContext& context);
 		void DrawGameView(EditorContext& context);
 		void DrawInspector(EditorContext& context);
-		void DrawProject();
+		void DrawProject(EditorContext& context);
 		void DrawBenchmark(EditorContext& context);
 		void DrawConsole(const EditorContext& context);
+		void DrawSceneGizmos(EditorContext& context, ImDrawList* drawList, const ImVec2& canvasPosition, const ImVec2& canvasSize) const;
+		void DrawGameCameraFrustumGizmo(EditorContext& context, ImDrawList* drawList, const ImVec2& canvasPosition, const ImVec2& canvasSize) const;
+		[[nodiscard]] bool ProjectWorldToSceneCanvas(
+			const Camera& sceneCamera,
+			const DirectX::XMFLOAT3& worldPosition,
+			const ImVec2& canvasPosition,
+			const ImVec2& canvasSize,
+			ImVec2& screenPosition) const;
 		void BuildDefaultLayout(unsigned int dockspaceId, float viewportWidth, float viewportHeight);
 		void StoreViewportState(ViewportPanelState& target, float screenLeft, float screenTop, float width, float height, bool hovered, bool focused) const;
-		void DrawDirectoryRecursive(const std::filesystem::path& rootPath, const std::filesystem::path& directoryPath);
-		void DrawSelectedAssetDetails(const std::filesystem::path& rootPath) const;
+		void DrawProjectEntryRecursive(const Asset::AssetFileEntry& entry, EditorContext& context);
+		void DrawSelectedAssetDetails(const Asset::AssetFileSnapshot& snapshot, EditorContext& context) const;
+		void HandleHierarchyShortcuts(EditorContext& context);
+		void OpenRenamePopup(EntityId entityId, std::string_view currentName);
+		void DrawRenamePopup(EditorContext& context);
 
 		std::filesystem::path m_SelectedAssetPath;
+		EntityId m_RenamingEntity = InvalidEntityId;
+		std::array<char, 128> m_RenameBuffer = {};
+		bool m_ShouldOpenRenamePopup = false;
+		bool m_ShouldFocusRenameInput = false;
 		ViewportPanelState m_SceneViewport;
 		ViewportPanelState m_GameViewport;
 		bool m_DefaultLayoutBuilt = false;
+		bool m_ShowSceneGizmos = true;
+		float m_GameCameraGizmoDepth = 25.0f;
 	};
 }

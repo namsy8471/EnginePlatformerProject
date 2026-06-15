@@ -2,7 +2,9 @@
 
 #include "Rendering/RHI/IBuffer.h"
 
+#include <cstdint>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 #include <wrl.h>
 
@@ -36,6 +38,13 @@ namespace Rendering
 		Microsoft::WRL::ComPtr<ID3D12PipelineState> TransparentPipelineState;
 		Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> ShaderResourceHeap;
 		std::vector<MaterialTexture> MaterialTextures;
+
+		struct EntityMaterialResources
+		{
+			Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> ShaderResourceHeap;
+			std::vector<MaterialTexture> MaterialTextures;
+		};
+		std::unordered_map<uint32_t, EntityMaterialResources> EntityMaterials;
 	};
 
 	struct VulkanStaticMeshResources
@@ -58,6 +67,14 @@ namespace Rendering
 		VkPipeline Pipeline = nullptr;
 		VkPipeline TransparentPipeline = nullptr;
 		bool IsValid = false;
+
+		struct EntityMaterialResources
+		{
+			VkDescriptorPool DescriptorPool = nullptr;
+			std::vector<VkDescriptorSet> DescriptorSets;
+			std::vector<MaterialTexture> MaterialTextures;
+		};
+		std::unordered_map<uint32_t, EntityMaterialResources> EntityMaterials;
 	};
 
 	struct StaticMeshRenderer

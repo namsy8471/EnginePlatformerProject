@@ -1,12 +1,11 @@
 #pragma once
 
 #include "Scene/Scene.h"
-#include "Rendering/RHI/IBuffer.h"
 
 #include <DirectXMath.h>
 
+#include <algorithm>
 #include <cmath>
-#include <cstring>
 #include <vector>
 
 namespace AnimationSystem
@@ -111,7 +110,7 @@ namespace AnimationSystem
 		}
 	}
 
-	inline void UpdateAnimatedMesh(Scene& scene, EntityId entityId, float deltaTime, float& animationTimeSeconds, IBuffer* vertexBuffer)
+	inline void UpdateAnimatedMesh(Scene& scene, EntityId entityId, float deltaTime, AnimatorComponent& animator)
 	{
 		Asset::StaticMeshAsset* meshAsset = scene.GetMeshAsset(entityId);
 		if (!meshAsset || !meshAsset->IsAnimated || meshAsset->Animations.empty() || meshAsset->Bones.empty())
@@ -119,15 +118,38 @@ namespace AnimationSystem
 			return;
 		}
 
-		const Asset::AnimationClip& clip = meshAsset->Animations.front();
+		const uint32_t lastClipIndex = static_cast<uint32_t>(meshAsset->Animations.size() - 1);
+		animator.CurrentClipIndex = (std::min)(animator.CurrentClipIndex, lastClipIndex);
+		const Asset::AnimationClip& clip = meshAsset->Animations[animator.CurrentClipIndex];
 		if (clip.DurationTicks <= 0.0)
 		{
 			return;
 		}
 
-		animationTimeSeconds += deltaTime;
 		const double ticksPerSecond = clip.TicksPerSecond > 0.0 ? clip.TicksPerSecond : 25.0;
-		const double animationTimeTicks = std::fmod(static_cast<double>(animationTimeSeconds) * ticksPerSecond, clip.DurationTicks);
+		const double durationSeconds = clip.DurationTicks / ticksPerSecond;
+		if (animator.Playing)
+		{
+			animator.TimeSeconds += deltaTime * animator.Speed;
+		}
+
+		if (durationSeconds > 0.0)
+		{
+			if (animator.Loop)
+			{
+				animator.TimeSeconds = static_cast<float>(std::fmod(static_cast<double>(animator.TimeSeconds), durationSeconds));
+				if (animator.TimeSeconds < 0.0f)
+				{
+					animator.TimeSeconds += static_cast<float>(durationSeconds);
+				}
+			}
+			else
+			{
+				animator.TimeSeconds = std::clamp(animator.TimeSeconds, 0.0f, static_cast<float>(durationSeconds));
+			}
+		}
+
+		const double animationTimeTicks = (std::min)(static_cast<double>(animator.TimeSeconds) * ticksPerSecond, clip.DurationTicks);
 
 		std::vector<Math::Transform> localTransforms;
 		localTransforms.reserve(meshAsset->Nodes.size());
@@ -184,15 +206,5 @@ namespace AnimationSystem
 				DirectX::XMStoreFloat3(&animatedVertex.Normal, normalizedNormal);
 			}
 		}
-
-		if (!vertexBuffer)
-		{
-			return;
-		}
-
-		void* mappedData = nullptr;
-		vertexBuffer->Map(&mappedData);
-		std::memcpy(mappedData, meshAsset->Vertices.data(), meshAsset->Vertices.size() * sizeof(Asset::StaticMeshVertex));
-		vertexBuffer->Unmap();
 	}
 }

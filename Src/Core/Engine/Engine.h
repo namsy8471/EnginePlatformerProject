@@ -1,7 +1,13 @@
 #pragma once
 
 #include "App/Win32/GameApp.h"
+#include "Assets/AssetFileSystem.h"
+#include "Assets/AssetHotReloadService.h"
+#include "Assets/AssetImportService.h"
+#include "Assets/RuntimeAssetRegistry.h"
 #include "Editor/EditorLayer.h"
+#include "Core/Engine/EngineStartupOptions.h"
+#include "Projects/ProjectService.h"
 #include "Scene/Scene.h"
 #include "Rendering/RHI/IGraphicsDevice.h"
 #include "Rendering/RHI/ICommandList.h"
@@ -16,9 +22,12 @@
 
 #include <chrono>
 #include <cstddef>
+#include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 #include <wrl.h>
 
@@ -29,7 +38,7 @@ struct CameraConstants;
 class Engine : public GameApp
 {
 public:
-	Engine(HINSTANCE hInstance);
+	explicit Engine(HINSTANCE hInstance, EngineStartupOptions startupOptions = {});
 	~Engine() override;
 
 	[[nodiscard]] bool Init() override;
@@ -65,6 +74,7 @@ private:
 	[[nodiscard]] bool LoadSpiderStaticMesh();
 	[[nodiscard]] bool CreateTriangleVertexBuffer();
 	[[nodiscard]] bool CreateIndexBuffer();
+	[[nodiscard]] bool EnsureGeometryBufferCapacity(size_t vertexCount, size_t indexCount);
 	[[nodiscard]] bool CreateCameraBuffer();
 	[[nodiscard]] bool LoadMaterialTextures();
 	[[nodiscard]] bool CreateTextureResources();
@@ -100,6 +110,28 @@ private:
 	void DrawVulkanBenchmarkInstances(const Camera& camera);
 	void UploadBenchmarkGeometry(std::span<const Asset::StaticMeshVertex> vertices, std::span<const uint32_t> indices);
 	[[nodiscard]] uint64_t UpdateBenchmarkCameraBuffer(const Camera& camera, uint32_t instanceCount, float localScale);
+	void QueueModelImport(const std::filesystem::path& sourcePath, const Camera& placementCamera, bool isReload);
+	void QueueModelImportFromDrop(const std::filesystem::path& sourcePath, Editor::AssetDropTarget target);
+	void QueueModelReload(const std::filesystem::path& sourcePath, const std::filesystem::path& changedPath);
+	void DrainCompletedAssetJobs();
+	void ApplyImportedModel(Asset::AssetImportResult result);
+	void ApplyReloadedAsset(Asset::AssetImportResult result);
+	void HandleDroppedFiles(HDROP dropHandle);
+	void OpenAssetPath(const std::filesystem::path& path) const;
+	void RevealAssetPath(const std::filesystem::path& path) const;
+	void AppendAssetLog(std::string message);
+	[[nodiscard]] Math::Transform BuildDroppedModelTransform(const Asset::AssetImportResult& result) const;
+	[[nodiscard]] static std::vector<std::filesystem::path> CollectWatchedTexturePaths(const std::vector<CpuMaterialTexture>& materialTextures);
+	void RenameEntityFromHierarchy(EntityId entityId, std::string_view name);
+	void DuplicateEntityFromHierarchy(EntityId entityId);
+	void DeleteEntityFromHierarchy(EntityId entityId);
+	[[nodiscard]] std::string MakeDuplicateEntityName(EntityId entityId) const;
+	void RemoveEntityFromRenderState(EntityId entityId);
+	[[nodiscard]] bool CreateTextureResourcesForEntity(EntityId entityId);
+	void DestroyTextureResourcesForEntity(EntityId entityId);
+	[[nodiscard]] bool RecreateTextureResourcesForEntity(EntityId entityId);
+	[[nodiscard]] bool RecreateDynamicTextureResources();
+	[[nodiscard]] bool RecreateVulkanEntityDescriptorSets();
 	[[nodiscard]] EntityId CreateEntity(std::string_view name);
 	[[nodiscard]] TransformComponent* GetTransformComponent(EntityId entityId);
 	[[nodiscard]] const TransformComponent* GetTransformComponent(EntityId entityId) const;
@@ -117,6 +149,7 @@ private:
 	void UpdateWindowTitleWithFps();
 	void ProcessPendingGraphicsApiSwitch();
 	void CreateEditorSceneEntities();
+	void InitializeProjectScene();
 	void SyncRuntimeCameraToGameCameraEntity();
 	void SyncGameCameraFromSceneEntity();
 	[[nodiscard]] bool IsGameCameraEntity(EntityId entityId) const noexcept;
@@ -133,11 +166,17 @@ private:
 	EntityId m_GameCameraEntity = InvalidEntityId;
 	EntityId m_KeyLightEntity = InvalidEntityId;
 	SceneRenderState m_RenderState;
-	Samples::Benchmark::SampleMode m_SampleMode = Samples::Benchmark::SampleMode::SpiderSample;
-	Samples::Benchmark::SampleMode m_LastSampleMode = Samples::Benchmark::SampleMode::SpiderSample;
+	Samples::Benchmark::SampleMode m_SampleMode = Samples::Benchmark::SampleMode::ProjectScene;
+	Samples::Benchmark::SampleMode m_LastSampleMode = Samples::Benchmark::SampleMode::ProjectScene;
 	Samples::Benchmark::BenchmarkRunner m_BenchmarkRunner;
+	EngineStartupOptions m_StartupOptions;
+	std::optional<Projects::ProjectDescriptor> m_Project;
 	Editor::EditorLayer m_EditorLayer;
-	float m_AnimationTimeSeconds = 0.0f;
+	Asset::AssetFileSystem m_AssetFileSystem;
+	Asset::AssetImportService m_AssetImportService;
+	Asset::AssetHotReloadService m_AssetHotReloadService;
+	Asset::RuntimeAssetRegistry m_RuntimeAssetRegistry;
+	std::vector<std::string> m_AssetLogLines;
 	float m_LastDeltaTime = 1.0f / 60.0f;
 	bool m_SceneCameraControlActive = false;
 

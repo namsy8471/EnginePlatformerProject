@@ -4,4 +4,5 @@
     <Platform Name="x86" />
   </Configurations>
   <Project Path="DX12Eninge.vcxproj" Id="089d1b26-c0f5-44db-b296-7f20a558ec59" />
+  <Project Path="EngineLauncher.vcxproj" Id="d28e6d5d-04b0-4e1b-9fa7-b4c2e7396e31" />
 </Solution>

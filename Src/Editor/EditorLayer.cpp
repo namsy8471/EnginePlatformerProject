@@ -7,6 +7,7 @@
 #include <array>
 #include <cctype>
 #include <cstdint>
+#include <cmath>
 #include <format>
 #include <string>
 #include <system_error>
@@ -17,6 +18,8 @@ namespace Editor
 {
 	namespace
 	{
+		constexpr const char* kAssetPathPayload = "ENGINE_ASSET_PATH";
+
 		[[nodiscard]] constexpr const char* GraphicsApiName(GraphicsAPI api) noexcept
 		{
 			switch (api)
@@ -33,18 +36,6 @@ namespace Editor
 		[[nodiscard]] constexpr const char* SampleModeName(Samples::Benchmark::SampleMode sampleMode) noexcept
 		{
 			return Samples::Benchmark::ToString(sampleMode).data();
-		}
-
-		[[nodiscard]] bool IsDirectory(const std::filesystem::directory_entry& entry)
-		{
-			std::error_code errorCode;
-			return entry.is_directory(errorCode);
-		}
-
-		[[nodiscard]] bool IsRegularFile(const std::filesystem::directory_entry& entry)
-		{
-			std::error_code errorCode;
-			return entry.is_regular_file(errorCode);
 		}
 
 		[[nodiscard]] std::string ToLower(std::string value)
@@ -82,36 +73,49 @@ namespace Editor
 			return "[FILE]";
 		}
 
+		[[nodiscard]] constexpr const char* AssetKindTag(Asset::AssetFileKind kind) noexcept
+		{
+			switch (kind)
+			{
+			case Asset::AssetFileKind::Directory:
+				return "[D]";
+			case Asset::AssetFileKind::Model:
+				return "[MODEL]";
+			case Asset::AssetFileKind::Image:
+				return "[IMG]";
+			case Asset::AssetFileKind::Text:
+				return "[TXT]";
+			case Asset::AssetFileKind::Source:
+				return "[SRC]";
+			default:
+				return "[FILE]";
+			}
+		}
+
+		void AcceptModelDrop(EditorContext& context, AssetDropTarget target)
+		{
+			if (!ImGui::BeginDragDropTarget())
+			{
+				return;
+			}
+
+			if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kAssetPathPayload))
+			{
+				if (payload->Data && payload->DataSize > 0 && context.OnModelDrop)
+				{
+					const char* pathText = static_cast<const char*>(payload->Data);
+					context.OnModelDrop(std::filesystem::path(pathText), target);
+				}
+			}
+
+			ImGui::EndDragDropTarget();
+		}
+
 		[[nodiscard]] std::string RelativeDisplayPath(const std::filesystem::path& path, const std::filesystem::path& rootPath)
 		{
 			std::error_code errorCode;
 			const std::filesystem::path relativePath = std::filesystem::relative(path, rootPath, errorCode);
 			return errorCode ? path.string() : relativePath.string();
-		}
-
-		[[nodiscard]] std::vector<std::filesystem::directory_entry> SortedDirectoryEntries(const std::filesystem::path& directoryPath)
-		{
-			std::vector<std::filesystem::directory_entry> entries;
-			std::error_code errorCode;
-			for (std::filesystem::directory_iterator it(directoryPath, std::filesystem::directory_options::skip_permission_denied, errorCode), end;
-				it != end && !errorCode;
-				it.increment(errorCode))
-			{
-				entries.push_back(*it);
-			}
-
-			std::sort(entries.begin(), entries.end(), [](const auto& lhs, const auto& rhs)
-				{
-					const bool lhsDirectory = IsDirectory(lhs);
-					const bool rhsDirectory = IsDirectory(rhs);
-					if (lhsDirectory != rhsDirectory)
-					{
-						return lhsDirectory;
-					}
-
-					return ToLower(lhs.path().filename().string()) < ToLower(rhs.path().filename().string());
-				});
-			return entries;
 		}
 
 		void SetInitialWindowRect(const char* name, float x, float y, float width, float height)
@@ -152,11 +156,12 @@ namespace Editor
 	{
 		DrawDockSpace();
 		DrawToolbar(context);
+		HandleHierarchyShortcuts(context);
 		DrawHierarchy(context);
 		DrawSceneView(context);
 		DrawGameView(context);
 		DrawInspector(context);
-		DrawProject();
+		DrawProject(context);
 		DrawBenchmark(context);
 		DrawConsole(context);
 
@@ -278,7 +283,7 @@ namespace Editor
 
 		int sampleModeIndex = std::to_underlying(context.SampleMode);
 		ImGui::SetNextItemWidth(150.0f);
-		if (ImGui::Combo("##SampleMode", &sampleModeIndex, "Spider Sample\0ECS Benchmark\0"))
+		if (ImGui::Combo("##SampleMode", &sampleModeIndex, "Project Scene\0Spider Sample\0ECS Benchmark\0"))
 		{
 			context.SampleMode = static_cast<Samples::Benchmark::SampleMode>(sampleModeIndex);
 		}
@@ -288,6 +293,12 @@ namespace Editor
 			context.OnFrameSelected();
 		}
 
+		ImGui::Separator();
+		ImGui::Checkbox("Gizmos", &m_ShowSceneGizmos);
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Show Scene View camera gizmos");
+		}
 		ImGui::Separator();
 		ImGui::Checkbox("Demo", &context.ShowDemoWindow);
 		ImGui::EndMainMenuBar();
@@ -299,6 +310,8 @@ namespace Editor
 		ImGui::Begin("Hierarchy");
 
 		const EntityId selectedEntity = context.ActiveScene.GetSelectedEntity();
+		EntityId pendingDuplicateEntity = InvalidEntityId;
+		EntityId pendingDeleteEntity = InvalidEntityId;
 		for (const SceneEntity& entity : context.ActiveScene.GetEntities())
 		{
 			const bool selected = entity.Id == selectedEntity;
@@ -308,7 +321,9 @@ namespace Editor
 				flags |= ImGuiTreeNodeFlags_Selected;
 			}
 
-			std::string label = entity.Name;
+			const std::string* entityName = context.ActiveScene.GetEntityName(entity.Id);
+			const std::string displayName = entityName && !entityName->empty() ? *entityName : "<unnamed>";
+			std::string label = displayName;
 			if (context.ActiveScene.GetCameraComponent(entity.Id))
 			{
 				label.append(" [Camera]");
@@ -324,9 +339,167 @@ namespace Editor
 			{
 				context.ActiveScene.SetSelectedEntity(entity.Id);
 			}
+			if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
+			{
+				context.ActiveScene.SetSelectedEntity(entity.Id);
+			}
+
+			const std::string popupId = "HierarchyEntityContext##" + std::to_string(entity.Id);
+			if (ImGui::BeginPopupContextItem(popupId.c_str()))
+			{
+				context.ActiveScene.SetSelectedEntity(entity.Id);
+				if (ImGui::MenuItem("Rename"))
+				{
+					OpenRenamePopup(entity.Id, displayName);
+				}
+				if (ImGui::MenuItem("Duplicate"))
+				{
+					pendingDuplicateEntity = entity.Id;
+				}
+				if (ImGui::MenuItem("Delete"))
+				{
+					pendingDeleteEntity = entity.Id;
+				}
+				ImGui::EndPopup();
+			}
+		}
+
+		DrawRenamePopup(context);
+
+		if (pendingDuplicateEntity != InvalidEntityId && context.OnDuplicateEntity)
+		{
+			context.OnDuplicateEntity(pendingDuplicateEntity);
+		}
+		if (pendingDeleteEntity != InvalidEntityId && context.OnDeleteEntity)
+		{
+			context.OnDeleteEntity(pendingDeleteEntity);
 		}
 
 		ImGui::End();
+	}
+
+	void EditorLayer::HandleHierarchyShortcuts(EditorContext& context)
+	{
+		const EntityId selectedEntity = context.ActiveScene.GetSelectedEntity();
+		if (selectedEntity == InvalidEntityId)
+		{
+			return;
+		}
+
+		if (m_RenamingEntity != InvalidEntityId || m_ShouldOpenRenamePopup)
+		{
+			return;
+		}
+
+		const ImGuiIO& io = ImGui::GetIO();
+		if (io.WantTextInput || ImGui::IsAnyItemActive())
+		{
+			return;
+		}
+
+		if (ImGui::IsKeyPressed(ImGuiKey_F2, false))
+		{
+			if (const std::string* entityName = context.ActiveScene.GetEntityName(selectedEntity))
+			{
+				OpenRenamePopup(selectedEntity, *entityName);
+			}
+			return;
+		}
+
+		if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D, false))
+		{
+			if (context.OnDuplicateEntity)
+			{
+				context.OnDuplicateEntity(selectedEntity);
+			}
+			return;
+		}
+
+		if (ImGui::IsKeyPressed(ImGuiKey_Delete, false))
+		{
+			if (context.OnDeleteEntity)
+			{
+				context.OnDeleteEntity(selectedEntity);
+			}
+			return;
+		}
+
+		if (ImGui::IsKeyPressed(ImGuiKey_F, false))
+		{
+			if (context.OnFrameSelected)
+			{
+				context.OnFrameSelected();
+			}
+		}
+	}
+
+	void EditorLayer::OpenRenamePopup(EntityId entityId, std::string_view currentName)
+	{
+		m_RenamingEntity = entityId;
+		m_RenameBuffer.fill('\0');
+		const size_t copyLength = (std::min)(currentName.size(), m_RenameBuffer.size() - 1);
+		std::copy_n(currentName.data(), copyLength, m_RenameBuffer.data());
+		m_ShouldOpenRenamePopup = true;
+		m_ShouldFocusRenameInput = true;
+	}
+
+	void EditorLayer::DrawRenamePopup(EditorContext& context)
+	{
+		if (m_ShouldOpenRenamePopup)
+		{
+			ImGui::OpenPopup("Rename Entity");
+			m_ShouldOpenRenamePopup = false;
+		}
+
+		if (!ImGui::BeginPopupModal("Rename Entity", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+		{
+			return;
+		}
+
+		if (!context.ActiveScene.ContainsEntity(m_RenamingEntity))
+		{
+			m_RenamingEntity = InvalidEntityId;
+			ImGui::CloseCurrentPopup();
+			ImGui::EndPopup();
+			return;
+		}
+
+		if (m_ShouldFocusRenameInput)
+		{
+			ImGui::SetKeyboardFocusHere();
+			m_ShouldFocusRenameInput = false;
+		}
+		bool applyRename = ImGui::InputText("Name", m_RenameBuffer.data(), m_RenameBuffer.size(), ImGuiInputTextFlags_EnterReturnsTrue);
+		const bool hasName = m_RenameBuffer[0] != '\0';
+		if (!hasName)
+		{
+			ImGui::BeginDisabled();
+		}
+		applyRename |= ImGui::Button("Apply");
+		if (!hasName)
+		{
+			ImGui::EndDisabled();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel"))
+		{
+			m_RenamingEntity = InvalidEntityId;
+			ImGui::CloseCurrentPopup();
+		}
+		if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+		{
+			m_RenamingEntity = InvalidEntityId;
+			ImGui::CloseCurrentPopup();
+		}
+
+		if (applyRename && hasName && m_RenamingEntity != InvalidEntityId && context.OnRenameEntity)
+		{
+			context.OnRenameEntity(m_RenamingEntity, std::string_view(m_RenameBuffer.data()));
+			m_RenamingEntity = InvalidEntityId;
+			ImGui::CloseCurrentPopup();
+		}
+
+		ImGui::EndPopup();
 	}
 
 	void EditorLayer::DrawSceneView(EditorContext& context)
@@ -366,6 +539,8 @@ namespace Editor
 				canvasSize.x,
 				canvasSize.y);
 		}
+		AcceptModelDrop(context, AssetDropTarget::Scene);
+		DrawSceneGizmos(context, drawList, canvasPosition, canvasSize);
 
 		const DirectX::XMFLOAT3 cameraPosition = context.SceneCamera.GetPosition();
 		std::string overlay = "Scene";
@@ -381,6 +556,146 @@ namespace Editor
 
 		ImGui::End();
 		ImGui::PopStyleColor();
+	}
+
+	void EditorLayer::DrawSceneGizmos(EditorContext& context, ImDrawList* drawList, const ImVec2& canvasPosition, const ImVec2& canvasSize) const
+	{
+		if (!m_ShowSceneGizmos || !drawList || canvasSize.x < 1.0f || canvasSize.y < 1.0f)
+		{
+			return;
+		}
+
+		const ImVec2 canvasMax(canvasPosition.x + canvasSize.x, canvasPosition.y + canvasSize.y);
+		drawList->PushClipRect(canvasPosition, canvasMax, true);
+		DrawGameCameraFrustumGizmo(context, drawList, canvasPosition, canvasSize);
+		drawList->PopClipRect();
+	}
+
+	void EditorLayer::DrawGameCameraFrustumGizmo(EditorContext& context, ImDrawList* drawList, const ImVec2& canvasPosition, const ImVec2& canvasSize) const
+	{
+		const Camera& gameCamera = context.GameCamera;
+		const float nearZ = (std::max)(gameCamera.GetNearZ(), 0.001f);
+		const float cameraFarZ = (std::max)(gameCamera.GetFarZ(), nearZ + 0.01f);
+		const float farZ = std::clamp(m_GameCameraGizmoDepth, nearZ + 0.01f, cameraFarZ);
+		const float aspect = (std::max)(gameCamera.GetAspect(), 0.01f);
+		const float fovY = std::clamp(gameCamera.GetFovY(), 0.01f, DirectX::XM_PI - 0.01f);
+		const float halfFovTangent = std::tan(fovY * 0.5f);
+
+		const float nearHalfHeight = halfFovTangent * nearZ;
+		const float nearHalfWidth = nearHalfHeight * aspect;
+		const float farHalfHeight = halfFovTangent * farZ;
+		const float farHalfWidth = farHalfHeight * aspect;
+
+		const DirectX::XMFLOAT3 cameraPositionValue = gameCamera.GetPosition();
+		const DirectX::XMFLOAT3 forwardValue = gameCamera.GetForward();
+		const DirectX::XMFLOAT3 rightValue = gameCamera.GetRight();
+		const DirectX::XMFLOAT3 upValue = gameCamera.GetUp();
+		const DirectX::XMVECTOR cameraPosition = DirectX::XMLoadFloat3(&cameraPositionValue);
+		const DirectX::XMVECTOR forward = DirectX::XMVector3Normalize(DirectX::XMLoadFloat3(&forwardValue));
+		const DirectX::XMVECTOR right = DirectX::XMVector3Normalize(DirectX::XMLoadFloat3(&rightValue));
+		const DirectX::XMVECTOR up = DirectX::XMVector3Normalize(DirectX::XMLoadFloat3(&upValue));
+		const DirectX::XMVECTOR nearCenter = cameraPosition + DirectX::XMVectorScale(forward, nearZ);
+		const DirectX::XMVECTOR farCenter = cameraPosition + DirectX::XMVectorScale(forward, farZ);
+
+		const auto makeCorner = [](DirectX::XMVECTOR center, DirectX::XMVECTOR rightAxis, float rightDistance, DirectX::XMVECTOR upAxis, float upDistance) noexcept
+			{
+				return center + DirectX::XMVectorScale(rightAxis, rightDistance) + DirectX::XMVectorScale(upAxis, upDistance);
+			};
+
+		std::array<DirectX::XMFLOAT3, 8> corners = {};
+		DirectX::XMStoreFloat3(&corners[0], makeCorner(nearCenter, right, -nearHalfWidth, up, nearHalfHeight));
+		DirectX::XMStoreFloat3(&corners[1], makeCorner(nearCenter, right, nearHalfWidth, up, nearHalfHeight));
+		DirectX::XMStoreFloat3(&corners[2], makeCorner(nearCenter, right, nearHalfWidth, up, -nearHalfHeight));
+		DirectX::XMStoreFloat3(&corners[3], makeCorner(nearCenter, right, -nearHalfWidth, up, -nearHalfHeight));
+		DirectX::XMStoreFloat3(&corners[4], makeCorner(farCenter, right, -farHalfWidth, up, farHalfHeight));
+		DirectX::XMStoreFloat3(&corners[5], makeCorner(farCenter, right, farHalfWidth, up, farHalfHeight));
+		DirectX::XMStoreFloat3(&corners[6], makeCorner(farCenter, right, farHalfWidth, up, -farHalfHeight));
+		DirectX::XMStoreFloat3(&corners[7], makeCorner(farCenter, right, -farHalfWidth, up, -farHalfHeight));
+
+		std::array<ImVec2, 8> projectedCorners = {};
+		std::array<bool, 8> projected = {};
+		for (size_t i = 0; i < corners.size(); ++i)
+		{
+			projected[i] = ProjectWorldToSceneCanvas(context.SceneCamera, corners[i], canvasPosition, canvasSize, projectedCorners[i]);
+		}
+
+		constexpr ImU32 nearColor = IM_COL32(255, 211, 92, 240);
+		constexpr ImU32 farColor = IM_COL32(255, 211, 92, 145);
+		constexpr ImU32 edgeColor = IM_COL32(109, 213, 255, 185);
+		constexpr float lineThickness = 1.6f;
+
+		const auto drawLine = [&](size_t begin, size_t end, ImU32 color, float thickness)
+			{
+				if (projected[begin] && projected[end])
+				{
+					drawList->AddLine(projectedCorners[begin], projectedCorners[end], color, thickness);
+				}
+			};
+
+		drawLine(0, 1, nearColor, lineThickness);
+		drawLine(1, 2, nearColor, lineThickness);
+		drawLine(2, 3, nearColor, lineThickness);
+		drawLine(3, 0, nearColor, lineThickness);
+		drawLine(4, 5, farColor, lineThickness);
+		drawLine(5, 6, farColor, lineThickness);
+		drawLine(6, 7, farColor, lineThickness);
+		drawLine(7, 4, farColor, lineThickness);
+		drawLine(0, 4, edgeColor, lineThickness);
+		drawLine(1, 5, edgeColor, lineThickness);
+		drawLine(2, 6, edgeColor, lineThickness);
+		drawLine(3, 7, edgeColor, lineThickness);
+
+		DirectX::XMFLOAT3 cameraWorldPosition = {};
+		DirectX::XMStoreFloat3(&cameraWorldPosition, cameraPosition);
+		ImVec2 cameraScreenPosition = {};
+		if (ProjectWorldToSceneCanvas(context.SceneCamera, cameraWorldPosition, canvasPosition, canvasSize, cameraScreenPosition))
+		{
+			constexpr ImU32 markerFillColor = IM_COL32(255, 236, 148, 245);
+			constexpr ImU32 markerStrokeColor = IM_COL32(25, 32, 42, 230);
+			drawList->AddCircleFilled(cameraScreenPosition, 4.0f, markerFillColor, 12);
+			drawList->AddCircle(cameraScreenPosition, 7.0f, markerStrokeColor, 12, 1.8f);
+			drawList->AddLine(
+				ImVec2(cameraScreenPosition.x - 7.0f, cameraScreenPosition.y),
+				ImVec2(cameraScreenPosition.x + 7.0f, cameraScreenPosition.y),
+				markerStrokeColor,
+				1.4f);
+			drawList->AddLine(
+				ImVec2(cameraScreenPosition.x, cameraScreenPosition.y - 7.0f),
+				ImVec2(cameraScreenPosition.x, cameraScreenPosition.y + 7.0f),
+				markerStrokeColor,
+				1.4f);
+			drawList->AddText(
+				ImVec2(cameraScreenPosition.x + 10.0f, cameraScreenPosition.y - 10.0f),
+				IM_COL32(255, 244, 190, 235),
+				"Game Camera");
+		}
+	}
+
+	bool EditorLayer::ProjectWorldToSceneCanvas(
+		const Camera& sceneCamera,
+		const DirectX::XMFLOAT3& worldPosition,
+		const ImVec2& canvasPosition,
+		const ImVec2& canvasSize,
+		ImVec2& screenPosition) const
+	{
+		const DirectX::XMVECTOR world = DirectX::XMLoadFloat3(&worldPosition);
+		const DirectX::XMVECTOR clip = DirectX::XMVector3Transform(world, sceneCamera.GetViewProjectionMatrix());
+		const float w = DirectX::XMVectorGetW(clip);
+		if (!std::isfinite(w) || w <= 0.0001f)
+		{
+			return false;
+		}
+
+		const float ndcX = DirectX::XMVectorGetX(clip) / w;
+		const float ndcY = DirectX::XMVectorGetY(clip) / w;
+		if (!std::isfinite(ndcX) || !std::isfinite(ndcY))
+		{
+			return false;
+		}
+
+		screenPosition.x = canvasPosition.x + ((ndcX + 1.0f) * 0.5f * canvasSize.x);
+		screenPosition.y = canvasPosition.y + ((1.0f - ndcY) * 0.5f * canvasSize.y);
+		return true;
 	}
 
 	void EditorLayer::DrawGameView(EditorContext& context)
@@ -411,6 +726,7 @@ namespace Editor
 		const bool hovered = ImGui::IsItemHovered();
 		const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 		StoreViewportState(m_GameViewport, canvasPosition.x, canvasPosition.y, canvasSize.x, canvasSize.y, hovered, focused);
+		AcceptModelDrop(context, AssetDropTarget::Game);
 
 		std::string overlay = "Game | ";
 		overlay.append(SampleModeName(context.SampleMode));
@@ -519,6 +835,78 @@ namespace Editor
 				ImGui::Text("Submeshes: %d", static_cast<int>(mesh->Submeshes.size()));
 				ImGui::Text("Materials: %d", static_cast<int>(mesh->Materials.size()));
 				ImGui::Text("Animated: %s", mesh->IsAnimated ? "true" : "false");
+				if (mesh->IsAnimated)
+				{
+					ImGui::Text("Animation Clips: %d", static_cast<int>(mesh->Animations.size()));
+					ImGui::Text("Bones: %d", static_cast<int>(mesh->Bones.size()));
+				}
+			}
+
+			if (mesh->IsAnimated && !mesh->Animations.empty())
+			{
+				AnimatorComponent* animator = context.ActiveScene.GetAnimatorComponent(selectedEntity);
+				if (!animator)
+				{
+					if (ImGui::Button("Add Animator"))
+					{
+						animator = &context.ActiveScene.EnsureAnimatorComponent(selectedEntity);
+					}
+				}
+
+				if (animator && ImGui::CollapsingHeader("Animator", ImGuiTreeNodeFlags_DefaultOpen))
+				{
+					const uint32_t lastClipIndex = static_cast<uint32_t>(mesh->Animations.size() - 1);
+					animator->CurrentClipIndex = (std::min)(animator->CurrentClipIndex, lastClipIndex);
+					const Asset::AnimationClip& currentClip = mesh->Animations[animator->CurrentClipIndex];
+					const std::string currentClipLabel = currentClip.Name.empty()
+						? std::format("Clip {}", animator->CurrentClipIndex)
+						: currentClip.Name;
+
+					if (ImGui::BeginCombo("Clip", currentClipLabel.c_str()))
+					{
+						for (uint32_t clipIndex = 0; clipIndex < mesh->Animations.size(); ++clipIndex)
+						{
+							const Asset::AnimationClip& clip = mesh->Animations[clipIndex];
+							const std::string clipLabel = clip.Name.empty()
+								? std::format("Clip {}", clipIndex)
+								: clip.Name;
+							const bool selectedClip = clipIndex == animator->CurrentClipIndex;
+							if (ImGui::Selectable(clipLabel.c_str(), selectedClip))
+							{
+								animator->CurrentClipIndex = clipIndex;
+								animator->TimeSeconds = 0.0f;
+							}
+							if (selectedClip)
+							{
+								ImGui::SetItemDefaultFocus();
+							}
+						}
+						ImGui::EndCombo();
+					}
+
+					ImGui::Checkbox("Playing", &animator->Playing);
+					ImGui::SameLine();
+					ImGui::Checkbox("Loop", &animator->Loop);
+					ImGui::DragFloat("Speed", &animator->Speed, 0.01f, 0.0f, 10.0f, "%.2f");
+
+					const double ticksPerSecond = currentClip.TicksPerSecond > 0.0 ? currentClip.TicksPerSecond : 25.0;
+					const float durationSeconds = currentClip.DurationTicks > 0.0
+						? static_cast<float>(currentClip.DurationTicks / ticksPerSecond)
+						: 0.0f;
+					if (durationSeconds > 0.0f)
+					{
+						animator->TimeSeconds = (std::clamp)(animator->TimeSeconds, 0.0f, durationSeconds);
+						ImGui::SliderFloat("Time", &animator->TimeSeconds, 0.0f, durationSeconds, "%.3f sec");
+					}
+					else
+					{
+						ImGui::TextUnformatted("Time: <invalid duration>");
+					}
+
+					ImGui::Text("Duration: %.3f sec / %.1f ticks", durationSeconds, currentClip.DurationTicks);
+					ImGui::Text("Ticks/sec: %.2f", ticksPerSecond);
+					ImGui::Text("Channels: %d", static_cast<int>(currentClip.Channels.size()));
+				}
 			}
 
 			if (ImGui::CollapsingHeader("Materials"))
@@ -543,31 +931,50 @@ namespace Editor
 		ImGui::End();
 	}
 
-	void EditorLayer::DrawProject()
+	void EditorLayer::DrawProject(EditorContext& context)
 	{
 		const ImGuiViewport* viewport = ImGui::GetMainViewport();
 		SetInitialWindowRect("Project", 8.0f, viewport->Size.y - 250.0f, viewport->Size.x * 0.42f, 240.0f);
 		ImGui::Begin("Project");
 
-		const std::filesystem::path rootPath("Assets");
-		std::error_code errorCode;
-		if (!std::filesystem::is_directory(rootPath, errorCode))
+		if (ImGui::Button("Refresh") && context.OnProjectRefresh)
 		{
-			ImGui::TextUnformatted("Assets");
+			context.OnProjectRefresh();
+		}
+		ImGui::SameLine();
+		ImGui::TextUnformatted(context.ProjectRefreshInProgress ? "Scanning..." : "Ready");
+
+		const auto snapshot = context.ProjectSnapshot;
+		if (!snapshot)
+		{
+			ImGui::TextUnformatted("Project snapshot is loading.");
+			ImGui::End();
+			return;
+		}
+
+		if (!snapshot->RootExists)
+		{
+			ImGui::Text("%s", snapshot->Status.c_str());
 			ImGui::End();
 			return;
 		}
 
 		ImGui::BeginChild("ProjectTree", ImVec2(0.0f, -86.0f), true);
-		const bool rootOpen = ImGui::TreeNodeEx("Assets", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_OpenOnArrow);
+		const std::string rootLabel = snapshot->RootPath.filename().empty()
+			? snapshot->RootPath.string()
+			: snapshot->RootPath.filename().string();
+		const bool rootOpen = ImGui::TreeNodeEx(rootLabel.c_str(), ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_OpenOnArrow);
 		if (rootOpen)
 		{
-			DrawDirectoryRecursive(rootPath, rootPath);
+			for (const auto& entry : snapshot->Children)
+			{
+				DrawProjectEntryRecursive(entry, context);
+			}
 			ImGui::TreePop();
 		}
 		ImGui::EndChild();
 
-		DrawSelectedAssetDetails(rootPath);
+		DrawSelectedAssetDetails(*snapshot, context);
 		ImGui::End();
 	}
 
@@ -593,6 +1000,11 @@ namespace Editor
 		SetInitialWindowRect("Console", viewport->Size.x * 0.76f, viewport->Size.y - 250.0f, viewport->Size.x * 0.23f, 240.0f);
 		ImGui::Begin("Console");
 		ImGui::Text("API: %s", GraphicsApiName(context.CurrentApi));
+		ImGui::Text("Project: %s", context.ProjectName.c_str());
+		if (!context.ProjectRootPath.empty())
+		{
+			ImGui::TextWrapped("Root: %s", context.ProjectRootPath.string().c_str());
+		}
 		ImGui::Text("Render Mode: %s", RenderModeToString(context.CurrentRenderMode).data());
 		ImGui::Text("Sample Mode: %s", SampleModeName(context.SampleMode));
 		if (const std::string* selectedEntityName = context.ActiveScene.GetEntityName(context.ActiveScene.GetSelectedEntity()))
@@ -603,55 +1015,70 @@ namespace Editor
 		{
 			ImGui::Text("Selected Asset: %s", m_SelectedAssetPath.filename().string().c_str());
 		}
+		if (context.AssetLogLines && !context.AssetLogLines->empty())
+		{
+			ImGui::Separator();
+			const size_t logCount = context.AssetLogLines->size();
+			const size_t firstLogIndex = logCount > 8 ? logCount - 8 : 0;
+			for (size_t logIndex = firstLogIndex; logIndex < logCount; ++logIndex)
+			{
+				ImGui::TextWrapped("%s", (*context.AssetLogLines)[logIndex].c_str());
+			}
+		}
 		ImGui::End();
 	}
 
-	void EditorLayer::DrawDirectoryRecursive(const std::filesystem::path& rootPath, const std::filesystem::path& directoryPath)
+	void EditorLayer::DrawProjectEntryRecursive(const Asset::AssetFileEntry& entry, EditorContext& context)
 	{
-		for (const std::filesystem::directory_entry& entry : SortedDirectoryEntries(directoryPath))
+		const std::filesystem::path entryPath = entry.Path;
+		const bool directory = entry.Kind == Asset::AssetFileKind::Directory;
+		std::string label = AssetKindTag(entry.Kind);
+		label.push_back(' ');
+		label.append(entry.Name);
+		label.append("##");
+		label.append(entryPath.string());
+
+		if (directory)
 		{
-			const std::filesystem::path entryPath = entry.path();
-			const std::string name = entryPath.filename().string();
-			if (IsDirectory(entry))
-			{
-				std::string label = "[D] ";
-				label.append(name);
-				label.append("##");
-				label.append(entryPath.string());
-				const bool open = ImGui::TreeNodeEx(label.c_str(), ImGuiTreeNodeFlags_OpenOnArrow);
-				if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
-				{
-					m_SelectedAssetPath = entryPath;
-				}
-				if (open)
-				{
-					DrawDirectoryRecursive(rootPath, entryPath);
-					ImGui::TreePop();
-				}
-				continue;
-			}
-
-			if (!IsRegularFile(entry))
-			{
-				continue;
-			}
-
-			std::string label = ExtensionTag(entryPath);
-			label.push_back(' ');
-			label.append(name);
-			label.append("##");
-			label.append(entryPath.string());
-			const bool selected = SamePath(m_SelectedAssetPath, entryPath);
-			if (ImGui::Selectable(label.c_str(), selected))
+			const bool open = ImGui::TreeNodeEx(label.c_str(), ImGuiTreeNodeFlags_OpenOnArrow);
+			if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
 			{
 				m_SelectedAssetPath = entryPath;
 			}
+			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && context.OnAssetOpen)
+			{
+				context.OnAssetOpen(entryPath);
+			}
+			if (open)
+			{
+				for (const auto& child : entry.Children)
+				{
+					DrawProjectEntryRecursive(child, context);
+				}
+				ImGui::TreePop();
+			}
+			return;
 		}
 
-		(void)rootPath;
+		const bool selected = SamePath(m_SelectedAssetPath, entryPath);
+		if (ImGui::Selectable(label.c_str(), selected))
+		{
+			m_SelectedAssetPath = entryPath;
+		}
+		if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && context.OnAssetOpen)
+		{
+			context.OnAssetOpen(entryPath);
+		}
+		if (entry.Kind == Asset::AssetFileKind::Model && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+		{
+			const std::string payloadPath = entryPath.string();
+			ImGui::SetDragDropPayload(kAssetPathPayload, payloadPath.c_str(), payloadPath.size() + 1);
+			ImGui::Text("Load %s", entry.Name.c_str());
+			ImGui::EndDragDropSource();
+		}
 	}
 
-	void EditorLayer::DrawSelectedAssetDetails(const std::filesystem::path& rootPath) const
+	void EditorLayer::DrawSelectedAssetDetails(const Asset::AssetFileSnapshot& snapshot, EditorContext& context) const
 	{
 		ImGui::Separator();
 		if (m_SelectedAssetPath.empty())
@@ -663,7 +1090,7 @@ namespace Editor
 		std::error_code errorCode;
 		const bool directory = std::filesystem::is_directory(m_SelectedAssetPath, errorCode);
 		const bool regularFile = std::filesystem::is_regular_file(m_SelectedAssetPath, errorCode);
-		ImGui::Text("Selected Asset: %s", RelativeDisplayPath(m_SelectedAssetPath, rootPath).c_str());
+		ImGui::Text("Selected Asset: %s", RelativeDisplayPath(m_SelectedAssetPath, snapshot.RootPath).c_str());
 		ImGui::Text("Type: %s", directory ? "Directory" : ExtensionTag(m_SelectedAssetPath));
 		if (regularFile)
 		{
@@ -671,6 +1098,24 @@ namespace Editor
 			if (!errorCode)
 			{
 				ImGui::Text("Size: %llu bytes", static_cast<unsigned long long>(fileSize));
+			}
+		}
+
+		if (ImGui::Button("Open") && context.OnAssetOpen)
+		{
+			context.OnAssetOpen(m_SelectedAssetPath);
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Reveal") && context.OnAssetReveal)
+		{
+			context.OnAssetReveal(m_SelectedAssetPath);
+		}
+		if (regularFile && Asset::IsModelAssetPath(m_SelectedAssetPath))
+		{
+			ImGui::SameLine();
+			if (ImGui::Button("Load Model") && context.OnModelDrop)
+			{
+				context.OnModelDrop(m_SelectedAssetPath, AssetDropTarget::Game);
 			}
 		}
 	}

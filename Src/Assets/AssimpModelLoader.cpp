@@ -809,6 +809,69 @@ namespace Asset
 			meshAsset->BindPoseVertices = meshAsset->Vertices;
 			return meshAsset;
 		}
+
+		void PopulateInspectionSummary(ModelInspectionSummary& summary, const aiScene* scene, std::string_view assimpError)
+		{
+			summary.AssimpError = assimpError;
+			if (!scene)
+			{
+				return;
+			}
+
+			summary.HasScene = true;
+			summary.HasRootNode = scene->mRootNode != nullptr;
+			summary.IsIncomplete = (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) != 0;
+			summary.HasAnimations = scene->HasAnimations();
+			summary.MeshCount = scene->mNumMeshes;
+			summary.MaterialCount = scene->mNumMaterials;
+			summary.AnimationCount = scene->mNumAnimations;
+
+			for (uint32_t meshIndex = 0; meshIndex < scene->mNumMeshes; ++meshIndex)
+			{
+				const aiMesh* mesh = scene->mMeshes[meshIndex];
+				if (!mesh)
+				{
+					continue;
+				}
+
+				summary.VertexCount += mesh->mNumVertices;
+				summary.FaceCount += mesh->mNumFaces;
+
+				bool hasTriangleFace = false;
+				for (uint32_t faceIndex = 0; faceIndex < mesh->mNumFaces; ++faceIndex)
+				{
+					const aiFace& face = mesh->mFaces[faceIndex];
+					summary.IndexCount += face.mNumIndices;
+					hasTriangleFace = hasTriangleFace || face.mNumIndices >= 3;
+				}
+
+				if (mesh->mNumVertices > 0 && hasTriangleFace)
+				{
+					++summary.RenderableMeshCount;
+				}
+			}
+		}
+	}
+
+	ModelInspectionSummary AssimpModelLoader::InspectModel(std::string_view filePath) const
+	{
+		ModelInspectionSummary summary = {};
+		try
+		{
+			Assimp::Importer importer;
+			const std::string path(filePath);
+			const aiScene* scene = importer.ReadFile(
+				path.c_str(),
+				aiProcess_Triangulate);
+
+			PopulateInspectionSummary(summary, scene, importer.GetErrorString());
+		}
+		catch (const std::exception& exception)
+		{
+			summary.AssimpError = exception.what();
+		}
+
+		return summary;
 	}
 
 	std::unique_ptr<StaticMeshAsset> AssimpModelLoader::LoadStaticMesh(std::string_view filePath) const
@@ -907,30 +970,17 @@ namespace Asset
 
 	bool AssimpModelLoader::HasAnimation(std::string_view filePath) const
 	{
-		try
+		const ModelInspectionSummary inspection = InspectModel(filePath);
+		if (!inspection.HasScene || !inspection.HasRootNode || inspection.IsIncomplete)
 		{
-			Assimp::Importer importer;
-			const aiScene* scene = importer.ReadFile(filePath.data(), aiProcess_ValidateDataStructure | aiProcess_Triangulate);
-			if (!scene || !scene->mRootNode || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) != 0)
-			{
-				std::string errorMessage = "Failed to inspect animation data for '";
-				errorMessage.append(filePath);
-				errorMessage.append("': ");
-				errorMessage.append(importer.GetErrorString());
-				LogAssimpMessage(errorMessage);
-				return true;
-			}
-
-			return scene->HasAnimations();
-		}
-		catch (const std::exception& exception)
-		{
-			std::string errorMessage = "Exception while inspecting animation data for '";
+			std::string errorMessage = "Failed to inspect animation data for '";
 			errorMessage.append(filePath);
 			errorMessage.append("': ");
-			errorMessage.append(exception.what());
+			errorMessage.append(inspection.AssimpError);
 			LogAssimpMessage(errorMessage);
 			return true;
 		}
+
+		return inspection.HasAnimations;
 	}
 }

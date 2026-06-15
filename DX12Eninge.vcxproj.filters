@@ -78,6 +78,9 @@
     <ClInclude Include="Src\Core\Engine\Engine.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
+    <ClInclude Include="Src\Core\Engine\EngineStartupOptions.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
     <ClInclude Include="Src\ECS\ComponentPool.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
@@ -114,10 +117,19 @@
     <ClInclude Include="Src\Math\Transform.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
+    <ClInclude Include="Src\Projects\ProjectService.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
     <ClInclude Include="Src\Scene\TransformComponent.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
     <ClInclude Include="Src\Scene\Scene.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Scene\SceneComponents.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Scene\SceneComponentStore.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
     <ClInclude Include="Src\Scene\PickingSystem.h">
@@ -133,6 +145,9 @@
       <Filter>헤더 파일</Filter>
     </ClInclude>
     <ClInclude Include="Src\Scene\SceneRenderState.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Scene\SceneTypes.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
     <ClInclude Include="Src\Rendering\Resources\MaterialTextureSystem.h">
@@ -169,6 +184,18 @@
       <Filter>헤더 파일</Filter>
     </ClInclude>
     <ClInclude Include="Src\Rendering\Systems\StaticMeshRenderer.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Assets\AssetFileSystem.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Assets\AssetHotReloadService.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Assets\AssetImportService.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Assets\RuntimeAssetRegistry.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
   </ItemGroup>
@@ -209,6 +236,9 @@
     <ClCompile Include="Src\Math\Camera.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
+    <ClCompile Include="Src\Projects\ProjectService.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
     <ClCompile Include="Src\Utilities\ShaderUtils.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
@@ -231,6 +261,18 @@
       <Filter>소스 파일</Filter>
     </ClCompile>
     <ClCompile Include="Src\Samples\Spider\SpiderSampleScene.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Assets\AssetFileSystem.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Assets\AssetHotReloadService.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Assets\AssetImportService.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Assets\RuntimeAssetRegistry.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
   </ItemGroup>

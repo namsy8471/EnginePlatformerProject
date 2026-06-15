@@ -53,25 +53,55 @@ namespace Rendering
 			return true;
 		}
 
-		const size_t textureCount = (std::max)(static_cast<size_t>(1), meshAsset->Materials.size());
-		materialTextures->resize(textureCount);
-		renderState.PrimaryMaterialTransparency.assign(textureCount, false);
+		if (!LoadCpuMaterialTextures(*meshAsset, *materialTextures, &renderState.PrimaryMaterialTransparency, logCallback))
+		{
+			return false;
+		}
+
+		if (logCallback)
+		{
+			std::string materialTextureSummaryLogMessage = "Material texture count=";
+			materialTextureSummaryLogMessage.append(std::to_string(materialTextures->size()));
+			logCallback(materialTextureSummaryLogMessage);
+		}
+
+		if (entityId != InvalidEntityId)
+		{
+			renderState.EntityMaterialTransparency[entityId] = renderState.PrimaryMaterialTransparency;
+		}
+
+		return true;
+	}
+
+	bool MaterialTextureSystem::LoadCpuMaterialTextures(
+		const Asset::StaticMeshAsset& meshAsset,
+		std::vector<CpuMaterialTexture>& materialTextures,
+		std::vector<bool>* materialTransparency,
+		const LogCallback& logCallback)
+	{
+		materialTextures.clear();
+
+		const size_t textureCount = (std::max)(static_cast<size_t>(1), meshAsset.Materials.size());
+		materialTextures.resize(textureCount);
+		if (materialTransparency)
+		{
+			materialTransparency->assign(textureCount, false);
+		}
 
 		for (size_t materialIndex = 0; materialIndex < textureCount; ++materialIndex)
 		{
-			auto& materialTexture = (*materialTextures)[materialIndex];
+			auto& materialTexture = materialTextures[materialIndex];
 			materialTexture.Path.clear();
 			materialTexture.Pixels = { 255, 255, 255, 255 };
 			materialTexture.Width = 1;
 			materialTexture.Height = 1;
-			renderState.PrimaryMaterialTransparency[materialIndex] = false;
 
-			if (materialIndex >= meshAsset->Materials.size())
+			if (materialIndex >= meshAsset.Materials.size())
 			{
 				continue;
 			}
 
-			const auto& material = meshAsset->Materials[materialIndex];
+			const auto& material = meshAsset.Materials[materialIndex];
 			if (!material.DiffuseTexturePath.empty() && std::filesystem::exists(material.DiffuseTexturePath))
 			{
 				int width = 0;
@@ -97,7 +127,10 @@ namespace Rendering
 				materialTexture.Height = height;
 				materialTexture.Pixels.assign(pixels, pixels + static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
 				stbi_image_free(pixels);
-				renderState.PrimaryMaterialTransparency[materialIndex] = HasTransparency(materialTexture);
+				if (materialTransparency && materialIndex < materialTransparency->size())
+				{
+					(*materialTransparency)[materialIndex] = HasTransparency(materialTexture);
+				}
 
 				if (logCallback)
 				{
@@ -118,7 +151,10 @@ namespace Rendering
 				materialTexture.Width = material.EmbeddedDiffuseTextureWidth;
 				materialTexture.Height = material.EmbeddedDiffuseTextureHeight;
 				materialTexture.Pixels = material.EmbeddedDiffuseTexturePixels;
-				renderState.PrimaryMaterialTransparency[materialIndex] = HasTransparency(materialTexture);
+				if (materialTransparency && materialIndex < materialTransparency->size())
+				{
+					(*materialTransparency)[materialIndex] = HasTransparency(materialTexture);
+				}
 
 				if (logCallback)
 				{
@@ -142,18 +178,6 @@ namespace Rendering
 				}
 				continue;
 			}
-		}
-
-		if (logCallback)
-		{
-			std::string materialTextureSummaryLogMessage = "Material texture count=";
-			materialTextureSummaryLogMessage.append(std::to_string(materialTextures->size()));
-			logCallback(materialTextureSummaryLogMessage);
-		}
-
-		if (entityId != InvalidEntityId)
-		{
-			renderState.EntityMaterialTransparency[entityId] = renderState.PrimaryMaterialTransparency;
 		}
 
 		return true;
