@@ -44,6 +44,8 @@ public:
 	[[nodiscard]] XMFLOAT3 GetForward() const noexcept { return m_Forward; }
 	[[nodiscard]] XMFLOAT3 GetRight() const noexcept { return m_Right; }
 	[[nodiscard]] XMFLOAT3 GetUp() const noexcept { return m_Up; }
+	[[nodiscard]] float GetFovY() const noexcept { return m_FovY; }
+	[[nodiscard]] float GetAspect() const noexcept { return m_Aspect; }
 	[[nodiscard]] const Math::Transform& GetTransform() const noexcept { return m_Transform; }
 
 	[[nodiscard]] XMMATRIX GetViewMatrix() const noexcept;

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="소스 파일">
@@ -15,67 +15,82 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="Src\WindowsCore\framework.h">
+    <ClInclude Include="Src\App\Win32\framework.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\WindowsCore\Resource.h">
+    <ClInclude Include="Src\App\Win32\Resource.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\WindowsCore\targetver.h">
+    <ClInclude Include="Src\App\Win32\targetver.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\EngineCore\GameApp.h">
+    <ClInclude Include="Src\App\Win32\GameApp.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\RHI\GraphicsCommon.h">
+    <ClInclude Include="Src\Rendering\RHI\GraphicsCommon.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\RHI\IGraphicsDevice.h">
+    <ClInclude Include="Src\Rendering\RHI\IGraphicsDevice.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\RHI\IGpuResource.h">
+    <ClInclude Include="Src\Rendering\RHI\IGpuResource.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\RHI\IBuffer.h">
+    <ClInclude Include="Src\Rendering\RHI\IBuffer.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\RHI\ICommandList.h">
+    <ClInclude Include="Src\Rendering\RHI\ICommandList.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\Platform\DirectX12\DX12Device.h">
+    <ClInclude Include="Src\Rendering\Backends\DirectX12\DX12Device.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\Platform\DirectX12\d3dx12.h">
+    <ClInclude Include="Src\Rendering\Backends\DirectX12\d3dx12.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\Platform\DirectX12\DX12CommandList.h">
+    <ClInclude Include="Src\Rendering\Backends\DirectX12\DX12CommandList.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\Utils\Utils.h">
+    <ClInclude Include="Src\Utilities\Utils.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\Platform\DirectX12\DX12Resource.h">
+    <ClInclude Include="Src\Rendering\Backends\DirectX12\DX12Resource.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\Platform\Vulkan\VulkanDevice.h">
+    <ClInclude Include="Src\Rendering\Backends\Vulkan\VulkanDevice.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\Platform\Vulkan\VulkanCommon.h">
+    <ClInclude Include="Src\Rendering\Backends\Vulkan\VulkanCommon.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\Platform\Vulkan\VulkanResource.h">
+    <ClInclude Include="Src\Rendering\Backends\Vulkan\VulkanResource.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\Platform\Vulkan\VulkanCommandList.h">
+    <ClInclude Include="Src\Rendering\Backends\Vulkan\VulkanCommandList.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\Platform\Vulkan\VulkanBuffer.h">
+    <ClInclude Include="Src\Rendering\Backends\Vulkan\VulkanBuffer.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\Platform\DirectX12\DX12Buffer.h">
+    <ClInclude Include="Src\Rendering\Backends\DirectX12\DX12Buffer.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\EngineCore\Engine.h">
+    <ClInclude Include="Src\Core\Engine\Engine.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\ECS\ComponentPool.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\ECS\ECS.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\ECS\ECSWorld.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\ECS\Entity.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\ECS\View.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
     <ClInclude Include="Src\Input\InputSystem.h">
@@ -87,10 +102,10 @@
     <ClInclude Include="Src\Utilities\ShaderUtils.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\Asset\StaticMesh.h">
+    <ClInclude Include="Src\Assets\StaticMesh.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\Asset\AssimpModelLoader.h">
+    <ClInclude Include="Src\Assets\AssimpModelLoader.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
     <ClInclude Include="Src\Math\MathHelpers.h">
@@ -99,54 +114,93 @@
     <ClInclude Include="Src\Math\Transform.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\EngineCore\TransformComponent.h">
+    <ClInclude Include="Src\Scene\TransformComponent.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\EngineCore\Scene.h">
+    <ClInclude Include="Src\Scene\Scene.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\EngineCore\PickingSystem.h">
+    <ClInclude Include="Src\Scene\PickingSystem.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\EngineCore\AnimationSystem.h">
+    <ClInclude Include="Src\Animation\AnimationSystem.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\EngineCore\RenderSystem.h">
+    <ClInclude Include="Src\Rendering\Systems\RenderSystem.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
-    <ClInclude Include="Src\EngineCore\SceneLoader.h">
+    <ClInclude Include="Src\Scene\SceneLoader.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Scene\SceneRenderState.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Rendering\Resources\MaterialTextureSystem.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Rendering\RenderMode.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Rendering\GraphicsRuntime.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Rendering\Debug\ImGuiDebugLayer.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Samples\Spider\SpiderSampleScene.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Samples\Benchmark\BenchmarkComponents.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Samples\Benchmark\BenchmarkRunner.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Samples\Benchmark\BenchmarkSimulation.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Samples\Benchmark\BenchmarkTypes.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Samples\Benchmark\EcsObjectStore.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Samples\Benchmark\NonEcsObjectStore.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Rendering\Systems\StaticMeshRenderer.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Src\WindowsCore\main.cpp">
+    <ClCompile Include="Src\App\Win32\main.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
-    <ClCompile Include="Src\EngineCore\GameApp.cpp">
+    <ClCompile Include="Src\App\Win32\GameApp.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
-    <ClCompile Include="Src\Platform\DirectX12\DX12Device.cpp">
+    <ClCompile Include="Src\Rendering\Backends\DirectX12\DX12Device.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
-    <ClCompile Include="Src\Platform\DirectX12\DX12CommandList.cpp">
+    <ClCompile Include="Src\Rendering\Backends\DirectX12\DX12CommandList.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
-    <ClCompile Include="Src\RHI\IGraphicsDevice.cpp">
+    <ClCompile Include="Src\Rendering\RHI\IGraphicsDevice.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
-    <ClCompile Include="Src\Platform\Vulkan\VulkanCommandList.cpp">
+    <ClCompile Include="Src\Rendering\Backends\Vulkan\VulkanCommandList.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
-    <ClCompile Include="Src\Platform\Vulkan\VulkanDevice.cpp">
+    <ClCompile Include="Src\Rendering\Backends\Vulkan\VulkanDevice.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
-    <ClCompile Include="Src\Platform\Vulkan\VulkanBuffer.cpp">
+    <ClCompile Include="Src\Rendering\Backends\Vulkan\VulkanBuffer.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
-    <ClCompile Include="Src\Platform\DirectX12\DX12Buffer.cpp">
+    <ClCompile Include="Src\Rendering\Backends\DirectX12\DX12Buffer.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
-    <ClCompile Include="Src\EngineCore\Engine.cpp">
+    <ClCompile Include="Src\Core\Engine\Engine.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
     <ClCompile Include="Src\Input\InputSystem.cpp">
@@ -158,12 +212,30 @@
     <ClCompile Include="Src\Utilities\ShaderUtils.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
-    <ClCompile Include="Src\Asset\AssimpModelLoader.cpp">
+    <ClCompile Include="Src\Assets\AssimpModelLoader.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Rendering\Resources\MaterialTextureSystem.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Rendering\Debug\ImGuiDebugLayer.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Samples\Benchmark\BenchmarkRunner.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Samples\Benchmark\EcsObjectStore.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Samples\Benchmark\NonEcsObjectStore.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Samples\Spider\SpiderSampleScene.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="Src\WindowsCore\DX12Eninge.rc">
+    <ResourceCompile Include="Src\App\Win32\DX12Eninge.rc">
       <Filter>리소스 파일</Filter>
     </ResourceCompile>
   </ItemGroup>
@@ -180,8 +252,8 @@
     <None Include=".github\copilot-instructions.md" />
     <None Include="Directory.Build.targets" />
     <None Include="vcpkg.json" />
-    <None Include="Src\Platform\Vulkan\Shaders\Triangle.frag" />
-    <None Include="Src\Platform\Vulkan\Shaders\Triangle.vert" />
-    <None Include="Src\Platform\DirectX12\Shaders\Triangle.hlsl" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\Triangle.frag" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\Triangle.vert" />
+    <None Include="Src\Rendering\Backends\DirectX12\Shaders\Triangle.hlsl" />
   </ItemGroup>
 </Project>

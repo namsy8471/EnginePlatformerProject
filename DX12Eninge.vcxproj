@@ -106,7 +106,7 @@
       <PreprocessorDefinitions>_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(SolutionDir)\Src;$(SolutionDir)\Src\WindowsCore;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)\Src;$(SolutionDir)\Src\App\Win32;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -122,7 +122,7 @@
       <PreprocessorDefinitions>NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(SolutionDir)\Src;$(SolutionDir)\Src\WindowsCore;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)\Src;$(SolutionDir)\Src\App\Win32;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -130,59 +130,83 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="Src\Asset\AssimpModelLoader.h" />
-    <ClInclude Include="Src\Asset\StaticMesh.h" />
-    <ClInclude Include="Src\EngineCore\AnimationSystem.h" />
-    <ClInclude Include="Src\EngineCore\Engine.h" />
-    <ClInclude Include="Src\EngineCore\PickingSystem.h" />
-    <ClInclude Include="Src\EngineCore\RenderSystem.h" />
-    <ClInclude Include="Src\EngineCore\Scene.h" />
-    <ClInclude Include="Src\EngineCore\SceneLoader.h" />
-    <ClInclude Include="Src\EngineCore\TransformComponent.h" />
+    <ClInclude Include="Src\Assets\AssimpModelLoader.h" />
+    <ClInclude Include="Src\Assets\StaticMesh.h" />
+    <ClInclude Include="Src\Animation\AnimationSystem.h" />
+    <ClInclude Include="Src\Core\Engine\Engine.h" />
+    <ClInclude Include="Src\ECS\ComponentPool.h" />
+    <ClInclude Include="Src\ECS\ECS.h" />
+    <ClInclude Include="Src\ECS\ECSWorld.h" />
+    <ClInclude Include="Src\ECS\Entity.h" />
+    <ClInclude Include="Src\ECS\View.h" />
+    <ClInclude Include="Src\Scene\PickingSystem.h" />
+    <ClInclude Include="Src\Rendering\Systems\RenderSystem.h" />
+    <ClInclude Include="Src\Scene\Scene.h" />
+    <ClInclude Include="Src\Scene\SceneLoader.h" />
+    <ClInclude Include="Src\Scene\SceneRenderState.h" />
+    <ClInclude Include="Src\Scene\TransformComponent.h" />
     <ClInclude Include="Src\Input\InputSystem.h" />
     <ClInclude Include="Src\Math\Camera.h" />
     <ClInclude Include="Src\Math\MathHelpers.h" />
     <ClInclude Include="Src\Math\Transform.h" />
-    <ClInclude Include="Src\Platform\DirectX12\DX12Buffer.h" />
-    <ClInclude Include="Src\Platform\DirectX12\DX12CommandList.h" />
-    <ClInclude Include="Src\EngineCore\GameApp.h" />
-    <ClInclude Include="Src\Platform\DirectX12\d3dx12.h" />
-    <ClInclude Include="Src\Platform\DirectX12\DX12Device.h" />
-    <ClInclude Include="Src\Platform\DirectX12\DX12Resource.h" />
-    <ClInclude Include="Src\Platform\Vulkan\VulkanBuffer.h" />
-    <ClInclude Include="Src\Platform\Vulkan\VulkanCommandList.h" />
-    <ClInclude Include="Src\Platform\Vulkan\VulkanCommon.h" />
-    <ClInclude Include="Src\Platform\Vulkan\VulkanDevice.h" />
-    <ClInclude Include="Src\Platform\Vulkan\VulkanResource.h" />
-    <ClInclude Include="Src\RHI\GraphicsCommon.h" />
-    <ClInclude Include="Src\RHI\IBuffer.h" />
-    <ClInclude Include="Src\RHI\ICommandList.h" />
-    <ClInclude Include="Src\RHI\IGpuResource.h" />
-    <ClInclude Include="Src\RHI\IGraphicsDevice.h" />
+    <ClInclude Include="Src\Rendering\Backends\DirectX12\DX12Buffer.h" />
+    <ClInclude Include="Src\Rendering\Backends\DirectX12\DX12CommandList.h" />
+    <ClInclude Include="Src\App\Win32\GameApp.h" />
+    <ClInclude Include="Src\Rendering\Backends\DirectX12\d3dx12.h" />
+    <ClInclude Include="Src\Rendering\Backends\DirectX12\DX12Device.h" />
+    <ClInclude Include="Src\Rendering\Backends\DirectX12\DX12Resource.h" />
+    <ClInclude Include="Src\Rendering\Backends\Vulkan\VulkanBuffer.h" />
+    <ClInclude Include="Src\Rendering\Backends\Vulkan\VulkanCommandList.h" />
+    <ClInclude Include="Src\Rendering\Backends\Vulkan\VulkanCommon.h" />
+    <ClInclude Include="Src\Rendering\Backends\Vulkan\VulkanDevice.h" />
+    <ClInclude Include="Src\Rendering\Backends\Vulkan\VulkanResource.h" />
+    <ClInclude Include="Src\Rendering\RHI\GraphicsCommon.h" />
+    <ClInclude Include="Src\Rendering\RHI\IBuffer.h" />
+    <ClInclude Include="Src\Rendering\RHI\ICommandList.h" />
+    <ClInclude Include="Src\Rendering\RHI\IGpuResource.h" />
+    <ClInclude Include="Src\Rendering\RHI\IGraphicsDevice.h" />
+    <ClInclude Include="Src\Rendering\GraphicsRuntime.h" />
+    <ClInclude Include="Src\Rendering\RenderMode.h" />
+    <ClInclude Include="Src\Rendering\Debug\ImGuiDebugLayer.h" />
+    <ClInclude Include="Src\Rendering\Resources\MaterialTextureSystem.h" />
+    <ClInclude Include="Src\Rendering\Systems\StaticMeshRenderer.h" />
+    <ClInclude Include="Src\Samples\Benchmark\BenchmarkComponents.h" />
+    <ClInclude Include="Src\Samples\Benchmark\BenchmarkRunner.h" />
+    <ClInclude Include="Src\Samples\Benchmark\BenchmarkSimulation.h" />
+    <ClInclude Include="Src\Samples\Benchmark\BenchmarkTypes.h" />
+    <ClInclude Include="Src\Samples\Benchmark\EcsObjectStore.h" />
+    <ClInclude Include="Src\Samples\Benchmark\NonEcsObjectStore.h" />
+    <ClInclude Include="Src\Samples\Spider\SpiderSampleScene.h" />
     <ClInclude Include="Src\Utilities\ShaderUtils.h" />
-    <ClInclude Include="Src\Utils\Utils.h" />
-    <ClInclude Include="Src\WindowsCore\framework.h" />
-    <ClInclude Include="Src\WindowsCore\Resource.h" />
-    <ClInclude Include="Src\WindowsCore\targetver.h" />
+    <ClInclude Include="Src\Utilities\Utils.h" />
+    <ClInclude Include="Src\App\Win32\framework.h" />
+    <ClInclude Include="Src\App\Win32\Resource.h" />
+    <ClInclude Include="Src\App\Win32\targetver.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Src\Asset\AssimpModelLoader.cpp" />
-    <ClCompile Include="Src\EngineCore\Engine.cpp" />
+    <ClCompile Include="Src\Assets\AssimpModelLoader.cpp" />
+    <ClCompile Include="Src\Core\Engine\Engine.cpp" />
     <ClCompile Include="Src\Input\InputSystem.cpp" />
     <ClCompile Include="Src\Math\Camera.cpp" />
-    <ClCompile Include="Src\Platform\DirectX12\DX12Buffer.cpp" />
-    <ClCompile Include="Src\Platform\DirectX12\DX12CommandList.cpp" />
-    <ClCompile Include="Src\EngineCore\GameApp.cpp" />
-    <ClCompile Include="Src\Platform\DirectX12\DX12Device.cpp" />
-    <ClCompile Include="Src\Platform\Vulkan\VulkanBuffer.cpp" />
-    <ClCompile Include="Src\Platform\Vulkan\VulkanCommandList.cpp" />
-    <ClCompile Include="Src\Platform\Vulkan\VulkanDevice.cpp" />
-    <ClCompile Include="Src\RHI\IGraphicsDevice.cpp" />
+    <ClCompile Include="Src\Rendering\Backends\DirectX12\DX12Buffer.cpp" />
+    <ClCompile Include="Src\Rendering\Backends\DirectX12\DX12CommandList.cpp" />
+    <ClCompile Include="Src\App\Win32\GameApp.cpp" />
+    <ClCompile Include="Src\Rendering\Backends\DirectX12\DX12Device.cpp" />
+    <ClCompile Include="Src\Rendering\Backends\Vulkan\VulkanBuffer.cpp" />
+    <ClCompile Include="Src\Rendering\Backends\Vulkan\VulkanCommandList.cpp" />
+    <ClCompile Include="Src\Rendering\Backends\Vulkan\VulkanDevice.cpp" />
+    <ClCompile Include="Src\Rendering\RHI\IGraphicsDevice.cpp" />
+    <ClCompile Include="Src\Rendering\Debug\ImGuiDebugLayer.cpp" />
+    <ClCompile Include="Src\Rendering\Resources\MaterialTextureSystem.cpp" />
+    <ClCompile Include="Src\Samples\Benchmark\BenchmarkRunner.cpp" />
+    <ClCompile Include="Src\Samples\Benchmark\EcsObjectStore.cpp" />
+    <ClCompile Include="Src\Samples\Benchmark\NonEcsObjectStore.cpp" />
+    <ClCompile Include="Src\Samples\Spider\SpiderSampleScene.cpp" />
     <ClCompile Include="Src\Utilities\ShaderUtils.cpp" />
-    <ClCompile Include="Src\WindowsCore\main.cpp" />
+    <ClCompile Include="Src\App\Win32\main.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="Src\WindowsCore\DX12Eninge.rc" />
+    <ResourceCompile Include="Src\App\Win32\DX12Eninge.rc" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="DX12Eninge.ico" />
@@ -192,12 +216,12 @@
     <None Include=".github\copilot-instructions.md" />
     <None Include="Directory.Build.props" />
     <None Include="Directory.Build.targets" />
-    <None Include="Src\Platform\Vulkan\Shaders\Triangle.frag" />
-    <None Include="Src\Platform\Vulkan\Shaders\Triangle.vert" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\Triangle.frag" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\Triangle.vert" />
     <None Include="vcpkg.json" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="Src\Platform\DirectX12\Shaders\Triangle.hlsl" />
+    <None Include="Src\Rendering\Backends\DirectX12\Shaders\Triangle.hlsl" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

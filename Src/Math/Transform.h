@@ -41,7 +41,8 @@ namespace Math
 			DirectX::XMFLOAT3 translation = ZeroVector3();
 			DirectX::XMFLOAT4 rotation = IdentityQuaternion();
 			DirectX::XMFLOAT3 scale = OneVector3();
-			DecomposeMatrix(matrix, translation, rotation, scale);
+			const bool decomposed = DecomposeMatrix(matrix, translation, rotation, scale);
+			(void)decomposed;
 			return Transform(translation, rotation, scale);
 		}
 
