@@ -134,6 +134,36 @@ namespace Asset
 				? "Likely cause: animated loader could not build skinned render geometry from this FBX."
 				: "Likely cause: static loader could not build render geometry from this model.");
 		}
+
+		void AppendMaterialDiagnostics(std::vector<std::string>& diagnostics, const StaticMeshAsset& mesh)
+		{
+			diagnostics.push_back(std::format("Material count: {}", mesh.Materials.size()));
+			for (size_t materialIndex = 0; materialIndex < mesh.Materials.size(); ++materialIndex)
+			{
+				const StaticMeshMaterial& material = mesh.Materials[materialIndex];
+				diagnostics.push_back(std::format(
+					"Material[{}] '{}' shadingModel={}",
+					materialIndex,
+					material.Name.empty() ? "<unnamed>" : material.Name,
+					MaterialShadingModelName(material.ShadingModel)));
+
+				for (size_t slotIndex = 0; slotIndex < kMaterialTextureSlotCount; ++slotIndex)
+				{
+					const auto slot = static_cast<MaterialTextureSlot>(slotIndex);
+					const MaterialTextureBinding& binding = material.TextureBindings[slotIndex];
+					if (!binding.HasSource())
+					{
+						continue;
+					}
+
+					diagnostics.push_back(std::format(
+						"  {}: {}{}",
+						MaterialTextureSlotName(slot),
+						binding.Path.empty() ? "<embedded>" : binding.Path.string(),
+						binding.IsOverride ? " (override)" : ""));
+				}
+			}
+		}
 	}
 
 	AssetImportService::AssetImportService()
@@ -151,7 +181,24 @@ namespace Asset
 
 	AssetImportService::~AssetImportService()
 	{
+		Shutdown();
+	}
+
+	void AssetImportService::Shutdown()
+	{
+		for (std::jthread& worker : m_Workers)
+		{
+			worker.request_stop();
+		}
 		m_Condition.notify_all();
+		for (std::jthread& worker : m_Workers)
+		{
+			if (worker.joinable())
+			{
+				worker.join();
+			}
+		}
+		m_Workers.clear();
 	}
 
 	void AssetImportService::Queue(AssetImportRequest request)
@@ -259,13 +306,17 @@ namespace Asset
 			*result.Mesh,
 			result.MaterialTextures,
 			&result.MaterialTransparency,
-			nullptr))
+			[&result](std::string_view message)
+			{
+				result.Diagnostics.emplace_back(message);
+			}))
 		{
 			result.ErrorMessage = std::format("Material texture decode failed: {}", result.SourcePath.string());
-			result.Diagnostics.push_back("Likely cause: one or more material diffuse/base-color textures failed CPU decode.");
+			result.Diagnostics.push_back("Likely cause: one or more material texture slots failed CPU decode.");
 			result.Mesh.reset();
 			return result;
 		}
+		AppendMaterialDiagnostics(result.Diagnostics, *result.Mesh);
 
 		result.Success = true;
 		return result;

@@ -56,6 +56,8 @@ namespace Asset
 			StaticMeshMaterial material;
 			material.Name = std::string(name);
 			material.DiffuseColor = { 1.0f, 1.0f, 1.0f, 1.0f };
+			material.ImportedDiffuseTint = material.DiffuseColor;
+			material.UseVertexColor = true;
 			mesh.Materials.push_back(std::move(material));
 
 			StaticMeshSubmesh submesh;

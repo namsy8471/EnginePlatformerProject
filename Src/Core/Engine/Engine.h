@@ -7,8 +7,17 @@
 #include "Assets/RuntimeAssetRegistry.h"
 #include "Editor/EditorLayer.h"
 #include "Core/Engine/EngineStartupOptions.h"
+#include "Jobs/FramePhaseScheduler.h"
+#include "Jobs/JobSystem.h"
+#include "Jobs/SceneCommandBuffer.h"
+#include "Materials/MaterialResource.h"
+#include "Materials/ShaderVariant.h"
 #include "Physics/PhysicsWorld.h"
 #include "Projects/ProjectService.h"
+#include "Rendering/Graph/RenderGraph.h"
+#include "Rendering/Lighting/ShadowSystem.h"
+#include "Rendering/Post/PostProcessSystem.h"
+#include "Resources/ResourceManager.h"
 #include "Scene/Scene.h"
 #include "Scene/ScenePersistenceService.h"
 #include "Rendering/RHI/IGraphicsDevice.h"
@@ -37,6 +46,7 @@
 struct ID3D12DescriptorHeap;
 using VkDescriptorPool = struct VkDescriptorPool_T*;
 struct CameraConstants;
+struct DeferredLightingConstants;
 
 class Engine : public GameApp
 {
@@ -53,6 +63,15 @@ protected:
 	void OnResize() override;
 
 private:
+	struct DeferredPassTimingIndices
+	{
+		size_t Geometry = static_cast<size_t>(-1);
+		size_t TileCulling = static_cast<size_t>(-1);
+		size_t Lighting = static_cast<size_t>(-1);
+		size_t PostProcess = static_cast<size_t>(-1);
+		size_t Transparency = static_cast<size_t>(-1);
+	};
+
 	// Graphics API 전환 및 관리
 	[[nodiscard]] bool SwitchGraphicsAPI(GraphicsAPI api);
 	void SwitchRenderMode(RenderMode renderMode);
@@ -65,13 +84,37 @@ private:
 
 	// DirectX12 리소스 관리
 	[[nodiscard]] bool CreateDx12TriangleResources();
+	[[nodiscard]] bool CreateDx12DeferredResources();
+	[[nodiscard]] bool EnsureDx12DeferredResources();
+	[[nodiscard]] bool CreateDx12ShadowResources();
+	[[nodiscard]] bool EnsureDx12ShadowResources();
+	void WriteDx12DeferredShadowSrv();
+	void WriteDx12DeferredHdrSrv();
 	void DestroyDx12TriangleResources();
+	void DestroyDx12DeferredResources();
+	void DestroyDx12ShadowResources();
+	void DrawDx12ShadowDepthPass(const Camera& camera);
+	void DrawDx12ToneMapPass(const Editor::ViewportPanelState& viewport);
 	void DrawDx12Triangle(const Camera& camera);
+	void DrawDx12DeferredTriangle(const Editor::ViewportPanelState& viewport, const Camera& camera, const DeferredPassTimingIndices& timings);
+	void DrawDx12ForwardTransparentPass(const Camera& camera);
 
 	// Vulkan 리소스 관리
 	[[nodiscard]] bool CreateVulkanTriangleResources();
+	[[nodiscard]] bool CreateVulkanDeferredResources();
+	[[nodiscard]] bool EnsureVulkanDeferredResources();
+	[[nodiscard]] bool CreateVulkanShadowResources();
+	[[nodiscard]] bool EnsureVulkanShadowResources();
+	void WriteVulkanDeferredShadowDescriptor();
+	void WriteVulkanToneMapDescriptor();
 	void DestroyVulkanTriangleResources();
+	void DestroyVulkanDeferredResources();
+	void DestroyVulkanShadowResources();
+	void DrawVulkanShadowDepthPass(const Camera& camera);
+	void DrawVulkanToneMapPass(const Editor::ViewportPanelState& viewport);
 	void DrawVulkanTriangle(const Camera& camera);
+	void DrawVulkanDeferredTriangle(const Editor::ViewportPanelState& viewport, const Camera& camera, const DeferredPassTimingIndices& timings);
+	void DrawVulkanForwardTransparentPass(const Camera& camera);
 
 	// 공통 리소스 관리
 	[[nodiscard]] bool LoadSpiderStaticMesh();
@@ -79,6 +122,19 @@ private:
 	[[nodiscard]] bool CreateIndexBuffer();
 	[[nodiscard]] bool EnsureGeometryBufferCapacity(size_t vertexCount, size_t indexCount);
 	[[nodiscard]] bool CreateCameraBuffer();
+	[[nodiscard]] bool CreateDeferredLightBuffer(uint32_t capacity);
+	[[nodiscard]] bool EnsureDeferredLightBufferCapacity(uint32_t lightCount);
+	[[nodiscard]] bool EnsureDeferredTileLightBufferCapacity(uint32_t tileCount, uint32_t lightReferenceCount);
+	[[nodiscard]] uint32_t UpdateDeferredLightBuffer();
+	[[nodiscard]] bool UpdateDeferredLightTiles(
+		const Camera& camera,
+		uint32_t viewportLeft,
+		uint32_t viewportTop,
+		uint32_t viewportWidth,
+		uint32_t viewportHeight,
+		uint32_t screenWidth,
+		uint32_t screenHeight);
+	[[nodiscard]] bool RefreshVulkanDeferredLightBufferDescriptors();
 	[[nodiscard]] bool LoadMaterialTextures();
 	[[nodiscard]] bool CreateTextureResources();
 	[[nodiscard]] bool CreateImGuiResources();
@@ -87,11 +143,18 @@ private:
 	void ResetCameraConstantAllocator() noexcept;
 	[[nodiscard]] uint64_t AllocateCameraConstantOffset() noexcept;
 	[[nodiscard]] uint64_t WriteCameraConstants(const CameraConstants& cameraConstants);
+	[[nodiscard]] uint64_t WriteDeferredLightingConstants(const DeferredLightingConstants& lightingConstants);
 	[[nodiscard]] uint64_t UpdateCameraBuffer();
 	[[nodiscard]] uint64_t UpdateCameraBuffer(EntityId entityId);
 	[[nodiscard]] uint64_t UpdateCameraBuffer(const Camera& camera);
 	[[nodiscard]] uint64_t UpdateCameraBuffer(EntityId entityId, const Camera& camera);
+	[[nodiscard]] uint64_t UpdateCameraBuffer(EntityId entityId, const Camera& camera, size_t materialIndex);
+	[[nodiscard]] uint64_t UpdateCameraBuffer(EntityId entityId, const Camera& camera, size_t materialIndex, bool useDeferredLighting);
+	[[nodiscard]] uint64_t UpdateShadowCameraBuffer(EntityId entityId);
 	void UploadEntityGeometry(EntityId entityId);
+	void InitializeJobSystem();
+	void ShutdownJobSystem();
+	void RunFramePhases(float deltaTime);
 	void UpdateAnimatedMesh(float deltaTime);
 	void UpdateObjectPicking();
 	[[nodiscard]] bool TryPickSpider(float mouseX, float mouseY) const;
@@ -101,7 +164,13 @@ private:
 	void RenderEditorDrawData();
 	void UpdateEditorCameraFromInput(float deltaTime);
 	void UpdateViewportCameraLenses();
-	void RenderWorldViewport(const Editor::ViewportPanelState& viewport, const Camera& camera);
+	void RenderWorldViewport(const Editor::ViewportPanelState& viewport, const Camera& camera, std::string_view label, bool isGameView);
+	void ResetRenderFrameStats();
+	void ResetViewCullingCache();
+	void BuildViewportVisibleRenderList(const Camera& camera, bool isGameView);
+	[[nodiscard]] bool ShouldSubmitEntityForCamera(EntityId entityId, const Camera& camera);
+	void RecordIndexedDraw(Rendering::DrawSubmissionKind kind, uint32_t indexCount, uint32_t instanceCount) noexcept;
+	void RecordFullscreenDraw(Rendering::DrawSubmissionKind kind, uint32_t vertexCount, uint32_t instanceCount) noexcept;
 	void FramePrimaryRenderableCamera();
 	void FrameSelectedEntityCamera();
 	void FrameEntityCamera(EntityId entityId);
@@ -124,6 +193,15 @@ private:
 	void OpenAssetPath(const std::filesystem::path& path);
 	void RevealAssetPath(const std::filesystem::path& path) const;
 	void AppendAssetLog(std::string message);
+	void RequestRendererRoadmapHealthLog() noexcept;
+	void LogRendererRoadmapHealthSnapshot();
+	void ConfigureResourceSystem();
+	[[nodiscard]] Resources::ResourceHandle DeclareResourceForPath(const std::filesystem::path& sourcePath, Resources::ResourceKind kind);
+	void MarkResourcePreparing(const std::filesystem::path& sourcePath, Resources::ResourceKind kind);
+	void MarkResourceLoaded(const std::filesystem::path& sourcePath, Resources::ResourceKind kind, uintmax_t loadedBytes);
+	void MarkResourceFailed(const std::filesystem::path& sourcePath, Resources::ResourceKind kind, std::string_view errorMessage);
+	void TouchShaderVariant(EntityId entityId, size_t materialIndex, bool useDeferredLighting);
+	[[nodiscard]] Materials::MaterialResourceStats BuildSceneMaterialResourceStats() const;
 	[[nodiscard]] Math::Transform BuildDroppedModelTransform(const Asset::AssetImportResult& result) const;
 	[[nodiscard]] static std::vector<std::filesystem::path> CollectWatchedTexturePaths(const std::vector<CpuMaterialTexture>& materialTextures);
 	[[nodiscard]] bool SaveCurrentScene();
@@ -133,6 +211,7 @@ private:
 	[[nodiscard]] bool ConfirmSaveDirtyScene();
 	[[nodiscard]] std::optional<std::filesystem::path> ShowOpenSceneDialog() const;
 	[[nodiscard]] std::optional<std::filesystem::path> ShowSaveSceneDialog() const;
+	[[nodiscard]] std::optional<std::filesystem::path> ShowOpenTextureDialog() const;
 	[[nodiscard]] std::filesystem::path GetDefaultScenePath() const;
 	void ClearProjectSceneRuntimeState();
 	void MarkSceneDirty();
@@ -149,6 +228,13 @@ private:
 	void AddComponentToEntity(EntityId entityId, SceneComponentKind kind);
 	void RemoveComponentFromEntity(EntityId entityId, SceneComponentKind kind);
 	void SetComponentEnabledForEntity(EntityId entityId, SceneComponentKind kind, bool enabled);
+	void SetMaterialShadingModel(EntityId entityId, size_t materialIndex, Asset::MaterialShadingModel model);
+	void AssignMaterialTexture(EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot, const std::filesystem::path& texturePath);
+	void ClearMaterialTexture(EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot);
+	void BrowseMaterialTexture(EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot);
+	void MarkMaterialEdited(EntityId entityId, size_t materialIndex);
+	[[nodiscard]] bool RefreshMaterialResourcesForEntity(EntityId entityId);
+	[[nodiscard]] std::filesystem::path NormalizeTexturePathForProject(const std::filesystem::path& texturePath);
 	void RenameEntityFromHierarchy(EntityId entityId, std::string_view name);
 	void DuplicateEntityFromHierarchy(EntityId entityId);
 	void DeleteEntityFromHierarchy(EntityId entityId);
@@ -180,11 +266,20 @@ private:
 	void SyncRuntimeCameraToGameCameraEntity();
 	void SyncGameCameraFromSceneEntity();
 	[[nodiscard]] bool IsGameCameraEntity(EntityId entityId) const noexcept;
+	[[nodiscard]] EntityId ResolveKeyLightEntity();
 
 
 	// 렌더링 리소스
 	Rendering::GraphicsRuntime m_Graphics;
 	Rendering::StaticMeshRenderer m_StaticMeshRenderer;
+	Rendering::RenderGraph m_RenderGraph;
+	Rendering::ShadowSettings m_ShadowSettings;
+	Rendering::ShadowFrameData m_ShadowFrameData;
+	Rendering::PostProcessSettings m_PostProcessSettings;
+	Rendering::RenderFrameStats m_RenderFrameStats;
+	Rendering::RenderFrameStats m_LastCompletedRenderFrameStats;
+	std::unordered_map<EntityId, bool> m_ViewCullingCache;
+	std::vector<EntityId> m_ViewportVisibleRenderEntities;
 	HWND m_hRenderWnd = nullptr;
 	Camera m_Camera;
 	Camera m_SceneCamera;
@@ -205,13 +300,26 @@ private:
 	Asset::AssetImportService m_AssetImportService;
 	Asset::AssetHotReloadService m_AssetHotReloadService;
 	Asset::RuntimeAssetRegistry m_RuntimeAssetRegistry;
+	Resources::ResourceManager m_ResourceManager;
+	Materials::ShaderVariantCache m_ShaderVariantCache;
 	Physics::PhysicsWorld m_PhysicsWorld;
+	Jobs::JobSystem m_JobSystem;
+	Jobs::FramePhaseScheduler m_PhaseScheduler;
+	Jobs::SceneCommandBuffer m_SceneCommandBuffer;
 	std::unordered_map<EntityId, Math::Transform> m_PhysicsSimulationSnapshot;
 	std::vector<std::string> m_AssetLogLines;
 	float m_LastDeltaTime = 1.0f / 60.0f;
+	DirectX::XMFLOAT3 m_AmbientColor = { 0.62f, 0.68f, 0.78f };
+	float m_AmbientIntensity = 0.35f;
+	float m_Exposure = 1.0f;
+	MaterialDebugView m_MaterialDebugView = MaterialDebugView::Lit;
+	bool m_ViewFrustumCullingEnabled = true;
 	bool m_SceneCameraControlActive = false;
 	bool m_SceneDirty = false;
 	bool m_PhysicsSimulationEnabled = false;
+	bool m_RoadmapHealthLogPending = true;
+	uint32_t m_SmokeRenderedFrameCount = 0;
+	bool m_SmokeShutdownRequested = false;
 
 	// 현재 렌더 모드 상태
 	RenderMode m_RenderMode = RenderMode::Forward;

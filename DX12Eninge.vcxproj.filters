@@ -234,6 +234,39 @@
     <ClInclude Include="Src\Memory\TrackedAllocator.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
+    <ClInclude Include="Src\Jobs\FramePhaseScheduler.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Jobs\JobSystem.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Jobs\SceneCommandBuffer.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Jobs\SystemInterfaces.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Resources\ResourceManager.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Resources\ResourceTypes.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Materials\MaterialResource.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Materials\ShaderVariant.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Rendering\Graph\RenderGraph.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Rendering\Lighting\ShadowSystem.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Rendering\Post\PostProcessSystem.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Src\App\Win32\main.cpp">
@@ -335,6 +368,33 @@
     <ClCompile Include="Src\Memory\TrackedAllocator.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
+    <ClCompile Include="Src\Jobs\FramePhaseScheduler.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Jobs\JobSystem.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Jobs\SceneCommandBuffer.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Resources\ResourceManager.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Materials\MaterialResource.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Materials\ShaderVariant.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Rendering\Graph\RenderGraph.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Rendering\Lighting\ShadowSystem.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Rendering\Post\PostProcessSystem.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Src\App\Win32\DX12Eninge.rc">
@@ -354,8 +414,19 @@
     <None Include=".github\copilot-instructions.md" />
     <None Include="Directory.Build.targets" />
     <None Include="vcpkg.json" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\DeferredGeometry.frag" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\DeferredGeometry.vert" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\DeferredLighting.frag" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\DeferredLighting.vert" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\ShadowDepth.vert" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\ToneMap.frag" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\ToneMap.vert" />
     <None Include="Src\Rendering\Backends\Vulkan\Shaders\Triangle.frag" />
     <None Include="Src\Rendering\Backends\Vulkan\Shaders\Triangle.vert" />
+    <None Include="Src\Rendering\Backends\DirectX12\Shaders\DeferredGeometry.hlsl" />
+    <None Include="Src\Rendering\Backends\DirectX12\Shaders\DeferredLighting.hlsl" />
+    <None Include="Src\Rendering\Backends\DirectX12\Shaders\ShadowDepth.hlsl" />
+    <None Include="Src\Rendering\Backends\DirectX12\Shaders\ToneMap.hlsl" />
     <None Include="Src\Rendering\Backends\DirectX12\Shaders\Triangle.hlsl" />
   </ItemGroup>
 </Project>

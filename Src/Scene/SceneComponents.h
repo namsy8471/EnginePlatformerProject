@@ -6,18 +6,45 @@
 
 #include <DirectXMath.h>
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
 
-struct CpuMaterialTexture
+struct CpuMaterialTextureSlot
 {
 	std::filesystem::path Path;
 	std::vector<unsigned char> Pixels = { 255, 255, 255, 255 };
 	int Width = 1;
 	int Height = 1;
+	bool Srgb = true;
+
+	[[nodiscard]] bool IsValid() const noexcept
+	{
+		return Width > 0 && Height > 0 && !Pixels.empty();
+	}
+};
+
+struct CpuMaterialTexture
+{
+	std::array<CpuMaterialTextureSlot, Asset::kMaterialTextureSlotCount> Slots = {};
+
+	[[nodiscard]] CpuMaterialTextureSlot& Slot(Asset::MaterialTextureSlot slot) noexcept
+	{
+		return Slots[Asset::MaterialTextureSlotIndex(slot)];
+	}
+
+	[[nodiscard]] const CpuMaterialTextureSlot& Slot(Asset::MaterialTextureSlot slot) const noexcept
+	{
+		return Slots[Asset::MaterialTextureSlotIndex(slot)];
+	}
+
+	[[nodiscard]] const std::filesystem::path& BaseColorPath() const noexcept
+	{
+		return Slot(Asset::MaterialTextureSlot::BaseColor).Path;
+	}
 };
 
 struct NameComponent
@@ -69,6 +96,10 @@ struct LightComponent
 	float Range = 200.0f;
 	float SpotAngle = DirectX::XM_PIDIV4;
 	bool Enabled = true;
+	bool CastShadows = true;
+	float ShadowBias = 0.0015f;
+	float ShadowNormalBias = 0.02f;
+	float ShadowStrength = 0.75f;
 };
 
 using RigidBodyComponent = Physics::RigidBodyComponent;

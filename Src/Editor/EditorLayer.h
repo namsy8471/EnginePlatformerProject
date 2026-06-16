@@ -1,14 +1,23 @@
 #pragma once
 
 #include "Assets/AssetFileSystem.h"
+#include "Jobs/JobSystem.h"
+#include "Materials/MaterialResource.h"
+#include "Materials/ShaderVariant.h"
 #include "Math/Camera.h"
 #include "Memory/MemoryTypes.h"
 #include "Rendering/RHI/GraphicsCommon.h"
+#include "Rendering/Graph/RenderGraph.h"
+#include "Rendering/Lighting/ShadowSystem.h"
+#include "Rendering/Post/PostProcessSystem.h"
 #include "Rendering/RenderMode.h"
+#include "Rendering/Systems/StaticMeshRenderer.h"
+#include "Resources/ResourceTypes.h"
 #include "Samples/Benchmark/BenchmarkRunner.h"
 #include "Scene/Scene.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -74,10 +83,40 @@ namespace Editor
 		std::shared_ptr<const Asset::AssetFileSnapshot> ProjectSnapshot;
 		const std::vector<std::string>* AssetLogLines = nullptr;
 		Memory::MemorySystemStats MemoryStats;
+		Jobs::JobSystemStats JobStats;
+		Resources::ResourceManagerStats ResourceStats;
+		Materials::MaterialResourceStats MaterialStats;
+		Materials::ShaderVariantCacheStats ShaderVariantStats;
+		Rendering::RenderGraphStats RenderGraphStats;
+		const std::vector<Rendering::RenderGraphPass>* RenderGraphPasses = nullptr;
+		Rendering::RenderFrameStats RenderFrameStats;
+		Rendering::ShadowSettings ShadowSettings;
+		Rendering::ShadowStats ShadowStats;
+		Rendering::PostProcessStats PostProcessStats;
+		uint32_t ForwardLightLimit = 0;
+		uint32_t SceneLightCount = 0;
+		uint32_t ForwardLightUsedCount = 0;
+		uint32_t ForwardLightTruncatedCount = 0;
+		bool UsesFallbackLight = false;
+		uint32_t DeferredLightCount = 0;
+		uint32_t DeferredLightBufferCapacity = 0;
+		uint32_t DeferredTileCountX = 0;
+		uint32_t DeferredTileCountY = 0;
+		uint32_t DeferredTileViewportCount = 0;
+		uint32_t DeferredTileCountTotal = 0;
+		uint32_t DeferredTileLightReferenceCount = 0;
+		uint32_t DeferredMaxTileLightCount = 0;
+		uint32_t DeferredFullTileLightCount = 0;
 		bool ProjectRefreshInProgress = false;
 		bool IsSceneDirty = false;
 		bool CanEditProjectScene = false;
 		bool PhysicsSimulationEnabled = false;
+		DirectX::XMFLOAT3 AmbientColor = { 0.62f, 0.68f, 0.78f };
+		float AmbientIntensity = 0.35f;
+		float Exposure = 1.0f;
+		float KeyLightIntensity = 3.25f;
+		MaterialDebugView DebugView = MaterialDebugView::Lit;
+		bool ViewFrustumCullingEnabled = true;
 		std::function<void(GraphicsAPI)> OnGraphicsApiChanged;
 		std::function<void(RenderMode)> OnRenderModeChanged;
 		std::function<void()> OnSaveScene;
@@ -102,6 +141,18 @@ namespace Editor
 		std::function<void(EntityId, SceneComponentKind)> OnComponentAdded;
 		std::function<void(EntityId, SceneComponentKind)> OnComponentRemoved;
 		std::function<void(EntityId, SceneComponentKind, bool)> OnComponentEnabledChanged;
+		std::function<void(EntityId, size_t, Asset::MaterialShadingModel)> OnMaterialShadingModelChanged;
+		std::function<void(EntityId, size_t, Asset::MaterialTextureSlot, const std::filesystem::path&)> OnMaterialTextureAssigned;
+		std::function<void(EntityId, size_t, Asset::MaterialTextureSlot)> OnMaterialTextureCleared;
+		std::function<void(EntityId, size_t, Asset::MaterialTextureSlot)> OnMaterialTextureBrowseRequested;
+		std::function<void(EntityId, size_t)> OnMaterialEdited;
+		std::function<void(const DirectX::XMFLOAT3&)> OnAmbientColorChanged;
+		std::function<void(float)> OnAmbientIntensityChanged;
+		std::function<void(float)> OnExposureChanged;
+		std::function<void(float)> OnKeyLightIntensityChanged;
+		std::function<void(MaterialDebugView)> OnMaterialDebugViewChanged;
+		std::function<void(bool)> OnViewFrustumCullingChanged;
+		std::function<void(const Rendering::ShadowSettings&)> OnShadowSettingsChanged;
 		std::function<void()> OnSceneEdited;
 		std::function<void(bool)> OnPhysicsSimulationChanged;
 		std::function<void(EntityId)> OnPhysicsActorDirty;

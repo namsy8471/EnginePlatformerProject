@@ -4,6 +4,9 @@
     VCPKG_ROOT 환경 변수를 기준으로 include/lib 경로를 자동 연결합니다.
   -->
   <PropertyGroup>
+    <!-- vcpkg 의존성은 아래의 명시적 include/lib 경로 해석으로 연결합니다. VS의 자동 vcpkg 통합은 중복 안내를 피하기 위해 끕니다. -->
+    <VcpkgEnabled>false</VcpkgEnabled>
+    <VcpkgEnableManifest>false</VcpkgEnableManifest>
     <VcpkgRoot>$([System.Environment]::GetEnvironmentVariable('VCPKG_ROOT'))</VcpkgRoot>
     <VcpkgTriplet Condition="'$(Platform)' == 'x64'">x64-windows</VcpkgTriplet>
     <VcpkgTriplet Condition="'$(Platform)' == 'Win32'">x86-windows</VcpkgTriplet>

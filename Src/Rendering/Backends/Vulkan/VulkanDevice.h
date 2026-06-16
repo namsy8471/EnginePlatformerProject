@@ -37,6 +37,7 @@ public:
 	VkDevice GetVkDevice() const { return m_device; }
 	VkPhysicalDevice GetVkPhysicalDevice() const { return m_physicalDevice; }
 	VkRenderPass GetVkRenderPass() const { return m_renderPass; }
+	VkRenderPass GetVkLoadRenderPass() const { return m_loadRenderPass; }
 	VkExtent2D GetVkSwapchainExtent() const { return m_swapchainExtent; }
 	uint32_t GetVkGraphicsQueueFamilyIndex() const { return m_graphicsQueueFamilyIndex; }
 	uint32_t GetVkSwapchainImageCount() const { return static_cast<uint32_t>(m_swapchainImages.size()); }
@@ -91,6 +92,7 @@ private:
 	void CreateCommandPool();
 	void CreateCommandBuffer();
 	void AcquireNextImage();
+	void ReleaseAcquiredImageForShutdown();
 	void ResetImageAvailableSemaphore();
 	void BeginFrameCommandRecording();
 	void EndFrameCommandRecording();
@@ -152,9 +154,11 @@ private:
 
 	// 렌더패스는 컬러/깊이 attachment를 어떤 순서로 사용하고 최종 상태를 어떻게 둘지 정의합니다.
 	VkRenderPass m_renderPass = VK_NULL_HANDLE;
+	VkRenderPass m_loadRenderPass = VK_NULL_HANDLE;
 
 	// 프레임버퍼는 특정 스왑체인 이미지 뷰와 depth 뷰를 렌더패스에 연결한 실제 렌더 대상입니다.
 	std::vector<VkFramebuffer> m_framebuffers;
+	std::vector<VkFramebuffer> m_loadFramebuffers;
 
 	// 깊이 버퍼는 컬러 스왑체인 이미지와 별도로 생성/소유하는 리소스입니다.
 	VkFormat m_depthFormat = VK_FORMAT_D32_SFLOAT;

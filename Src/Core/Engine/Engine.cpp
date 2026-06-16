@@ -14,6 +14,7 @@
 #include "Rendering/Backends/DirectX12/DX12Device.h"
 #include "Rendering/Backends/DirectX12/d3dx12.h"
 #include "Rendering/Backends/Vulkan/VulkanBuffer.h"
+#include "Rendering/Backends/Vulkan/VulkanCommandList.h"
 #include "Rendering/Backends/Vulkan/VulkanDevice.h"
 
 #include <commdlg.h>
@@ -39,6 +40,7 @@
 #include <cstdint>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <filesystem>
 #include <format>
 #include <limits>
@@ -106,6 +108,16 @@ namespace
 		return alignment > 0 ? ((value + alignment - 1) / alignment) * alignment : value;
 	}
 
+	template <typename Fn>
+	void MeasureRenderGraphPass(Rendering::RenderGraph& graph, size_t passIndex, Fn&& fn)
+	{
+		const auto begin = std::chrono::steady_clock::now();
+		std::forward<Fn>(fn)();
+		const auto end = std::chrono::steady_clock::now();
+		const std::chrono::duration<double, std::milli> elapsed = end - begin;
+		graph.SetPassCpuTime(passIndex, elapsed.count());
+	}
+
 	[[nodiscard]] constexpr std::string_view SceneComponentKindName(SceneComponentKind kind) noexcept
 	{
 		switch (kind)
@@ -156,7 +168,7 @@ namespace
 		return true;
 	}
 
-	[[nodiscard]] bool IsDirectStorageTextureCandidate(const CpuMaterialTexture& materialTexture) noexcept
+	[[nodiscard]] bool IsDirectStorageTextureCandidate(const CpuMaterialTextureSlot& materialTexture) noexcept
 	{
 		if (materialTexture.Path.empty())
 		{
@@ -166,6 +178,51 @@ namespace
 		const std::filesystem::path extension = materialTexture.Path.extension();
 		return _wcsicmp(extension.c_str(), L".dds") == 0;
 	}
+
+	[[nodiscard]] constexpr size_t MaterialSlotCount() noexcept
+	{
+		return Asset::kMaterialTextureSlotCount;
+	}
+
+	[[nodiscard]] size_t FlattenMaterialTextureIndex(size_t materialIndex, Asset::MaterialTextureSlot slot) noexcept
+	{
+		return materialIndex * MaterialSlotCount() + Asset::MaterialTextureSlotIndex(slot);
+	}
+
+	[[nodiscard]] size_t FlattenMaterialTextureIndex(size_t materialIndex, size_t slotIndex) noexcept
+	{
+		return materialIndex * MaterialSlotCount() + slotIndex;
+	}
+
+	[[nodiscard]] size_t MaterialCountFromFlattenedTextureCount(size_t textureCount) noexcept
+	{
+		return (std::max)(static_cast<size_t>(1), (textureCount + MaterialSlotCount() - 1) / MaterialSlotCount());
+	}
+
+	[[nodiscard]] const CpuMaterialTextureSlot& GetCpuMaterialTextureSlot(
+		std::span<const CpuMaterialTexture> materialTextures,
+		size_t materialIndex,
+		size_t slotIndex)
+	{
+		static const CpuMaterialTexture fallbackMaterialTexture = {};
+		if (materialIndex >= materialTextures.size() || slotIndex >= Asset::kMaterialTextureSlotCount)
+		{
+			return fallbackMaterialTexture.Slots[0];
+		}
+		return materialTextures[materialIndex].Slots[slotIndex];
+	}
+
+	[[nodiscard]] DXGI_FORMAT GetDx12TextureSrvFormat(const CpuMaterialTextureSlot& texture) noexcept
+	{
+		return texture.Srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+	}
+
+	[[nodiscard]] VkFormat GetVulkanTextureFormat(const CpuMaterialTextureSlot& texture) noexcept
+	{
+		return texture.Srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+	}
+
+	void ApplyMaterialOverrides(Asset::StaticMeshAsset& mesh, const std::vector<Asset::StaticMeshMaterial>& overrides);
 
 	// 삼각형 정점 데이터
 	struct TriangleVertex
@@ -276,6 +333,26 @@ namespace
 		return "Src/Rendering/Backends/DirectX12/Shaders/Triangle.hlsl";
 	}
 
+	[[nodiscard]] constexpr std::string_view GetDx12DeferredGeometryShaderPath() noexcept
+	{
+		return "Src/Rendering/Backends/DirectX12/Shaders/DeferredGeometry.hlsl";
+	}
+
+	[[nodiscard]] constexpr std::string_view GetDx12DeferredLightingShaderPath() noexcept
+	{
+		return "Src/Rendering/Backends/DirectX12/Shaders/DeferredLighting.hlsl";
+	}
+
+	[[nodiscard]] constexpr std::string_view GetDx12ShadowDepthShaderPath() noexcept
+	{
+		return "Src/Rendering/Backends/DirectX12/Shaders/ShadowDepth.hlsl";
+	}
+
+	[[nodiscard]] constexpr std::string_view GetDx12ToneMapShaderPath() noexcept
+	{
+		return "Src/Rendering/Backends/DirectX12/Shaders/ToneMap.hlsl";
+	}
+
 	[[nodiscard]] constexpr std::string_view GetVulkanVertexShaderPath() noexcept
 	{
 		return "Src/Rendering/Backends/Vulkan/Shaders/Triangle.vert";
@@ -284,6 +361,41 @@ namespace
 	[[nodiscard]] constexpr std::string_view GetVulkanFragmentShaderPath() noexcept
 	{
 		return "Src/Rendering/Backends/Vulkan/Shaders/Triangle.frag";
+	}
+
+	[[nodiscard]] constexpr std::string_view GetVulkanDeferredGeometryVertexShaderPath() noexcept
+	{
+		return "Src/Rendering/Backends/Vulkan/Shaders/DeferredGeometry.vert";
+	}
+
+	[[nodiscard]] constexpr std::string_view GetVulkanDeferredGeometryFragmentShaderPath() noexcept
+	{
+		return "Src/Rendering/Backends/Vulkan/Shaders/DeferredGeometry.frag";
+	}
+
+	[[nodiscard]] constexpr std::string_view GetVulkanDeferredLightingVertexShaderPath() noexcept
+	{
+		return "Src/Rendering/Backends/Vulkan/Shaders/DeferredLighting.vert";
+	}
+
+	[[nodiscard]] constexpr std::string_view GetVulkanDeferredLightingFragmentShaderPath() noexcept
+	{
+		return "Src/Rendering/Backends/Vulkan/Shaders/DeferredLighting.frag";
+	}
+
+	[[nodiscard]] constexpr std::string_view GetVulkanToneMapVertexShaderPath() noexcept
+	{
+		return "Src/Rendering/Backends/Vulkan/Shaders/ToneMap.vert";
+	}
+
+	[[nodiscard]] constexpr std::string_view GetVulkanToneMapFragmentShaderPath() noexcept
+	{
+		return "Src/Rendering/Backends/Vulkan/Shaders/ToneMap.frag";
+	}
+
+	[[nodiscard]] constexpr std::string_view GetVulkanShadowDepthVertexShaderPath() noexcept
+	{
+		return "Src/Rendering/Backends/Vulkan/Shaders/ShadowDepth.vert";
 	}
 
 	[[nodiscard]] constexpr std::string_view GraphicsApiToString(GraphicsAPI api) noexcept
@@ -494,14 +606,71 @@ Engine::Engine(HINSTANCE hInstance, EngineStartupOptions startupOptions)
 	: GameApp(hInstance),
 	m_StartupOptions(std::move(startupOptions))
 {
+	if (m_StartupOptions.SmokeGraphicsApi)
+	{
+		m_Graphics.CurrentApi = *m_StartupOptions.SmokeGraphicsApi;
+		m_PendingGraphicsApi = *m_StartupOptions.SmokeGraphicsApi;
+	}
+	if (m_StartupOptions.SmokeRenderMode)
+	{
+		m_RenderMode = *m_StartupOptions.SmokeRenderMode;
+	}
 }
 
 Engine::~Engine()
 {
+	if (m_StartupOptions.SmokeTestFrameLimit)
+	{
+		AppendAssetLog("Smoke shutdown: Engine destructor begin.");
+	}
+	m_AssetImportService.Shutdown();
+	if (m_StartupOptions.SmokeTestFrameLimit)
+	{
+		AppendAssetLog("Smoke shutdown: asset import service stopped.");
+	}
+	m_AssetHotReloadService.Shutdown();
+	if (m_StartupOptions.SmokeTestFrameLimit)
+	{
+		AppendAssetLog("Smoke shutdown: hot reload service stopped.");
+	}
+	ShutdownJobSystem();
+	if (m_StartupOptions.SmokeTestFrameLimit)
+	{
+		AppendAssetLog("Smoke shutdown: job system stopped.");
+	}
 	m_PhysicsWorld.Shutdown();
+	if (m_StartupOptions.SmokeTestFrameLimit)
+	{
+		AppendAssetLog("Smoke shutdown: physics stopped.");
+	}
 	ShutdownGraphics();
+	if (m_StartupOptions.SmokeTestFrameLimit)
+	{
+		AppendAssetLog("Smoke shutdown: graphics stopped.");
+	}
 	DestroyRenderWindow();
+	if (m_StartupOptions.SmokeTestFrameLimit)
+	{
+		AppendAssetLog("Smoke shutdown: render window destroyed.");
+	}
 	glslang_finalize_process();
+	if (m_StartupOptions.SmokeTestFrameLimit)
+	{
+		AppendAssetLog("Smoke shutdown: Engine destructor end.");
+	}
+}
+
+void Engine::InitializeJobSystem()
+{
+	m_JobSystem.Initialize();
+	m_PhaseScheduler.SetJobSystem(m_JobSystem);
+	AppendAssetLog(std::format("Job system initialized with {} workers.", m_JobSystem.GetWorkerCount()));
+}
+
+void Engine::ShutdownJobSystem()
+{
+	m_SceneCommandBuffer.Clear();
+	m_JobSystem.Shutdown();
 }
 
 EntityId Engine::CreateEntity(std::string_view name)
@@ -551,6 +720,8 @@ bool Engine::IsMaterialTransparent(EntityId entityId, size_t materialIndex) cons
 
 void Engine::QueueModelImport(const std::filesystem::path& sourcePath, const Camera& placementCamera, bool isReload)
 {
+	MarkResourcePreparing(sourcePath, Resources::ResourceKind::Mesh);
+
 	Asset::AssetImportPlacement placement;
 	placement.CameraPosition = placementCamera.GetPosition();
 	placement.CameraForward = placementCamera.GetForward();
@@ -574,6 +745,7 @@ void Engine::QueueModelImportForSceneEntity(const ScenePersistence::LoadedSceneE
 	{
 		return;
 	}
+	MarkResourcePreparing(loadedEntity.MeshAssetPath, Resources::ResourceKind::Mesh);
 
 	const uint64_t generation = m_RuntimeAssetRegistry.NextGeneration(loadedEntity.MeshAssetPath);
 	Asset::AssetImportRequest request;
@@ -587,6 +759,7 @@ void Engine::QueueModelImportForSceneEntity(const ScenePersistence::LoadedSceneE
 	request.Restore.EntityName = loadedEntity.Name;
 	request.Restore.LocalTransform = loadedEntity.Transform;
 	request.Restore.MeshEnabled = loadedEntity.MeshEnabled;
+	request.Restore.MaterialOverrides = loadedEntity.MaterialOverrides;
 	request.Restore.HasAnimator = loadedEntity.HasAnimator;
 	request.Restore.AnimatorEnabled = loadedEntity.AnimatorEnabled;
 	request.Restore.Animator = loadedEntity.Animator;
@@ -613,6 +786,7 @@ void Engine::QueueModelReload(const std::filesystem::path& sourcePath, const std
 	{
 		return;
 	}
+	MarkResourcePreparing(sourcePath, Resources::ResourceKind::Mesh);
 
 	Asset::AssetImportPlacement placement;
 	placement.HasPlacement = false;
@@ -648,6 +822,7 @@ void Engine::DrainCompletedAssetJobs()
 		if (!result.Success)
 		{
 			m_RuntimeAssetRegistry.UpdateStatus(result.SourcePath, result.ErrorMessage);
+			MarkResourceFailed(result.SourcePath, Resources::ResourceKind::Mesh, result.ErrorMessage);
 			AppendAssetLog(std::format("Asset job failed: {}", result.ErrorMessage));
 			for (const std::string& diagnostic : result.Diagnostics)
 			{
@@ -658,10 +833,18 @@ void Engine::DrainCompletedAssetJobs()
 
 		if (result.IsReload)
 		{
+			const uintmax_t loadedBytes = result.Mesh
+				? (result.Mesh->Vertices.size() * sizeof(Asset::StaticMeshVertex)) + (result.Mesh->Indices.size() * sizeof(uint32_t))
+				: 0;
+			MarkResourceLoaded(result.SourcePath, Resources::ResourceKind::Mesh, loadedBytes);
 			ApplyReloadedAsset(std::move(result));
 		}
 		else
 		{
+			const uintmax_t loadedBytes = result.Mesh
+				? (result.Mesh->Vertices.size() * sizeof(Asset::StaticMeshVertex)) + (result.Mesh->Indices.size() * sizeof(uint32_t))
+				: 0;
+			MarkResourceLoaded(result.SourcePath, Resources::ResourceKind::Mesh, loadedBytes);
 			ApplyImportedModel(std::move(result));
 		}
 	}
@@ -695,6 +878,19 @@ void Engine::ApplyImportedModel(Asset::AssetImportResult result)
 		TransformComponent& transform = m_Scene.EnsureTransformComponent(entityId);
 		transform.LocalTransform = result.Restore.LocalTransform;
 		transform.UpdateWorld();
+
+		if (!result.Restore.MaterialOverrides.empty())
+		{
+			ApplyMaterialOverrides(*result.Mesh, result.Restore.MaterialOverrides);
+			static_cast<void>(Rendering::MaterialTextureSystem::LoadCpuMaterialTextures(
+				*result.Mesh,
+				result.MaterialTextures,
+				&result.MaterialTransparency,
+				[this](std::string_view message)
+				{
+					AppendAssetLog(std::string(message));
+				}));
+		}
 
 		m_Scene.ReplaceEntityModel(entityId, std::move(result.Mesh), std::move(result.MaterialTextures), bounds);
 		static_cast<void>(m_Scene.SetMeshEnabled(entityId, result.Restore.MeshEnabled));
@@ -804,9 +1000,28 @@ void Engine::ApplyReloadedAsset(Asset::AssetImportResult result)
 	{
 		const bool hadAnimator = m_Scene.GetAnimatorComponent(entityId) != nullptr;
 		const bool animatorWasEnabled = hadAnimator && m_Scene.IsAnimatorEnabled(entityId);
+		std::vector<Asset::StaticMeshMaterial> existingMaterialOverrides;
+		if (const Asset::StaticMeshAsset* existingMesh = m_Scene.GetMeshAsset(entityId))
+		{
+			existingMaterialOverrides.assign(existingMesh->Materials.begin(), existingMesh->Materials.end());
+		}
 		auto meshCopy = std::make_unique<Asset::StaticMeshAsset>(*result.Mesh);
-		m_Scene.ReplaceEntityModel(entityId, std::move(meshCopy), result.MaterialTextures, bounds);
-		m_RenderState.EntityMaterialTransparency[entityId] = result.MaterialTransparency;
+		std::vector<CpuMaterialTexture> materialTextures = result.MaterialTextures;
+		std::vector<bool> materialTransparency = result.MaterialTransparency;
+		if (!existingMaterialOverrides.empty())
+		{
+			ApplyMaterialOverrides(*meshCopy, existingMaterialOverrides);
+			static_cast<void>(Rendering::MaterialTextureSystem::LoadCpuMaterialTextures(
+				*meshCopy,
+				materialTextures,
+				&materialTransparency,
+				[this](std::string_view message)
+				{
+					AppendAssetLog(std::string(message));
+				}));
+		}
+		m_Scene.ReplaceEntityModel(entityId, std::move(meshCopy), std::move(materialTextures), bounds);
+		m_RenderState.EntityMaterialTransparency[entityId] = materialTransparency;
 		const Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId);
 		if (!hadAnimator)
 		{
@@ -829,10 +1044,21 @@ void Engine::ApplyReloadedAsset(Asset::AssetImportResult result)
 		MarkPhysicsActorDirty(entityId);
 	}
 
-	std::vector<std::filesystem::path> watchedTexturePaths = CollectWatchedTexturePaths(result.MaterialTextures);
+	std::vector<std::filesystem::path> watchedTexturePaths;
 	for (EntityId entityId : entities)
 	{
-		m_RuntimeAssetRegistry.RegisterEntity(result.SourcePath, entityId, watchedTexturePaths, "Reloaded");
+		const auto* materialTextures = m_Scene.GetMaterialTextures(entityId);
+		const std::vector<std::filesystem::path> entityWatchedTexturePaths = materialTextures
+			? CollectWatchedTexturePaths(*materialTextures)
+			: std::vector<std::filesystem::path>{};
+		for (const std::filesystem::path& path : entityWatchedTexturePaths)
+		{
+			if (std::ranges::find(watchedTexturePaths, path) == watchedTexturePaths.end())
+			{
+				watchedTexturePaths.push_back(path);
+			}
+		}
+		m_RuntimeAssetRegistry.RegisterEntity(result.SourcePath, entityId, entityWatchedTexturePaths, "Reloaded");
 	}
 	m_AssetHotReloadService.WatchLoadedAsset(result.SourcePath, watchedTexturePaths);
 	AppendAssetLog(std::format("Hot reloaded {} entity instance(s): {}", entities.size(), result.SourcePath.string()));
@@ -881,11 +1107,237 @@ void Engine::RevealAssetPath(const std::filesystem::path& path) const
 void Engine::AppendAssetLog(std::string message)
 {
 	LogEngineTrace(message);
+	if (m_StartupOptions.SmokeLogPath)
+	{
+		std::error_code errorCode;
+		const std::filesystem::path parentPath = m_StartupOptions.SmokeLogPath->parent_path();
+		if (!parentPath.empty())
+		{
+			std::filesystem::create_directories(parentPath, errorCode);
+		}
+
+		std::ofstream smokeLog(*m_StartupOptions.SmokeLogPath, std::ios::app);
+		if (smokeLog)
+		{
+			smokeLog << message << '\n';
+		}
+	}
 	m_AssetLogLines.push_back(std::move(message));
 	if (m_AssetLogLines.size() > 200)
 	{
 		m_AssetLogLines.erase(m_AssetLogLines.begin(), m_AssetLogLines.begin() + static_cast<std::ptrdiff_t>(m_AssetLogLines.size() - 200));
 	}
+}
+
+void Engine::RequestRendererRoadmapHealthLog() noexcept
+{
+	m_RoadmapHealthLogPending = true;
+}
+
+void Engine::LogRendererRoadmapHealthSnapshot()
+{
+	if (!m_RoadmapHealthLogPending || m_LastCompletedRenderFrameStats.FrameIndex == 0)
+	{
+		return;
+	}
+
+	m_RoadmapHealthLogPending = false;
+
+	const Resources::ResourceManagerStats resourceStats = m_ResourceManager.GetStats();
+	const Materials::MaterialResourceStats materialStats = BuildSceneMaterialResourceStats();
+	const Materials::ShaderVariantCacheStats variantStats = m_ShaderVariantCache.GetStats();
+	const Rendering::RenderGraphStats graphStats = m_RenderGraph.GetStats();
+	const Rendering::RenderFrameStats& renderStats = m_LastCompletedRenderFrameStats;
+	const Rendering::ShadowStats shadowStats = Rendering::ShadowSystem::BuildStats(m_ShadowFrameData, m_ShadowSettings);
+	const bool hdrTargetAvailable =
+		(m_Graphics.CurrentApi == GraphicsAPI::DirectX12 && m_StaticMeshRenderer.Dx12.Deferred.HdrColorTexture != nullptr) ||
+		(m_Graphics.CurrentApi == GraphicsAPI::Vulkan && m_StaticMeshRenderer.Vulkan.Deferred.HdrColorImage != VK_NULL_HANDLE);
+	const Rendering::PostProcessStats postStats = Rendering::PostProcessSystem::BuildStats(m_PostProcessSettings, m_Graphics.CurrentApi, m_RenderMode, hdrTargetAvailable);
+	const uint32_t sceneLightCount = RenderSystem::CountSceneRenderableLights(m_Scene);
+	const uint32_t forwardLightUsedCount = sceneLightCount == 0
+		? 1u
+		: (std::min)(sceneLightCount, kMaxForwardGpuLights);
+	const uint32_t forwardLightTruncatedCount = sceneLightCount > kMaxForwardGpuLights
+		? sceneLightCount - kMaxForwardGpuLights
+		: 0u;
+
+	AppendAssetLog(std::format(
+		"Renderer roadmap health [{} | {} | frame {}]",
+		GraphicsApiToString(m_Graphics.CurrentApi),
+		RenderModeToString(m_RenderMode),
+		renderStats.FrameIndex));
+	AppendAssetLog(std::format(
+		"  1 Resource system: {} group(s), {} declared, {} loaded, {} failed",
+		resourceStats.GroupCount,
+		resourceStats.ResourceCount,
+		resourceStats.LoadedCount,
+		resourceStats.FailedCount));
+	AppendAssetLog(std::format(
+		"  2 Materials/variants: {} material(s), {} variant(s), {} request(s)",
+		materialStats.MaterialCount,
+		variantStats.VariantCount,
+		variantStats.RequestCount));
+	AppendAssetLog(std::format(
+		"  3 RenderGraph: {} / {} pass(es) enabled, deferred {}, HDR {}",
+		graphStats.EnabledPassCount,
+		graphStats.PassCount,
+		graphStats.UsesDeferred ? "yes" : "no",
+		graphStats.UsesHdr ? "yes" : "no"));
+	AppendAssetLog(std::format(
+		"  4 Shadows: enabled {}, caster {}, {} shadow draw call(s)",
+		shadowStats.Enabled ? "yes" : "no",
+		shadowStats.HasDirectionalCaster ? "yes" : "no",
+		renderStats.ShadowDrawCallCount));
+	AppendAssetLog(std::format(
+		"  5 HDR/post: HDR target {}, tone map {}, exposure {:.2f}",
+		postStats.UsesHdrTarget ? "yes" : "no",
+		postStats.ToneMappingEnabled ? postStats.ToneMapper : std::string_view("off"),
+		postStats.Exposure));
+	AppendAssetLog(std::format(
+		"  6 Lights: Forward {} / {} used, {} truncated, Deferred {} active / {} capacity",
+		forwardLightUsedCount,
+		kMaxForwardGpuLights,
+		forwardLightTruncatedCount,
+		m_StaticMeshRenderer.DeferredLightCount,
+		m_StaticMeshRenderer.DeferredLightBufferCapacity));
+	AppendAssetLog(std::format(
+		"  7 Deferred tiles: {} viewport pass(es), {} tile(s), {} light reference(s), max {}",
+		renderStats.DeferredTileViewportCount,
+		renderStats.DeferredTileCountTotal,
+		renderStats.DeferredTileLightReferenceCount,
+		renderStats.DeferredMaxTileLightCount));
+	AppendAssetLog(std::format(
+		"  8 Pass timings: {} timed pass(es), {:.3f} ms exclusive sum",
+		graphStats.TimedPassCount,
+		graphStats.TotalCpuMs));
+	AppendAssetLog(std::format(
+		"  9 Render stats: {} draw call(s), {} triangle(s), {} instance(s)",
+		renderStats.DrawCallCount,
+		renderStats.SubmittedTriangleCount,
+		renderStats.SubmittedInstanceCount));
+	AppendAssetLog(std::format(
+		" 10 Frustum culling: {}, {} request(s), {} test(s), {} culled result(s)",
+		m_ViewFrustumCullingEnabled ? "on" : "off",
+		renderStats.ViewCullingRequestCount,
+		renderStats.ViewCullingTestCount,
+		renderStats.ViewCulledEntityCount));
+}
+
+void Engine::ConfigureResourceSystem()
+{
+	m_ResourceManager.Reset();
+	const std::filesystem::path assetRoot = m_Project
+		? (m_Project->RootPath / m_Project->AssetRoot).lexically_normal()
+		: std::filesystem::path("Assets").lexically_normal();
+	const std::string groupName = m_Project ? "Project" : "Development";
+
+	m_ResourceManager.SetRootPath(assetRoot);
+	m_ResourceManager.EnsureGroup(groupName);
+	m_ResourceManager.AddResourceLocation(groupName, assetRoot, "FileSystem", true);
+	const size_t declaredCount = m_ResourceManager.DeclareResourcesFromDirectory(assetRoot, groupName);
+	const Resources::ResourceManagerStats stats = m_ResourceManager.GetStats();
+	AppendAssetLog(std::format(
+		"Resource system mounted {} [{} group(s), {} declared resource(s), {:.2f} MB indexed].",
+		assetRoot.string(),
+		stats.GroupCount,
+		declaredCount,
+		static_cast<double>(stats.DeclaredBytes) / (1024.0 * 1024.0)));
+}
+
+Resources::ResourceHandle Engine::DeclareResourceForPath(const std::filesystem::path& sourcePath, Resources::ResourceKind kind)
+{
+	if (auto existing = m_ResourceManager.FindByPath(sourcePath))
+	{
+		return *existing;
+	}
+
+	std::error_code errorCode;
+	const bool regularFile = std::filesystem::is_regular_file(sourcePath, errorCode);
+	const uintmax_t sizeBytes = regularFile ? std::filesystem::file_size(sourcePath, errorCode) : 0;
+	const std::string groupName = m_Project ? "Project" : "Development";
+	return m_ResourceManager.DeclareResource(Resources::ResourceDeclaration{
+		.Name = sourcePath.filename().string(),
+		.SourcePath = sourcePath,
+		.Kind = kind,
+		.GroupName = groupName,
+		.SizeBytes = errorCode ? 0 : sizeBytes
+		});
+}
+
+void Engine::MarkResourcePreparing(const std::filesystem::path& sourcePath, Resources::ResourceKind kind)
+{
+	const Resources::ResourceHandle handle = DeclareResourceForPath(sourcePath, kind);
+	if (handle)
+	{
+		m_ResourceManager.MarkPreparing(handle);
+	}
+}
+
+void Engine::MarkResourceLoaded(const std::filesystem::path& sourcePath, Resources::ResourceKind kind, uintmax_t loadedBytes)
+{
+	const Resources::ResourceHandle handle = DeclareResourceForPath(sourcePath, kind);
+	if (handle)
+	{
+		m_ResourceManager.MarkLoaded(handle, loadedBytes);
+	}
+}
+
+void Engine::MarkResourceFailed(const std::filesystem::path& sourcePath, Resources::ResourceKind kind, std::string_view errorMessage)
+{
+	const Resources::ResourceHandle handle = DeclareResourceForPath(sourcePath, kind);
+	if (handle)
+	{
+		m_ResourceManager.MarkFailed(handle, std::string(errorMessage));
+	}
+}
+
+void Engine::TouchShaderVariant(EntityId entityId, size_t materialIndex, bool useDeferredLighting)
+{
+	const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+	if (!meshAsset || materialIndex >= meshAsset->Materials.size())
+	{
+		return;
+	}
+
+	const bool transparent = IsMaterialTransparent(entityId, materialIndex);
+	const bool deferredOpaque = m_RenderMode == RenderMode::Deferred && !transparent;
+	const bool deferredGeometry = deferredOpaque && !useDeferredLighting;
+	const bool deferredLighting = deferredOpaque && useDeferredLighting;
+	const bool skinned = meshAsset->IsAnimated && !meshAsset->Bones.empty();
+	static_cast<void>(m_ShaderVariantCache.GetOrCreate(Materials::BuildShaderVariantKey(
+		m_Graphics.CurrentApi,
+		m_RenderMode,
+		meshAsset->Materials[materialIndex],
+		m_MaterialDebugView,
+		transparent,
+		skinned,
+		false,
+		deferredGeometry,
+		deferredLighting)));
+}
+
+Materials::MaterialResourceStats Engine::BuildSceneMaterialResourceStats() const
+{
+	Materials::MaterialResourceStats totalStats;
+	for (const SceneEntity& entity : m_Scene.GetEntities())
+	{
+		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entity.Id);
+		if (!meshAsset)
+		{
+			continue;
+		}
+
+		const std::vector<Materials::MaterialResource> materialResources = Materials::BuildMaterialResources(*meshAsset);
+		const Materials::MaterialResourceStats stats = Materials::BuildMaterialResourceStats(materialResources);
+		totalStats.MaterialCount += stats.MaterialCount;
+		totalStats.TextureSlotCount += stats.TextureSlotCount;
+		totalStats.OverrideSlotCount += stats.OverrideSlotCount;
+		totalStats.EmbeddedSlotCount += stats.EmbeddedSlotCount;
+		totalStats.PbrCount += stats.PbrCount;
+		totalStats.PhongCount += stats.PhongCount;
+		totalStats.UnlitCount += stats.UnlitCount;
+	}
+	return totalStats;
 }
 
 Math::Transform Engine::BuildDroppedModelTransform(const Asset::AssetImportResult& result) const
@@ -936,6 +1388,20 @@ namespace
 		}
 		return bounds;
 	}
+
+	void ApplyMaterialOverrides(Asset::StaticMeshAsset& mesh, const std::vector<Asset::StaticMeshMaterial>& overrides)
+	{
+		const size_t overrideCount = (std::min)(mesh.Materials.size(), overrides.size());
+		for (size_t materialIndex = 0; materialIndex < overrideCount; ++materialIndex)
+		{
+			const std::string importedName = mesh.Materials[materialIndex].Name;
+			mesh.Materials[materialIndex] = overrides[materialIndex];
+			if (mesh.Materials[materialIndex].Name.empty())
+			{
+				mesh.Materials[materialIndex].Name = importedName;
+			}
+		}
+	}
 }
 
 std::vector<std::filesystem::path> Engine::CollectWatchedTexturePaths(const std::vector<CpuMaterialTexture>& materialTextures)
@@ -943,9 +1409,12 @@ std::vector<std::filesystem::path> Engine::CollectWatchedTexturePaths(const std:
 	std::vector<std::filesystem::path> paths;
 	for (const auto& materialTexture : materialTextures)
 	{
-		if (!materialTexture.Path.empty() && std::ranges::find(paths, materialTexture.Path) == paths.end())
+		for (const CpuMaterialTextureSlot& slotTexture : materialTexture.Slots)
 		{
-			paths.push_back(materialTexture.Path);
+			if (!slotTexture.Path.empty() && std::ranges::find(paths, slotTexture.Path) == paths.end())
+			{
+				paths.push_back(slotTexture.Path);
+			}
 		}
 	}
 	return paths;
@@ -965,7 +1434,15 @@ bool Engine::SaveCurrentScene()
 	}
 
 	std::string errorMessage;
-	if (!ScenePersistence::ScenePersistenceService::SaveScene(m_Scene, m_RenderState, *m_Project, m_CurrentScenePath, errorMessage))
+	if (!ScenePersistence::ScenePersistenceService::SaveScene(
+		m_Scene,
+		m_RenderState,
+		*m_Project,
+		m_CurrentScenePath,
+		m_AmbientColor,
+		m_AmbientIntensity,
+		m_Exposure,
+		errorMessage))
 	{
 		AppendAssetLog(std::format("Scene save failed: {}", errorMessage));
 		const std::wstring message(errorMessage.begin(), errorMessage.end());
@@ -1025,6 +1502,9 @@ bool Engine::OpenSceneFromPath(const std::filesystem::path& scenePath, bool prom
 	m_CurrentScenePath = std::filesystem::absolute(scenePath).lexically_normal();
 	m_SampleMode = Samples::Benchmark::SampleMode::ProjectScene;
 	m_LastSampleMode = m_SampleMode;
+	m_AmbientColor = loadResult.AmbientColor;
+	m_AmbientIntensity = loadResult.AmbientIntensity;
+	m_Exposure = loadResult.Exposure;
 
 	for (const ScenePersistence::LoadedSceneEntity& loadedEntity : loadResult.Entities)
 	{
@@ -1066,6 +1546,14 @@ bool Engine::OpenSceneFromPath(const std::filesystem::path& scenePath, bool prom
 			if (loadedEntity.PrimitiveKind != Asset::PrimitiveMeshKind::None)
 			{
 				static_cast<void>(ApplyPrimitiveMeshToEntity(entityId, loadedEntity.PrimitiveKind, loadedEntity.Transform, false));
+				if (!loadedEntity.MaterialOverrides.empty())
+				{
+					if (Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId))
+					{
+						ApplyMaterialOverrides(*meshAsset, loadedEntity.MaterialOverrides);
+						static_cast<void>(RefreshMaterialResourcesForEntity(entityId));
+					}
+				}
 				static_cast<void>(m_Scene.SetMeshEnabled(entityId, loadedEntity.MeshEnabled));
 			}
 			else if (!loadedEntity.MeshAssetPath.empty())
@@ -1188,6 +1676,30 @@ std::optional<std::filesystem::path> Engine::ShowSaveSceneDialog() const
 	};
 
 	if (!GetSaveFileNameW(&openFileName))
+	{
+		return std::nullopt;
+	}
+
+	return std::filesystem::path(filePathBuffer);
+}
+
+std::optional<std::filesystem::path> Engine::ShowOpenTextureDialog() const
+{
+	wchar_t filePathBuffer[MAX_PATH] = {};
+	const std::filesystem::path initialDirectory = m_Project
+		? m_Project->RootPath / m_Project->AssetRoot
+		: std::filesystem::current_path();
+	OPENFILENAMEW openFileName = {
+		.lStructSize = sizeof(OPENFILENAMEW),
+		.hwndOwner = m_hMainWnd,
+		.lpstrFilter = L"Texture Files (*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.dds)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.dds\0All Files (*.*)\0*.*\0",
+		.lpstrFile = filePathBuffer,
+		.nMaxFile = static_cast<DWORD>(std::size(filePathBuffer)),
+		.lpstrInitialDir = initialDirectory.c_str(),
+		.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR
+	};
+
+	if (!GetOpenFileNameW(&openFileName))
 	{
 		return std::nullopt;
 	}
@@ -1549,6 +2061,9 @@ void Engine::AddComponentToEntity(EntityId entityId, SceneComponentKind kind)
 		{
 			LightComponent& light = m_Scene.EnsureLightComponent(entityId);
 			light.Type = LightType::Directional;
+			light.Color = { 1.0f, 0.95f, 0.82f };
+			light.Intensity = 3.25f;
+			light.Range = 450.0f;
 			light.Enabled = true;
 			added = true;
 		}
@@ -1722,6 +2237,211 @@ void Engine::SetComponentEnabledForEntity(EntityId entityId, SceneComponentKind 
 	}
 	MarkSceneDirty();
 	AppendAssetLog(std::format("{} {} component on entity {}", enabled ? "Enabled" : "Disabled", SceneComponentKindName(kind), entityId));
+}
+
+std::filesystem::path Engine::NormalizeTexturePathForProject(const std::filesystem::path& texturePath)
+{
+	if (texturePath.empty())
+	{
+		return {};
+	}
+
+	std::error_code errorCode;
+	const std::filesystem::path normalizedSource = std::filesystem::weakly_canonical(texturePath, errorCode).lexically_normal();
+	const std::filesystem::path sourcePath = errorCode ? std::filesystem::absolute(texturePath).lexically_normal() : normalizedSource;
+	if (!m_Project)
+	{
+		return sourcePath;
+	}
+
+	const std::filesystem::path rawAssetRoot = m_Project->RootPath / m_Project->AssetRoot;
+	std::filesystem::path assetRoot = std::filesystem::weakly_canonical(rawAssetRoot, errorCode).lexically_normal();
+	if (errorCode)
+	{
+		assetRoot = std::filesystem::absolute(rawAssetRoot).lexically_normal();
+		errorCode.clear();
+	}
+	const std::filesystem::path relativePath = std::filesystem::relative(sourcePath, assetRoot, errorCode);
+	if (!errorCode)
+	{
+		bool insideAssets = true;
+		for (const auto& part : relativePath)
+		{
+			if (part == "..")
+			{
+				insideAssets = false;
+				break;
+			}
+		}
+		if (insideAssets)
+		{
+			return sourcePath;
+		}
+	}
+
+	const std::filesystem::path importDirectory = assetRoot / "Textures" / "Imported";
+	std::filesystem::create_directories(importDirectory, errorCode);
+	if (errorCode)
+	{
+		AppendAssetLog(std::format("Texture import directory create failed: {}", errorCode.message()));
+		return sourcePath;
+	}
+
+	std::filesystem::path destination = importDirectory / sourcePath.filename();
+	const std::string stem = sourcePath.stem().string();
+	const std::string extension = sourcePath.extension().string();
+	for (uint32_t suffix = 1; std::filesystem::exists(destination, errorCode); ++suffix)
+	{
+		destination = importDirectory / std::format("{}_{}{}", stem, suffix, extension);
+	}
+
+	std::filesystem::copy_file(sourcePath, destination, std::filesystem::copy_options::overwrite_existing, errorCode);
+	if (errorCode)
+	{
+		AppendAssetLog(std::format("External texture copy failed: {} ({})", sourcePath.string(), errorCode.message()));
+		return sourcePath;
+	}
+
+	AppendAssetLog(std::format("Imported external texture: {}", destination.string()));
+	m_AssetFileSystem.RequestRefresh();
+	return destination.lexically_normal();
+}
+
+bool Engine::RefreshMaterialResourcesForEntity(EntityId entityId)
+{
+	Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId);
+	std::vector<CpuMaterialTexture>* materialTextures = m_Scene.GetMaterialTextures(entityId);
+	if (!meshAsset || !materialTextures)
+	{
+		return false;
+	}
+
+	std::vector<bool> materialTransparency;
+	if (!Rendering::MaterialTextureSystem::LoadCpuMaterialTextures(
+		*meshAsset,
+		*materialTextures,
+		&materialTransparency,
+		[this](std::string_view message)
+		{
+			AppendAssetLog(std::string(message));
+		}))
+	{
+		AppendAssetLog(std::format("Material texture reload failed for entity {}", entityId));
+		return false;
+	}
+
+	m_RenderState.EntityMaterialTransparency[entityId] = materialTransparency;
+	if (entityId == m_Scene.GetPrimaryRenderableEntity())
+	{
+		m_RenderState.PrimaryMaterialTransparency = materialTransparency;
+	}
+
+	if (!RecreateTextureResourcesForEntity(entityId))
+	{
+		AppendAssetLog(std::format("GPU material texture recreate failed for entity {}", entityId));
+		return false;
+	}
+
+	if (!meshAsset->SourcePath.empty())
+	{
+		const std::vector<std::filesystem::path> watchedTexturePaths = CollectWatchedTexturePaths(*materialTextures);
+		m_RuntimeAssetRegistry.RegisterEntity(meshAsset->SourcePath, entityId, watchedTexturePaths, "Material Edited");
+		m_AssetHotReloadService.WatchLoadedAsset(meshAsset->SourcePath, watchedTexturePaths);
+	}
+
+	MarkSceneDirty();
+	return true;
+}
+
+void Engine::SetMaterialShadingModel(EntityId entityId, size_t materialIndex, Asset::MaterialShadingModel model)
+{
+	Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId);
+	if (!meshAsset || materialIndex >= meshAsset->Materials.size())
+	{
+		return;
+	}
+
+	meshAsset->Materials[materialIndex].ShadingModel = model;
+	static_cast<void>(RefreshMaterialResourcesForEntity(entityId));
+	AppendAssetLog(std::format(
+		"Material shading model changed - Entity={} Material={} Model={}",
+		entityId,
+		materialIndex,
+		Asset::MaterialShadingModelName(model)));
+}
+
+void Engine::AssignMaterialTexture(EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot, const std::filesystem::path& texturePath)
+{
+	if (Asset::ClassifyAssetPath(texturePath) != Asset::AssetFileKind::Image)
+	{
+		AppendAssetLog(std::format("Texture assignment ignored: unsupported image path {}", texturePath.string()));
+		return;
+	}
+
+	Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId);
+	if (!meshAsset || materialIndex >= meshAsset->Materials.size())
+	{
+		return;
+	}
+
+	const std::filesystem::path projectTexturePath = NormalizeTexturePathForProject(texturePath);
+	Asset::StaticMeshMaterial& material = meshAsset->Materials[materialIndex];
+	Asset::SetMaterialTexturePath(material, slot, projectTexturePath, true);
+	if (slot == Asset::MaterialTextureSlot::BaseColor)
+	{
+		material.ImportedDiffuseTint = material.DiffuseColor;
+		material.DiffuseColor = { 1.0f, 1.0f, 1.0f, material.Opacity };
+		material.UseVertexColor = false;
+	}
+	static_cast<void>(RefreshMaterialResourcesForEntity(entityId));
+	AppendAssetLog(std::format(
+		"Assigned material texture - Entity={} Material={} Slot={} Path={}",
+		entityId,
+		materialIndex,
+		Asset::MaterialTextureSlotName(slot),
+		projectTexturePath.string()));
+}
+
+void Engine::ClearMaterialTexture(EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot)
+{
+	Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId);
+	if (!meshAsset || materialIndex >= meshAsset->Materials.size())
+	{
+		return;
+	}
+
+	Asset::StaticMeshMaterial& material = meshAsset->Materials[materialIndex];
+	Asset::SetMaterialTexturePath(material, slot, {});
+	if (slot == Asset::MaterialTextureSlot::BaseColor)
+	{
+		material.UseVertexColor = true;
+	}
+	static_cast<void>(RefreshMaterialResourcesForEntity(entityId));
+	AppendAssetLog(std::format(
+		"Cleared material texture - Entity={} Material={} Slot={}",
+		entityId,
+		materialIndex,
+		Asset::MaterialTextureSlotName(slot)));
+}
+
+void Engine::BrowseMaterialTexture(EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot)
+{
+	const std::optional<std::filesystem::path> selectedPath = ShowOpenTextureDialog();
+	if (selectedPath)
+	{
+		AssignMaterialTexture(entityId, materialIndex, slot, *selectedPath);
+	}
+}
+
+void Engine::MarkMaterialEdited(EntityId entityId, size_t materialIndex)
+{
+	Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId);
+	if (!meshAsset || materialIndex >= meshAsset->Materials.size())
+	{
+		return;
+	}
+
+	static_cast<void>(RefreshMaterialResourcesForEntity(entityId));
 }
 
 void Engine::RenameEntityFromHierarchy(EntityId entityId, std::string_view name)
@@ -1923,6 +2643,7 @@ bool Engine::Init()
 	{
 		return false;
 	}
+	InitializeJobSystem();
 	DragAcceptFiles(m_hMainWnd, TRUE);
 
 	if (m_StartupOptions.ProjectFilePath)
@@ -1945,6 +2666,7 @@ bool Engine::Init()
 	{
 		m_AssetFileSystem.SetRootPath("Assets");
 	}
+	ConfigureResourceSystem();
 
 	if (!glslang_initialize_process())
 	{
@@ -1979,6 +2701,22 @@ bool Engine::Init()
 		return false;
 	}
 
+	if (m_StartupOptions.SmokeTestFrameLimit)
+	{
+		const EntityId smokeEntity = CreatePrimitiveEntity(Asset::PrimitiveMeshKind::Cube);
+		if (smokeEntity != InvalidEntityId)
+		{
+			AppendAssetLog(std::format("Smoke scene primitive ready: entity {}", smokeEntity));
+			FrameEntityCamera(m_SceneCamera, smokeEntity);
+			FrameEntityCamera(m_Camera, smokeEntity);
+			SetSceneDirty(false);
+		}
+		else
+		{
+			AppendAssetLog("Smoke scene primitive creation failed.");
+		}
+	}
+
 	return true;
 }
 
@@ -1990,7 +2728,7 @@ LRESULT Engine::MsgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		return 0;
 	}
 
-	if (msg == WM_CLOSE && !ConfirmSaveDirtyScene())
+	if (msg == WM_CLOSE && !m_StartupOptions.SmokeTestFrameLimit && !ConfirmSaveDirtyScene())
 	{
 		return 0;
 	}
@@ -2059,50 +2797,112 @@ LRESULT Engine::MsgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 void Engine::Update(float deltaTime)
 {
 	Memory::BeginFrame();
+	m_JobSystem.BeginFrame();
+	m_PhaseScheduler.BeginFrame(m_JobSystem.GetFrameIndex());
 	m_LastDeltaTime = deltaTime;
-	ProcessPendingGraphicsApiSwitch();
+	RunFramePhases(deltaTime);
+}
 
-	for (const auto& hotReloadEvent : m_AssetHotReloadService.ConsumeEvents())
-	{
-		QueueModelReload(hotReloadEvent.SourcePath, hotReloadEvent.ChangedPath);
-	}
-	DrainCompletedAssetJobs();
-
-	if (m_LastSampleMode != m_SampleMode)
-	{
-		if (m_PhysicsSimulationEnabled && m_SampleMode != Samples::Benchmark::SampleMode::ProjectScene)
+void Engine::RunFramePhases(float deltaTime)
+{
+	m_PhaseScheduler.RunPhase(Jobs::FramePhase::BeginFrame, [this](Jobs::FramePhaseScheduler&)
 		{
-			SetPhysicsSimulationEnabled(false);
-		}
+			ProcessPendingGraphicsApiSwitch();
+		});
 
-		if (m_SampleMode == Samples::Benchmark::SampleMode::SpiderSample && m_SpiderEntity == InvalidEntityId)
+	m_PhaseScheduler.RunPhase(Jobs::FramePhase::DrainMainThreadQueues, [this](Jobs::FramePhaseScheduler&)
 		{
-			if (LoadSpiderStaticMesh())
+			for (const auto& hotReloadEvent : m_AssetHotReloadService.ConsumeEvents())
 			{
-				if (const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(m_SpiderEntity))
-				{
-					static_cast<void>(EnsureGeometryBufferCapacity(meshAsset->Vertices.size(), meshAsset->Indices.size()));
-				}
-				static_cast<void>(CreateTextureResourcesForEntity(m_SpiderEntity));
+				QueueModelReload(hotReloadEvent.SourcePath, hotReloadEvent.ChangedPath);
 			}
-		}
-		FramePrimaryRenderableCamera();
-		FramePrimaryRenderableCamera(m_SceneCamera);
-		m_LastSampleMode = m_SampleMode;
-	}
+			DrainCompletedAssetJobs();
+			for (std::string& error : m_JobSystem.ConsumeErrors())
+			{
+				AppendAssetLog(std::move(error));
+			}
+		});
+
+	m_PhaseScheduler.RunPhase(Jobs::FramePhase::Start, [this](Jobs::FramePhaseScheduler&)
+		{
+			if (m_LastSampleMode != m_SampleMode)
+			{
+				if (m_PhysicsSimulationEnabled && m_SampleMode != Samples::Benchmark::SampleMode::ProjectScene)
+				{
+					SetPhysicsSimulationEnabled(false);
+				}
+
+				if (m_SampleMode == Samples::Benchmark::SampleMode::SpiderSample && m_SpiderEntity == InvalidEntityId)
+				{
+					if (LoadSpiderStaticMesh())
+					{
+						if (const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(m_SpiderEntity))
+						{
+							static_cast<void>(EnsureGeometryBufferCapacity(meshAsset->Vertices.size(), meshAsset->Indices.size()));
+						}
+						static_cast<void>(CreateTextureResourcesForEntity(m_SpiderEntity));
+					}
+				}
+				FramePrimaryRenderableCamera();
+				FramePrimaryRenderableCamera(m_SceneCamera);
+				m_LastSampleMode = m_SampleMode;
+			}
+		});
 
 	if (m_SampleMode == Samples::Benchmark::SampleMode::EcsBenchmark)
 	{
-		m_BenchmarkRunner.Update(deltaTime);
+		m_PhaseScheduler.RunPhase(Jobs::FramePhase::FixedUpdate, [](Jobs::FramePhaseScheduler&) {});
+		m_PhaseScheduler.RunPhase(Jobs::FramePhase::Update, [this, deltaTime](Jobs::FramePhaseScheduler&)
+			{
+				m_BenchmarkRunner.Update(deltaTime, &m_JobSystem);
+			});
+		m_PhaseScheduler.RunPhase(Jobs::FramePhase::LateUpdate, [](Jobs::FramePhaseScheduler&) {});
+		m_PhaseScheduler.RunPhase(Jobs::FramePhase::Animation, [](Jobs::FramePhaseScheduler&) {});
+		m_PhaseScheduler.RunPhase(Jobs::FramePhase::Physics, [](Jobs::FramePhaseScheduler&) {});
+		m_PhaseScheduler.RunPhase(Jobs::FramePhase::RenderPrepare, [](Jobs::FramePhaseScheduler&) {});
+		m_PhaseScheduler.RunPhase(Jobs::FramePhase::Commit, [this](Jobs::FramePhaseScheduler&)
+			{
+				m_SceneCommandBuffer.ExecuteAndClear();
+			});
+		m_PhaseScheduler.RunPhase(Jobs::FramePhase::EndFrame, [this](Jobs::FramePhaseScheduler&)
+			{
+				for (std::string& error : m_JobSystem.ConsumeErrors())
+				{
+					AppendAssetLog(std::move(error));
+				}
+			});
+		m_PhaseScheduler.EndFrame();
 		return;
 	}
 
-	if (m_SampleMode == Samples::Benchmark::SampleMode::ProjectScene && m_PhysicsSimulationEnabled)
-	{
-		m_PhysicsWorld.Step(m_Scene, deltaTime);
-	}
+	m_PhaseScheduler.RunPhase(Jobs::FramePhase::FixedUpdate, [](Jobs::FramePhaseScheduler&) {});
+	m_PhaseScheduler.RunPhase(Jobs::FramePhase::Update, [](Jobs::FramePhaseScheduler&) {});
+	m_PhaseScheduler.RunPhase(Jobs::FramePhase::LateUpdate, [](Jobs::FramePhaseScheduler&) {});
+	m_PhaseScheduler.RunPhase(Jobs::FramePhase::Animation, [this, deltaTime](Jobs::FramePhaseScheduler&)
+		{
+			UpdateAnimatedMesh(deltaTime);
+		});
+	m_PhaseScheduler.RunPhase(Jobs::FramePhase::Physics, [this, deltaTime](Jobs::FramePhaseScheduler&)
+		{
+			if (m_SampleMode == Samples::Benchmark::SampleMode::ProjectScene && m_PhysicsSimulationEnabled)
+			{
+				m_PhysicsWorld.Step(m_Scene, deltaTime);
+			}
+		});
+	m_PhaseScheduler.RunPhase(Jobs::FramePhase::RenderPrepare, [](Jobs::FramePhaseScheduler&) {});
+	m_PhaseScheduler.RunPhase(Jobs::FramePhase::Commit, [this](Jobs::FramePhaseScheduler&)
+		{
+			m_SceneCommandBuffer.ExecuteAndClear();
+		});
+	m_PhaseScheduler.RunPhase(Jobs::FramePhase::EndFrame, [this](Jobs::FramePhaseScheduler&)
+		{
+			for (std::string& error : m_JobSystem.ConsumeErrors())
+			{
+				AppendAssetLog(std::move(error));
+			}
+		});
 
-	UpdateAnimatedMesh(deltaTime);
+	m_PhaseScheduler.EndFrame();
 }
 
 void Engine::Render()
@@ -2113,39 +2913,90 @@ void Engine::Render()
 	}
 
 	// 커맨드 리스트 리셋 및 기본 설정
-	m_Graphics.CommandList->Reset();
 	ResetCameraConstantAllocator();
+	ResetRenderFrameStats();
+	m_RenderGraph.BeginFrame(m_JobSystem.GetFrameIndex(), m_Graphics.CurrentApi, m_RenderMode);
+	const size_t resetPass = m_RenderGraph.AddPass("Command List Reset", Rendering::RenderPassKind::Setup, "CommandList");
+	MeasureRenderGraphPass(m_RenderGraph, resetPass, [this]()
+		{
+			m_Graphics.CommandList->Reset();
+		});
 	m_Graphics.CommandList->SetViewport(0, 0, static_cast<float>(m_ClientWidth), static_cast<float>(m_ClientHeight));
 	m_Graphics.CommandList->SetScissorRect(0, 0, m_ClientWidth, m_ClientHeight);
 
 	// 백버퍼를 렌더타겟 상태로 전환
 	IGpuResource* backBuffer = m_Graphics.Device->GetBackBufferResource();
-	m_Graphics.CommandList->ResourceBarrier(backBuffer, ResourceState::Present, ResourceState::RenderTarget);
+	const size_t beginBackBufferPass = m_RenderGraph.AddPass("BackBuffer Present->RenderTarget", Rendering::RenderPassKind::Setup, "Swapchain");
+	MeasureRenderGraphPass(m_RenderGraph, beginBackBufferPass, [this, backBuffer]()
+		{
+			m_Graphics.CommandList->ResourceBarrier(backBuffer, ResourceState::Present, ResourceState::RenderTarget);
+		});
 
 	// 렌더타겟 설정
 	void* rtvHandle = m_Graphics.Device->GetCurrentBackBufferRTV();
 	void* dsvHandle = m_Graphics.Device->GetDepthStencilView();
-	m_Graphics.CommandList->SetRenderTargets(rtvHandle, dsvHandle);
 
 	// 화면 전체는 에디터 배경색으로만 초기화하고, 실제 월드 렌더는 Scene/Game 패널 rect 안에서만 수행합니다.
 	const float clearColor[4] = { 0.025f, 0.027f, 0.032f, 1.0f };
-	m_Graphics.CommandList->ClearRenderTarget(rtvHandle, clearColor);
-	m_Graphics.CommandList->ClearDepthStencil(dsvHandle, 1.0f, 0);
+	const size_t clearPass = m_RenderGraph.AddPass("Clear Editor BackBuffer", Rendering::RenderPassKind::Clear, "Swapchain");
+	MeasureRenderGraphPass(m_RenderGraph, clearPass, [this, rtvHandle, dsvHandle, &clearColor]()
+		{
+			m_Graphics.CommandList->SetRenderTargets(rtvHandle, dsvHandle);
+			m_Graphics.CommandList->ClearRenderTarget(rtvHandle, clearColor);
+			m_Graphics.CommandList->ClearDepthStencil(dsvHandle, 1.0f, 0);
+		});
 
-	BeginEditorFrame();
-	UpdateViewportCameraLenses();
-	RenderWorldViewport(m_EditorLayer.GetSceneViewport(), m_SceneCamera);
-	RenderWorldViewport(m_EditorLayer.GetGameViewport(), m_Camera);
+	const size_t deferredLightUploadPass = m_RenderGraph.AddPass("Upload Deferred Light List", Rendering::RenderPassKind::Setup, "DeferredLightBuffer", "Only active in Deferred mode", m_RenderMode == RenderMode::Deferred);
+	MeasureRenderGraphPass(m_RenderGraph, deferredLightUploadPass, [this]()
+		{
+			static_cast<void>(UpdateDeferredLightBuffer());
+		});
+	const size_t editorFramePass = m_RenderGraph.AddPass("Build Editor DockSpace", Rendering::RenderPassKind::Editor, "ImGui");
+	MeasureRenderGraphPass(m_RenderGraph, editorFramePass, [this]()
+		{
+			BeginEditorFrame();
+			UpdateViewportCameraLenses();
+			m_ShadowFrameData = Rendering::ShadowSystem::BuildDirectionalShadowFrameData(m_Scene, ResolveKeyLightEntity(), m_Camera, m_ShadowSettings);
+		});
+	RenderWorldViewport(m_EditorLayer.GetSceneViewport(), m_SceneCamera, "Scene View", false);
+	RenderWorldViewport(m_EditorLayer.GetGameViewport(), m_Camera, "Game View", true);
 	RenderEditorDrawData();
 
 	// 백버퍼를 Present 상태로 전환
-	m_Graphics.CommandList->ResourceBarrier(backBuffer, ResourceState::RenderTarget, ResourceState::Present);
+	const size_t endBackBufferPass = m_RenderGraph.AddPass("BackBuffer RenderTarget->Present", Rendering::RenderPassKind::Present, "Swapchain");
+	MeasureRenderGraphPass(m_RenderGraph, endBackBufferPass, [this, backBuffer]()
+		{
+			m_Graphics.CommandList->ResourceBarrier(backBuffer, ResourceState::RenderTarget, ResourceState::Present);
+		});
 	m_Graphics.CommandList->Close();
+	const size_t executePass = m_RenderGraph.AddPass("Execute Command List", Rendering::RenderPassKind::Present, "GraphicsQueue");
 
 	// 커맨드 리스트 실행 및 화면 출력
-	m_Graphics.Device->ExecuteCommandList(m_Graphics.CommandList.get());
-	m_Graphics.Device->Present();
+	MeasureRenderGraphPass(m_RenderGraph, executePass, [this]()
+		{
+			m_Graphics.Device->ExecuteCommandList(m_Graphics.CommandList.get());
+		});
+	const size_t presentPass = m_RenderGraph.AddPass("Present Swapchain", Rendering::RenderPassKind::Present, "Swapchain");
+	MeasureRenderGraphPass(m_RenderGraph, presentPass, [this]()
+		{
+			m_Graphics.Device->Present();
+		});
 	m_Graphics.Device->MoveToNextFrame();
+	m_LastCompletedRenderFrameStats = m_RenderFrameStats;
+	m_RenderGraph.EndFrame();
+	LogRendererRoadmapHealthSnapshot();
+	if (m_StartupOptions.SmokeTestFrameLimit)
+	{
+		++m_SmokeRenderedFrameCount;
+		if (!m_SmokeShutdownRequested && m_SmokeRenderedFrameCount >= *m_StartupOptions.SmokeTestFrameLimit)
+		{
+			m_SmokeShutdownRequested = true;
+			AppendAssetLog(std::format(
+				"Renderer smoke test completed after {} frame(s).",
+				m_SmokeRenderedFrameCount));
+			PostQuitMessage(0);
+		}
+	}
 
 	UpdateWindowTitleWithFps();
 	Memory::EndFrame();
@@ -2238,6 +3089,13 @@ bool Engine::SwitchGraphicsAPI(GraphicsAPI api)
 		return false;
 	}
 
+	if (!CreateDeferredLightBuffer(kInitialDeferredLightBufferCapacity))
+	{
+		LogEngineTrace("SwitchGraphicsAPI failed during deferred light buffer creation.");
+		ShutdownGraphics();
+		return false;
+	}
+
 	if (!CreateTextureResources())
 	{
 		LogEngineTrace("SwitchGraphicsAPI failed during texture resource creation.");
@@ -2282,6 +3140,7 @@ bool Engine::SwitchGraphicsAPI(GraphicsAPI api)
 	m_RenderStartTime = std::chrono::steady_clock::now();
 	ResetFpsCounter();
 	UpdateRendererMenuState();
+	RequestRendererRoadmapHealthLog();
 	LogEngineTrace("SwitchGraphicsAPI completed successfully.");
 
 	return true;
@@ -2298,6 +3157,7 @@ void Engine::SwitchRenderMode(RenderMode renderMode)
 	RebuildWindowTitleBase();
 	ResetFpsCounter();
 	UpdateRendererMenuState();
+	RequestRendererRoadmapHealthLog();
 
 	std::string modeLogMessage = "Render mode switched to ";
 	modeLogMessage.append(RenderModeToString(m_RenderMode));
@@ -2356,7 +3216,7 @@ void Engine::CreateEditorSceneEntities()
 		LightComponent& light = m_Scene.EnsureLightComponent(m_KeyLightEntity);
 		light.Type = LightType::Directional;
 		light.Color = { 1.0f, 0.95f, 0.82f };
-		light.Intensity = 2.5f;
+		light.Intensity = 3.25f;
 		light.Range = 450.0f;
 		light.SpotAngle = DirectX::XM_PIDIV4;
 		light.Enabled = true;
@@ -2366,6 +3226,10 @@ void Engine::CreateEditorSceneEntities()
 void Engine::InitializeProjectScene()
 {
 	m_RenderState.Reset();
+	m_AmbientColor = { 0.62f, 0.68f, 0.78f };
+	m_AmbientIntensity = 0.35f;
+	m_Exposure = 1.0f;
+	m_MaterialDebugView = MaterialDebugView::Lit;
 	m_Camera.LookAt(
 		{ 0.0f, 2.5f, -8.0f },
 		{ 0.0f, 0.0f, 0.0f },
@@ -2456,6 +3320,47 @@ bool Engine::IsGameCameraEntity(EntityId entityId) const noexcept
 	return entityId != InvalidEntityId && entityId == m_GameCameraEntity;
 }
 
+EntityId Engine::ResolveKeyLightEntity()
+{
+	auto isUsableLight = [this](EntityId entityId)
+	{
+		const LightComponent* light = m_Scene.GetLightComponent(entityId);
+		return entityId != InvalidEntityId
+			&& m_Scene.ContainsEntity(entityId)
+			&& light
+			&& m_Scene.IsLightEnabled(entityId)
+			&& light->Enabled;
+	};
+
+	if (isUsableLight(m_KeyLightEntity))
+	{
+		return m_KeyLightEntity;
+	}
+
+	EntityId firstEnabledLight = InvalidEntityId;
+	for (const SceneEntity& entity : m_Scene.GetEntities())
+	{
+		const LightComponent* light = m_Scene.GetLightComponent(entity.Id);
+		if (!light || !m_Scene.IsLightEnabled(entity.Id) || !light->Enabled)
+		{
+			continue;
+		}
+
+		if (firstEnabledLight == InvalidEntityId)
+		{
+			firstEnabledLight = entity.Id;
+		}
+		if (light->Type == LightType::Directional)
+		{
+			m_KeyLightEntity = entity.Id;
+			return m_KeyLightEntity;
+		}
+	}
+
+	m_KeyLightEntity = firstEnabledLight;
+	return m_KeyLightEntity;
+}
+
 void Engine::RebuildWindowTitleBase()
 {
 	const std::wstring_view apiName = m_Graphics.CurrentApi == GraphicsAPI::DirectX12 ? L"DirectX12" : L"Vulkan";
@@ -2504,9 +3409,23 @@ void Engine::ShutdownGraphics()
 	m_StaticMeshRenderer.VertexBuffer.reset();
 	m_StaticMeshRenderer.IndexBuffer.reset();
 	m_StaticMeshRenderer.CameraBuffer.reset();
+	m_StaticMeshRenderer.DeferredLightBuffer.reset();
+	m_StaticMeshRenderer.DeferredLightingBuffer.reset();
+	m_StaticMeshRenderer.DeferredTileRangeBuffer.reset();
+	m_StaticMeshRenderer.DeferredTileLightIndexBuffer.reset();
 	m_StaticMeshRenderer.CameraBufferStride = 256;
 	m_StaticMeshRenderer.CameraBufferCapacity = 0;
 	m_StaticMeshRenderer.CameraBufferCursor = 0;
+	m_StaticMeshRenderer.DeferredLightBufferCapacity = 0;
+	m_StaticMeshRenderer.DeferredLightCount = 0;
+	m_StaticMeshRenderer.DeferredTileRangeCapacity = 0;
+	m_StaticMeshRenderer.DeferredTileLightIndexCapacity = 0;
+	m_StaticMeshRenderer.DeferredTileCountX = 0;
+	m_StaticMeshRenderer.DeferredTileCountY = 0;
+	m_StaticMeshRenderer.DeferredTileLightReferenceCount = 0;
+	m_StaticMeshRenderer.DeferredMaxTileLightCount = 0;
+	m_StaticMeshRenderer.DeferredFullTileLightCount = 0;
+	m_StaticMeshRenderer.DeferredCpuLights.clear();
 
 	m_Graphics.CommandList.reset();
 	m_Graphics.Device.reset();
@@ -2623,7 +3542,8 @@ bool Engine::CreateTextureResources()
 		materialTextures = &fallbackMaterialTextures;
 	}
 
-	const size_t textureCount = (std::max)(static_cast<size_t>(1), materialTextures->size());
+	const size_t materialCount = (std::max)(static_cast<size_t>(1), materialTextures->size());
+	const size_t textureCount = materialCount * MaterialSlotCount();
 
 	if (m_Graphics.CurrentApi == GraphicsAPI::DirectX12)
 	{
@@ -2635,6 +3555,7 @@ bool Engine::CreateTextureResources()
 
 		m_StaticMeshRenderer.Dx12.MaterialTextures.clear();
 		m_StaticMeshRenderer.Dx12.MaterialTextures.resize(textureCount);
+		m_StaticMeshRenderer.Dx12.MaterialCount = materialCount;
 		m_StaticMeshRenderer.Dx12.ShaderResourceHeap.Reset();
 
         const bool directStorageRuntimeAvailable = IsDirectStorageRuntimeAvailable();
@@ -2659,11 +3580,13 @@ bool Engine::CreateTextureResources()
 
 		for (size_t textureIndex = 0; textureIndex < textureCount; ++textureIndex)
 		{
-			const auto& materialTexture = (*materialTextures)[textureIndex];
+			const size_t materialIndex = textureIndex / MaterialSlotCount();
+			const size_t slotIndex = textureIndex % MaterialSlotCount();
+			const auto& materialTexture = GetCpuMaterialTextureSlot(*materialTextures, materialIndex, slotIndex);
 			auto& dx12MaterialTexture = m_StaticMeshRenderer.Dx12.MaterialTextures[textureIndex];
 			const UINT64 rowPitch = static_cast<UINT64>(materialTexture.Width) * 4;
 			const D3D12_RESOURCE_DESC textureDesc = CD3DX12_RESOURCE_DESC::Tex2D(
-				DXGI_FORMAT_R8G8B8A8_UNORM,
+				DXGI_FORMAT_R8G8B8A8_TYPELESS,
 				static_cast<UINT64>(materialTexture.Width),
 				static_cast<UINT>(materialTexture.Height));
 			const CD3DX12_HEAP_PROPERTIES defaultHeapProperties(D3D12_HEAP_TYPE_DEFAULT);
@@ -2732,7 +3655,10 @@ bool Engine::CreateTextureResources()
 		{
 			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
 			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-			srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+			const size_t materialIndex = textureIndex / MaterialSlotCount();
+			const size_t slotIndex = textureIndex % MaterialSlotCount();
+			const auto& materialTexture = GetCpuMaterialTextureSlot(*materialTextures, materialIndex, slotIndex);
+			srvDesc.Format = GetDx12TextureSrvFormat(materialTexture);
 			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 			srvDesc.Texture2D.MipLevels = 1;
 			dx12Device->GetD3DDevice()->CreateShaderResourceView(
@@ -2770,11 +3696,14 @@ bool Engine::CreateTextureResources()
 	// 개별 VkImage로 업로드합니다. 이후 descriptor set은 CreateVulkanTriangleResources()에서 material별로 생성합니다.
 	m_StaticMeshRenderer.Vulkan.MaterialTextures.clear();
 	m_StaticMeshRenderer.Vulkan.MaterialTextures.resize(textureCount);
+	m_StaticMeshRenderer.Vulkan.MaterialCount = materialCount;
 	size_t vulkanDdsCandidateCount = 0;
 
 	for (size_t textureIndex = 0; textureIndex < textureCount; ++textureIndex)
 	{
-		const auto& materialTexture = (*materialTextures)[textureIndex];
+		const size_t materialIndex = textureIndex / MaterialSlotCount();
+		const size_t slotIndex = textureIndex % MaterialSlotCount();
+		const auto& materialTexture = GetCpuMaterialTextureSlot(*materialTextures, materialIndex, slotIndex);
 		auto& vulkanMaterialTexture = m_StaticMeshRenderer.Vulkan.MaterialTextures[textureIndex];
 
 		// Vulkan에서도 dds 텍스처 후보를 집계해 두면, 추후 전용 스트리밍 경로 도입 시
@@ -2792,7 +3721,7 @@ bool Engine::CreateTextureResources()
 		imageCreateInfo.extent.depth = 1;
 		imageCreateInfo.mipLevels = 1;
 		imageCreateInfo.arrayLayers = 1;
-		imageCreateInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
+		imageCreateInfo.format = GetVulkanTextureFormat(materialTexture);
 		imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
 		imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -2896,7 +3825,7 @@ bool Engine::CreateTextureResources()
 		imageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 		imageViewCreateInfo.image = vulkanMaterialTexture.Image;
 		imageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-		imageViewCreateInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
+		imageViewCreateInfo.format = GetVulkanTextureFormat(materialTexture);
 		imageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		imageViewCreateInfo.subresourceRange.levelCount = 1;
 		imageViewCreateInfo.subresourceRange.layerCount = 1;
@@ -2933,12 +3862,14 @@ void Engine::DestroyTextureResources()
 {
 	m_StaticMeshRenderer.Dx12.ShaderResourceHeap.Reset();
 	m_StaticMeshRenderer.Dx12.MaterialTextures.clear();
+	m_StaticMeshRenderer.Dx12.MaterialCount = 0;
 	m_StaticMeshRenderer.Dx12.EntityMaterials.clear();
 
 	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
 	if (!vulkanDevice)
 	{
 		m_StaticMeshRenderer.Vulkan.MaterialTextures.clear();
+		m_StaticMeshRenderer.Vulkan.MaterialCount = 0;
 		m_StaticMeshRenderer.Vulkan.EntityMaterials.clear();
 		return;
 	}
@@ -2973,6 +3904,7 @@ void Engine::DestroyTextureResources()
 	}
 
 	m_StaticMeshRenderer.Vulkan.MaterialTextures.clear();
+	m_StaticMeshRenderer.Vulkan.MaterialCount = 0;
 
 	for (auto& [entityId, entityResources] : m_StaticMeshRenderer.Vulkan.EntityMaterials)
 	{
@@ -3021,7 +3953,8 @@ bool Engine::CreateTextureResourcesForEntity(EntityId entityId)
 		return false;
 	}
 
-	const size_t textureCount = (std::max)(static_cast<size_t>(1), materialTextures->size());
+	const size_t materialCount = (std::max)(static_cast<size_t>(1), materialTextures->size());
+	const size_t textureCount = materialCount * MaterialSlotCount();
 	DestroyTextureResourcesForEntity(entityId);
 
 	if (m_Graphics.CurrentApi == GraphicsAPI::DirectX12)
@@ -3034,6 +3967,7 @@ bool Engine::CreateTextureResourcesForEntity(EntityId entityId)
 
 		auto& entityResources = m_StaticMeshRenderer.Dx12.EntityMaterials[entityId];
 		entityResources.MaterialTextures.resize(textureCount);
+		entityResources.MaterialCount = materialCount;
 
 		ComPtr<ID3D12CommandAllocator> commandAllocator;
 		ComPtr<ID3D12GraphicsCommandList> commandList;
@@ -3045,11 +3979,13 @@ bool Engine::CreateTextureResourcesForEntity(EntityId entityId)
 
 		for (size_t textureIndex = 0; textureIndex < textureCount; ++textureIndex)
 		{
-			const auto& materialTexture = (*materialTextures)[textureIndex];
+			const size_t materialIndex = textureIndex / MaterialSlotCount();
+			const size_t slotIndex = textureIndex % MaterialSlotCount();
+			const auto& materialTexture = GetCpuMaterialTextureSlot(*materialTextures, materialIndex, slotIndex);
 			auto& dx12MaterialTexture = entityResources.MaterialTextures[textureIndex];
 			const UINT64 rowPitch = static_cast<UINT64>(materialTexture.Width) * 4;
 			const D3D12_RESOURCE_DESC textureDesc = CD3DX12_RESOURCE_DESC::Tex2D(
-				DXGI_FORMAT_R8G8B8A8_UNORM,
+				DXGI_FORMAT_R8G8B8A8_TYPELESS,
 				static_cast<UINT64>(materialTexture.Width),
 				static_cast<UINT>(materialTexture.Height));
 			const CD3DX12_HEAP_PROPERTIES defaultHeapProperties(D3D12_HEAP_TYPE_DEFAULT);
@@ -3113,7 +4049,10 @@ bool Engine::CreateTextureResourcesForEntity(EntityId entityId)
 		{
 			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
 			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-			srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+			const size_t materialIndex = textureIndex / MaterialSlotCount();
+			const size_t slotIndex = textureIndex % MaterialSlotCount();
+			const auto& materialTexture = GetCpuMaterialTextureSlot(*materialTextures, materialIndex, slotIndex);
+			srvDesc.Format = GetDx12TextureSrvFormat(materialTexture);
 			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 			srvDesc.Texture2D.MipLevels = 1;
 			dx12Device->GetD3DDevice()->CreateShaderResourceView(
@@ -3134,10 +4073,13 @@ bool Engine::CreateTextureResourcesForEntity(EntityId entityId)
 
 	auto& entityResources = m_StaticMeshRenderer.Vulkan.EntityMaterials[entityId];
 	entityResources.MaterialTextures.resize(textureCount);
+	entityResources.MaterialCount = materialCount;
 
 	for (size_t textureIndex = 0; textureIndex < textureCount; ++textureIndex)
 	{
-		const auto& materialTexture = (*materialTextures)[textureIndex];
+		const size_t materialIndex = textureIndex / MaterialSlotCount();
+		const size_t slotIndex = textureIndex % MaterialSlotCount();
+		const auto& materialTexture = GetCpuMaterialTextureSlot(*materialTextures, materialIndex, slotIndex);
 		auto& vulkanMaterialTexture = entityResources.MaterialTextures[textureIndex];
 
 		VkImageCreateInfo imageCreateInfo = {};
@@ -3148,7 +4090,7 @@ bool Engine::CreateTextureResourcesForEntity(EntityId entityId)
 		imageCreateInfo.extent.depth = 1;
 		imageCreateInfo.mipLevels = 1;
 		imageCreateInfo.arrayLayers = 1;
-		imageCreateInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
+		imageCreateInfo.format = GetVulkanTextureFormat(materialTexture);
 		imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
 		imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -3250,7 +4192,7 @@ bool Engine::CreateTextureResourcesForEntity(EntityId entityId)
 		imageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 		imageViewCreateInfo.image = vulkanMaterialTexture.Image;
 		imageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-		imageViewCreateInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
+		imageViewCreateInfo.format = GetVulkanTextureFormat(materialTexture);
 		imageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		imageViewCreateInfo.subresourceRange.levelCount = 1;
 		imageViewCreateInfo.subresourceRange.layerCount = 1;
@@ -3349,6 +4291,7 @@ bool Engine::RecreateVulkanEntityDescriptorSets()
 {
 	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
 	auto vulkanCameraBuffer = dynamic_cast<VulkanBuffer*>(m_StaticMeshRenderer.CameraBuffer.get());
+	auto vulkanLightBuffer = dynamic_cast<VulkanBuffer*>(m_StaticMeshRenderer.DeferredLightBuffer.get());
 	if (!vulkanDevice || !vulkanCameraBuffer || m_StaticMeshRenderer.Vulkan.DescriptorSetLayout == VK_NULL_HANDLE)
 	{
 		return true;
@@ -3358,6 +4301,11 @@ bool Engine::RecreateVulkanEntityDescriptorSets()
 		.buffer = vulkanCameraBuffer->GetVkBuffer(),
 		.offset = 0,
 		.range = sizeof(CameraConstants)
+	};
+	const VkDescriptorBufferInfo lightBufferInfo = {
+		.buffer = vulkanLightBuffer ? vulkanLightBuffer->GetVkBuffer() : VK_NULL_HANDLE,
+		.offset = 0,
+		.range = m_StaticMeshRenderer.DeferredLightBuffer ? m_StaticMeshRenderer.DeferredLightBuffer->GetSize() : sizeof(LightGpuData)
 	};
 
 	for (auto& [entityId, entityResources] : m_StaticMeshRenderer.Vulkan.EntityMaterials)
@@ -3369,17 +4317,28 @@ bool Engine::RecreateVulkanEntityDescriptorSets()
 			entityResources.DescriptorPool = VK_NULL_HANDLE;
 		}
 		entityResources.DescriptorSets.clear();
+		if (entityResources.MaterialTextures.empty())
+		{
+			continue;
+		}
 
-		const uint32_t materialTextureCount = static_cast<uint32_t>((std::max)(static_cast<size_t>(1), entityResources.MaterialTextures.size()));
+		const uint32_t materialTextureCount = static_cast<uint32_t>(
+			entityResources.MaterialCount > 0
+				? entityResources.MaterialCount
+				: MaterialCountFromFlattenedTextureCount(entityResources.MaterialTextures.size()));
 		const VkDescriptorPoolSize descriptorPoolSize = {
 			.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
 			.descriptorCount = materialTextureCount
 		};
 		const VkDescriptorPoolSize textureDescriptorPoolSize = {
 			.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			.descriptorCount = materialTextureCount * static_cast<uint32_t>(MaterialSlotCount())
+		};
+		const VkDescriptorPoolSize lightDescriptorPoolSize = {
+			.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
 			.descriptorCount = materialTextureCount
 		};
-		const VkDescriptorPoolSize descriptorPoolSizes[] = { descriptorPoolSize, textureDescriptorPoolSize };
+		const VkDescriptorPoolSize descriptorPoolSizes[] = { descriptorPoolSize, textureDescriptorPoolSize, lightDescriptorPoolSize };
 		const VkDescriptorPoolCreateInfo descriptorPoolCreateInfo = {
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
 			.maxSets = materialTextureCount,
@@ -3408,12 +4367,17 @@ bool Engine::RecreateVulkanEntityDescriptorSets()
 
 		for (uint32_t materialIndex = 0; materialIndex < materialTextureCount; ++materialIndex)
 		{
-			const auto& materialTexture = entityResources.MaterialTextures[materialIndex];
-			const VkDescriptorImageInfo textureImageInfo = {
-				.sampler = materialTexture.Sampler,
-				.imageView = materialTexture.ImageView,
-				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-			};
+			std::array<VkDescriptorImageInfo, Asset::kMaterialTextureSlotCount> textureImageInfos = {};
+			for (size_t slotIndex = 0; slotIndex < MaterialSlotCount(); ++slotIndex)
+			{
+				const size_t flattenedIndex = FlattenMaterialTextureIndex(materialIndex, slotIndex);
+				const auto& materialTexture = entityResources.MaterialTextures[(std::min)(flattenedIndex, entityResources.MaterialTextures.size() - 1)];
+				textureImageInfos[slotIndex] = {
+					.sampler = materialTexture.Sampler,
+					.imageView = materialTexture.ImageView,
+					.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+				};
+			}
 
 			const VkWriteDescriptorSet writeDescriptorSet = {
 				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -3423,18 +4387,124 @@ bool Engine::RecreateVulkanEntityDescriptorSets()
 				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
 				.pBufferInfo = &cameraBufferInfo
 			};
-			const VkWriteDescriptorSet textureWriteDescriptorSet = {
+			std::array<VkWriteDescriptorSet, Asset::kMaterialTextureSlotCount + 2> writeDescriptorSets = {};
+			writeDescriptorSets[0] = writeDescriptorSet;
+			for (size_t slotIndex = 0; slotIndex < MaterialSlotCount(); ++slotIndex)
+			{
+				writeDescriptorSets[slotIndex + 1] = {
+					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+					.dstSet = entityResources.DescriptorSets[materialIndex],
+					.dstBinding = static_cast<uint32_t>(1 + slotIndex),
+					.descriptorCount = 1,
+					.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					.pImageInfo = &textureImageInfos[slotIndex]
+				};
+			}
+			writeDescriptorSets[MaterialSlotCount() + 1] = {
 				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 				.dstSet = entityResources.DescriptorSets[materialIndex],
-				.dstBinding = 1,
+				.dstBinding = static_cast<uint32_t>(MaterialSlotCount() + 1),
 				.descriptorCount = 1,
-				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-				.pImageInfo = &textureImageInfo
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.pBufferInfo = &lightBufferInfo
 			};
-			const VkWriteDescriptorSet writeDescriptorSets[] = { writeDescriptorSet, textureWriteDescriptorSet };
 
-			vkUpdateDescriptorSets(vulkanDevice->GetVkDevice(), static_cast<uint32_t>(std::size(writeDescriptorSets)), writeDescriptorSets, 0, nullptr);
+			vkUpdateDescriptorSets(vulkanDevice->GetVkDevice(), static_cast<uint32_t>(writeDescriptorSets.size()), writeDescriptorSets.data(), 0, nullptr);
 		}
+	}
+
+	return true;
+}
+
+bool Engine::RefreshVulkanDeferredLightBufferDescriptors()
+{
+	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
+	auto vulkanLightBuffer = dynamic_cast<VulkanBuffer*>(m_StaticMeshRenderer.DeferredLightBuffer.get());
+	auto vulkanTileRangeBuffer = dynamic_cast<VulkanBuffer*>(m_StaticMeshRenderer.DeferredTileRangeBuffer.get());
+	auto vulkanTileIndexBuffer = dynamic_cast<VulkanBuffer*>(m_StaticMeshRenderer.DeferredTileLightIndexBuffer.get());
+	if (!vulkanDevice || !vulkanLightBuffer || m_StaticMeshRenderer.Vulkan.DescriptorSetLayout == VK_NULL_HANDLE)
+	{
+		return true;
+	}
+
+	const VkDescriptorBufferInfo lightBufferInfo = {
+		.buffer = vulkanLightBuffer->GetVkBuffer(),
+		.offset = 0,
+		.range = m_StaticMeshRenderer.DeferredLightBuffer->GetSize()
+	};
+	const VkDescriptorBufferInfo tileRangeBufferInfo = {
+		.buffer = vulkanTileRangeBuffer ? vulkanTileRangeBuffer->GetVkBuffer() : vulkanLightBuffer->GetVkBuffer(),
+		.offset = 0,
+		.range = m_StaticMeshRenderer.DeferredTileRangeBuffer ? m_StaticMeshRenderer.DeferredTileRangeBuffer->GetSize() : m_StaticMeshRenderer.DeferredLightBuffer->GetSize()
+	};
+	const VkDescriptorBufferInfo tileIndexBufferInfo = {
+		.buffer = vulkanTileIndexBuffer ? vulkanTileIndexBuffer->GetVkBuffer() : vulkanLightBuffer->GetVkBuffer(),
+		.offset = 0,
+		.range = m_StaticMeshRenderer.DeferredTileLightIndexBuffer ? m_StaticMeshRenderer.DeferredTileLightIndexBuffer->GetSize() : m_StaticMeshRenderer.DeferredLightBuffer->GetSize()
+	};
+	const uint32_t lightBufferBinding = static_cast<uint32_t>(MaterialSlotCount() + 1);
+
+	auto writeLightBuffer = [&](VkDescriptorSet descriptorSet)
+	{
+		if (descriptorSet == VK_NULL_HANDLE)
+		{
+			return;
+		}
+
+		const VkWriteDescriptorSet writeDescriptorSet = {
+			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.dstSet = descriptorSet,
+			.dstBinding = lightBufferBinding,
+			.descriptorCount = 1,
+			.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+			.pBufferInfo = &lightBufferInfo
+		};
+		vkUpdateDescriptorSets(vulkanDevice->GetVkDevice(), 1, &writeDescriptorSet, 0, nullptr);
+	};
+
+	for (VkDescriptorSet descriptorSet : m_StaticMeshRenderer.Vulkan.DescriptorSets)
+	{
+		writeLightBuffer(descriptorSet);
+	}
+
+	for (const auto& [entityId, entityResources] : m_StaticMeshRenderer.Vulkan.EntityMaterials)
+	{
+		(void)entityId;
+		for (VkDescriptorSet descriptorSet : entityResources.DescriptorSets)
+		{
+			writeLightBuffer(descriptorSet);
+		}
+	}
+
+	if (m_StaticMeshRenderer.Vulkan.Deferred.LightingDescriptorSet != VK_NULL_HANDLE)
+	{
+		const VkWriteDescriptorSet writeDescriptorSets[] = {
+			{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = m_StaticMeshRenderer.Vulkan.Deferred.LightingDescriptorSet,
+				.dstBinding = 10,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.pBufferInfo = &lightBufferInfo
+			},
+			{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = m_StaticMeshRenderer.Vulkan.Deferred.LightingDescriptorSet,
+				.dstBinding = 11,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.pBufferInfo = &tileRangeBufferInfo
+			},
+			{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = m_StaticMeshRenderer.Vulkan.Deferred.LightingDescriptorSet,
+				.dstBinding = 12,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.pBufferInfo = &tileIndexBufferInfo
+			}
+		};
+		vkUpdateDescriptorSets(vulkanDevice->GetVkDevice(), static_cast<uint32_t>(std::size(writeDescriptorSets)), writeDescriptorSets, 0, nullptr);
 	}
 
 	return true;
@@ -3634,6 +4704,26 @@ void Engine::BeginEditorFrame()
 	ImGui::NewFrame();
 	UpdateEditorCameraFromInput(m_LastDeltaTime);
 
+	const EntityId keyLightEntity = ResolveKeyLightEntity();
+	float keyLightIntensity = 3.25f;
+	if (const LightComponent* keyLight = m_Scene.GetLightComponent(keyLightEntity))
+	{
+		keyLightIntensity = keyLight->Intensity;
+	}
+	m_PostProcessSettings.Exposure = m_Exposure;
+	const bool hdrTargetAvailable =
+		(m_Graphics.CurrentApi == GraphicsAPI::DirectX12 && m_StaticMeshRenderer.Dx12.Deferred.HdrColorTexture != nullptr) ||
+		(m_Graphics.CurrentApi == GraphicsAPI::Vulkan && m_StaticMeshRenderer.Vulkan.Deferred.HdrColorImage != VK_NULL_HANDLE);
+	const uint32_t sceneLightCount = RenderSystem::CountSceneRenderableLights(m_Scene);
+	const bool usesFallbackLight = sceneLightCount == 0;
+	const uint32_t effectiveForwardLightCount = usesFallbackLight
+		? 1u
+		: (std::min)(sceneLightCount, kMaxForwardGpuLights);
+	const uint32_t truncatedForwardLightCount = sceneLightCount > kMaxForwardGpuLights
+		? sceneLightCount - kMaxForwardGpuLights
+		: 0u;
+	const Rendering::RenderFrameStats& lastRenderStats = m_LastCompletedRenderFrameStats;
+
 	Editor::EditorContext editorContext{
 		.CurrentApi = m_Graphics.CurrentApi,
 		.CurrentRenderMode = m_RenderMode,
@@ -3651,10 +4741,40 @@ void Engine::BeginEditorFrame()
 		.ProjectSnapshot = m_AssetFileSystem.GetSnapshot(),
 		.AssetLogLines = &m_AssetLogLines,
 		.MemoryStats = Memory::GetStats(),
+		.JobStats = m_JobSystem.GetStats(),
+		.ResourceStats = m_ResourceManager.GetStats(),
+		.MaterialStats = BuildSceneMaterialResourceStats(),
+		.ShaderVariantStats = m_ShaderVariantCache.GetStats(),
+		.RenderGraphStats = m_RenderGraph.GetStats(),
+		.RenderGraphPasses = &m_RenderGraph.GetPasses(),
+		.RenderFrameStats = m_LastCompletedRenderFrameStats,
+		.ShadowSettings = m_ShadowSettings,
+		.ShadowStats = Rendering::ShadowSystem::BuildStats(m_ShadowFrameData, m_ShadowSettings),
+		.PostProcessStats = Rendering::PostProcessSystem::BuildStats(m_PostProcessSettings, m_Graphics.CurrentApi, m_RenderMode, hdrTargetAvailable),
+		.ForwardLightLimit = kMaxForwardGpuLights,
+		.SceneLightCount = sceneLightCount,
+		.ForwardLightUsedCount = effectiveForwardLightCount,
+		.ForwardLightTruncatedCount = truncatedForwardLightCount,
+		.UsesFallbackLight = usesFallbackLight,
+		.DeferredLightCount = m_StaticMeshRenderer.DeferredLightCount,
+		.DeferredLightBufferCapacity = m_StaticMeshRenderer.DeferredLightBufferCapacity,
+		.DeferredTileCountX = m_StaticMeshRenderer.DeferredTileCountX,
+		.DeferredTileCountY = m_StaticMeshRenderer.DeferredTileCountY,
+		.DeferredTileViewportCount = lastRenderStats.DeferredTileViewportCount,
+		.DeferredTileCountTotal = lastRenderStats.DeferredTileCountTotal,
+		.DeferredTileLightReferenceCount = lastRenderStats.DeferredTileLightReferenceCount,
+		.DeferredMaxTileLightCount = lastRenderStats.DeferredMaxTileLightCount,
+		.DeferredFullTileLightCount = lastRenderStats.DeferredFullTileLightCount,
 		.ProjectRefreshInProgress = m_AssetFileSystem.IsRefreshInProgress(),
 		.IsSceneDirty = m_SceneDirty,
 		.CanEditProjectScene = m_Project.has_value() && m_SampleMode == Samples::Benchmark::SampleMode::ProjectScene,
 		.PhysicsSimulationEnabled = m_PhysicsSimulationEnabled,
+		.AmbientColor = m_AmbientColor,
+		.AmbientIntensity = m_AmbientIntensity,
+		.Exposure = m_Exposure,
+		.KeyLightIntensity = keyLightIntensity,
+		.DebugView = m_MaterialDebugView,
+		.ViewFrustumCullingEnabled = m_ViewFrustumCullingEnabled,
 		.OnGraphicsApiChanged = [this](GraphicsAPI requestedApi)
 		{
 			if (requestedApi == m_Graphics.CurrentApi && !m_HasPendingGraphicsApiSwitch)
@@ -3727,6 +4847,7 @@ void Engine::BeginEditorFrame()
 		.OnProjectRefresh = [this]()
 		{
 			m_AssetFileSystem.RequestRefresh();
+			ConfigureResourceSystem();
 		},
 		.OnRenameEntity = [this](EntityId entityId, std::string_view name)
 		{
@@ -3759,6 +4880,66 @@ void Engine::BeginEditorFrame()
 		.OnComponentEnabledChanged = [this](EntityId entityId, SceneComponentKind kind, bool enabled)
 		{
 			SetComponentEnabledForEntity(entityId, kind, enabled);
+		},
+		.OnMaterialShadingModelChanged = [this](EntityId entityId, size_t materialIndex, Asset::MaterialShadingModel model)
+		{
+			SetMaterialShadingModel(entityId, materialIndex, model);
+		},
+		.OnMaterialTextureAssigned = [this](EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot, const std::filesystem::path& path)
+		{
+			AssignMaterialTexture(entityId, materialIndex, slot, path);
+		},
+		.OnMaterialTextureCleared = [this](EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot)
+		{
+			ClearMaterialTexture(entityId, materialIndex, slot);
+		},
+		.OnMaterialTextureBrowseRequested = [this](EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot)
+		{
+			BrowseMaterialTexture(entityId, materialIndex, slot);
+		},
+		.OnMaterialEdited = [this](EntityId entityId, size_t materialIndex)
+		{
+			MarkMaterialEdited(entityId, materialIndex);
+		},
+		.OnAmbientColorChanged = [this](const DirectX::XMFLOAT3& ambientColor)
+		{
+			m_AmbientColor = {
+				std::clamp(ambientColor.x, 0.0f, 4.0f),
+				std::clamp(ambientColor.y, 0.0f, 4.0f),
+				std::clamp(ambientColor.z, 0.0f, 4.0f)
+			};
+			MarkSceneDirty();
+		},
+		.OnAmbientIntensityChanged = [this](float ambientIntensity)
+		{
+			m_AmbientIntensity = std::clamp(ambientIntensity, 0.0f, 2.0f);
+			MarkSceneDirty();
+		},
+		.OnExposureChanged = [this](float exposure)
+		{
+			m_Exposure = std::clamp(exposure, 0.05f, 8.0f);
+			MarkSceneDirty();
+		},
+		.OnKeyLightIntensityChanged = [this](float intensity)
+		{
+			if (LightComponent* light = m_Scene.GetLightComponent(ResolveKeyLightEntity()))
+			{
+				light->Intensity = std::clamp(intensity, 0.0f, 100.0f);
+				MarkSceneDirty();
+			}
+		},
+		.OnMaterialDebugViewChanged = [this](MaterialDebugView debugView)
+		{
+			m_MaterialDebugView = debugView;
+		},
+		.OnViewFrustumCullingChanged = [this](bool enabled)
+		{
+			m_ViewFrustumCullingEnabled = enabled;
+		},
+		.OnShadowSettingsChanged = [this](const Rendering::ShadowSettings& settings)
+		{
+			m_ShadowSettings = settings;
+			MarkSceneDirty();
 		},
 		.OnSceneEdited = [this]()
 		{
@@ -3798,24 +4979,28 @@ void Engine::RenderEditorDrawData()
 		}
 	}
 
-	ImGui::Render();
-	m_Graphics.CommandList->SetViewport(0, 0, static_cast<float>(m_ClientWidth), static_cast<float>(m_ClientHeight));
-	m_Graphics.CommandList->SetScissorRect(0, 0, m_ClientWidth, m_ClientHeight);
+	const size_t imguiPass = m_RenderGraph.AddPass("Render ImGui Draw Data", Rendering::RenderPassKind::Editor, "Swapchain");
+	MeasureRenderGraphPass(m_RenderGraph, imguiPass, [this]()
+		{
+			ImGui::Render();
+			m_Graphics.CommandList->SetViewport(0, 0, static_cast<float>(m_ClientWidth), static_cast<float>(m_ClientHeight));
+			m_Graphics.CommandList->SetScissorRect(0, 0, m_ClientWidth, m_ClientHeight);
 
-	if (m_Graphics.CurrentApi == GraphicsAPI::DirectX12)
-	{
-		auto commandList = static_cast<ID3D12GraphicsCommandList*>(m_Graphics.CommandList->GetNativeResource());
-		ID3D12DescriptorHeap* descriptorHeaps[] = { m_Dx12ImGui.ShaderResourceHeap.Get() };
-		commandList->SetDescriptorHeaps(1, descriptorHeaps);
-		ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), commandList);
-	}
-	else
-	{
-		// Vulkan ImGui draw data는 현재 열린 render pass 안에서 같은 command buffer에 기록해야 합니다.
-		// 엔진 렌더 루프는 scene draw 뒤, Present 전 barrier 전에 이 함수를 호출하므로 그 조건을 만족합니다.
-		auto commandBuffer = reinterpret_cast<VkCommandBuffer>(m_Graphics.CommandList->GetNativeResource());
-		ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
-	}
+			if (m_Graphics.CurrentApi == GraphicsAPI::DirectX12)
+			{
+				auto commandList = static_cast<ID3D12GraphicsCommandList*>(m_Graphics.CommandList->GetNativeResource());
+				ID3D12DescriptorHeap* descriptorHeaps[] = { m_Dx12ImGui.ShaderResourceHeap.Get() };
+				commandList->SetDescriptorHeaps(1, descriptorHeaps);
+				ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), commandList);
+			}
+			else
+			{
+				// Vulkan ImGui draw data는 현재 열린 render pass 안에서 같은 command buffer에 기록해야 합니다.
+				// 엔진 렌더 루프는 scene draw 뒤, Present 전 barrier 전에 이 함수를 호출하므로 그 조건을 만족합니다.
+				auto commandBuffer = reinterpret_cast<VkCommandBuffer>(m_Graphics.CommandList->GetNativeResource());
+				ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
+			}
+		});
 }
 
 void Engine::UpdateEditorCameraFromInput(float deltaTime)
@@ -3891,10 +5076,11 @@ void Engine::UpdateViewportCameraLenses()
 	}
 }
 
-void Engine::RenderWorldViewport(const Editor::ViewportPanelState& viewport, const Camera& camera)
+void Engine::RenderWorldViewport(const Editor::ViewportPanelState& viewport, const Camera& camera, std::string_view label, bool isGameView)
 {
 	if (!viewport.CanRender())
 	{
+		m_RenderGraph.AddPass(label, Rendering::RenderPassKind::World, "Viewport", "Skipped: hidden or too small", false);
 		return;
 	}
 
@@ -3904,11 +5090,16 @@ void Engine::RenderWorldViewport(const Editor::ViewportPanelState& viewport, con
 	const long bottom = (std::min)(static_cast<long>(m_ClientHeight), static_cast<long>(std::ceil(viewport.Top + viewport.Height)));
 	if (right <= left || bottom <= top)
 	{
+		m_RenderGraph.AddPass(label, Rendering::RenderPassKind::World, "Viewport", "Skipped: invalid viewport rect", false);
 		return;
 	}
 
 	const float width = static_cast<float>(right - left);
 	const float height = static_cast<float>(bottom - top);
+	const size_t worldPass = m_RenderGraph.AddPass(label, Rendering::RenderPassKind::World, "Viewport", RenderModeToString(m_RenderMode));
+	const auto worldBegin = std::chrono::steady_clock::now();
+	ResetViewCullingCache();
+	BuildViewportVisibleRenderList(camera, isGameView);
 	m_Graphics.CommandList->SetViewport(static_cast<float>(left), static_cast<float>(top), width, height);
 	m_Graphics.CommandList->SetScissorRect(left, top, right, bottom);
 	m_Graphics.CommandList->SetVertexBuffer(m_StaticMeshRenderer.VertexBuffer.get());
@@ -3916,14 +5107,304 @@ void Engine::RenderWorldViewport(const Editor::ViewportPanelState& viewport, con
 
 	if (m_Graphics.CurrentApi == GraphicsAPI::DirectX12)
 	{
-		DrawDx12Triangle(camera);
+		if (m_RenderMode == RenderMode::Deferred)
+		{
+			m_ShadowFrameData = Rendering::ShadowSystem::BuildDirectionalShadowFrameData(m_Scene, ResolveKeyLightEntity(), camera, m_ShadowSettings);
+			const size_t shadowPass = m_RenderGraph.AddPass("DX12 Shadow Map Depth", Rendering::RenderPassKind::Shadow, "ShadowMap", label, m_ShadowFrameData.Enabled && m_ShadowFrameData.HasDirectionalCaster);
+			MeasureRenderGraphPass(m_RenderGraph, shadowPass, [this, &camera]()
+				{
+					DrawDx12ShadowDepthPass(camera);
+				});
+			m_Graphics.CommandList->SetViewport(static_cast<float>(left), static_cast<float>(top), width, height);
+			m_Graphics.CommandList->SetScissorRect(left, top, right, bottom);
+			m_Graphics.CommandList->SetVertexBuffer(m_StaticMeshRenderer.VertexBuffer.get());
+			m_Graphics.CommandList->SetIndexBuffer(m_StaticMeshRenderer.IndexBuffer.get());
+			const DeferredPassTimingIndices timings{
+				.Geometry = m_RenderGraph.AddPass("DX12 GBuffer Geometry", Rendering::RenderPassKind::Geometry, label),
+				.TileCulling = m_RenderGraph.AddPass("DX12 Deferred Tile Culling", Rendering::RenderPassKind::Debug, label, "CPU builds per-tile light index list"),
+				.Lighting = m_RenderGraph.AddPass("DX12 Deferred Lighting", Rendering::RenderPassKind::Lighting, label),
+				.PostProcess = m_RenderGraph.AddPass("DX12 Tone Map", Rendering::RenderPassKind::PostProcess, "HDRColor -> Swapchain", label),
+				.Transparency = m_RenderGraph.AddPass("DX12 Forward Transparency", Rendering::RenderPassKind::Transparency, label)
+			};
+			DrawDx12DeferredTriangle(viewport, camera, timings);
+		}
+		else
+		{
+			const size_t forwardPass = m_RenderGraph.AddPass("DX12 Forward Mesh", Rendering::RenderPassKind::Geometry, label);
+			MeasureRenderGraphPass(m_RenderGraph, forwardPass, [this, &camera]()
+				{
+					DrawDx12Triangle(camera);
+				});
+		}
 	}
 	else
 	{
-		DrawVulkanTriangle(camera);
+		if (m_RenderMode == RenderMode::Deferred)
+		{
+			m_ShadowFrameData = Rendering::ShadowSystem::BuildDirectionalShadowFrameData(m_Scene, ResolveKeyLightEntity(), camera, m_ShadowSettings);
+			const size_t shadowPass = m_RenderGraph.AddPass("Vulkan Shadow Map Depth", Rendering::RenderPassKind::Shadow, "ShadowMap", label, m_ShadowFrameData.Enabled && m_ShadowFrameData.HasDirectionalCaster);
+			MeasureRenderGraphPass(m_RenderGraph, shadowPass, [this, &camera]()
+				{
+					DrawVulkanShadowDepthPass(camera);
+				});
+			m_Graphics.CommandList->SetViewport(static_cast<float>(left), static_cast<float>(top), width, height);
+			m_Graphics.CommandList->SetScissorRect(left, top, right, bottom);
+			m_Graphics.CommandList->SetVertexBuffer(m_StaticMeshRenderer.VertexBuffer.get());
+			m_Graphics.CommandList->SetIndexBuffer(m_StaticMeshRenderer.IndexBuffer.get());
+			const DeferredPassTimingIndices timings{
+				.Geometry = m_RenderGraph.AddPass("Vulkan GBuffer Geometry", Rendering::RenderPassKind::Geometry, label),
+				.TileCulling = m_RenderGraph.AddPass("Vulkan Deferred Tile Culling", Rendering::RenderPassKind::Debug, label, "CPU builds per-tile light index list"),
+				.Lighting = m_RenderGraph.AddPass("Vulkan Deferred Lighting", Rendering::RenderPassKind::Lighting, label),
+				.PostProcess = m_RenderGraph.AddPass("Vulkan Tone Map", Rendering::RenderPassKind::PostProcess, "HDRColor -> Swapchain", label),
+				.Transparency = m_RenderGraph.AddPass("Vulkan Forward Transparency", Rendering::RenderPassKind::Transparency, label)
+			};
+			DrawVulkanDeferredTriangle(viewport, camera, timings);
+		}
+		else
+		{
+			const size_t forwardPass = m_RenderGraph.AddPass("Vulkan Forward Mesh", Rendering::RenderPassKind::Geometry, label);
+			MeasureRenderGraphPass(m_RenderGraph, forwardPass, [this, &camera]()
+				{
+					DrawVulkanTriangle(camera);
+				});
+		}
 	}
 
-	DrawBenchmarkInstances(camera);
+	const size_t benchmarkPass = m_RenderGraph.AddPass("Benchmark Overlay Instances", Rendering::RenderPassKind::Debug, label, "Only draws in ECS Benchmark mode", m_SampleMode == Samples::Benchmark::SampleMode::EcsBenchmark);
+	MeasureRenderGraphPass(m_RenderGraph, benchmarkPass, [this, &camera]()
+		{
+			DrawBenchmarkInstances(camera);
+		});
+
+	const auto worldEnd = std::chrono::steady_clock::now();
+	const std::chrono::duration<double, std::milli> worldElapsed = worldEnd - worldBegin;
+	m_RenderGraph.SetPassCpuTime(worldPass, worldElapsed.count(), false);
+	ResetViewCullingCache();
+}
+
+void Engine::ResetRenderFrameStats()
+{
+	m_RenderFrameStats = {};
+	m_RenderFrameStats.FrameIndex = m_JobSystem.GetFrameIndex();
+	m_RenderFrameStats.RenderEntityCount = static_cast<uint32_t>(m_RenderState.RenderEntities.size());
+
+	for (EntityId entityId : m_RenderState.RenderEntities)
+	{
+		if (!m_Scene.IsMeshEnabled(entityId))
+		{
+			continue;
+		}
+
+		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+		if (!meshAsset)
+		{
+			continue;
+		}
+
+		++m_RenderFrameStats.EnabledMeshEntityCount;
+		bool hasTransparentMaterial = false;
+		if (meshAsset->Submeshes.empty())
+		{
+			hasTransparentMaterial = IsMaterialTransparent(entityId, 0);
+		}
+		else
+		{
+			for (const Asset::StaticMeshSubmesh& submesh : meshAsset->Submeshes)
+			{
+				if (IsMaterialTransparent(entityId, submesh.MaterialIndex))
+				{
+					hasTransparentMaterial = true;
+					break;
+				}
+			}
+		}
+
+		if (hasTransparentMaterial)
+		{
+			++m_RenderFrameStats.TransparentEntityCount;
+		}
+	}
+}
+
+void Engine::ResetViewCullingCache()
+{
+	m_ViewCullingCache.clear();
+	m_ViewportVisibleRenderEntities.clear();
+}
+
+void Engine::BuildViewportVisibleRenderList(const Camera& camera, bool isGameView)
+{
+	m_ViewportVisibleRenderEntities.clear();
+	m_ViewportVisibleRenderEntities.reserve(m_RenderState.RenderEntities.size());
+	const uint32_t requestCountBefore = m_RenderFrameStats.ViewCullingRequestCount;
+	const uint32_t culledCountBefore = m_RenderFrameStats.ViewCulledEntityCount;
+	for (EntityId entityId : m_RenderState.RenderEntities)
+	{
+		if (entityId == InvalidEntityId || !m_Scene.IsMeshEnabled(entityId) || !GetMeshAsset(entityId))
+		{
+			continue;
+		}
+		if (!m_ViewFrustumCullingEnabled || ShouldSubmitEntityForCamera(entityId, camera))
+		{
+			m_ViewportVisibleRenderEntities.push_back(entityId);
+		}
+	}
+	const uint32_t visibleListCount = static_cast<uint32_t>(m_ViewportVisibleRenderEntities.size());
+	const uint32_t requestCount = m_RenderFrameStats.ViewCullingRequestCount - requestCountBefore;
+	const uint32_t culledCount = m_RenderFrameStats.ViewCulledEntityCount - culledCountBefore;
+	m_RenderFrameStats.ViewVisibleListEntityCount += visibleListCount;
+	if (isGameView)
+	{
+		m_RenderFrameStats.GameViewCullingRequestCount += requestCount;
+		m_RenderFrameStats.GameViewVisibleListEntityCount += visibleListCount;
+		m_RenderFrameStats.GameViewCulledEntityCount += culledCount;
+	}
+	else
+	{
+		m_RenderFrameStats.SceneViewCullingRequestCount += requestCount;
+		m_RenderFrameStats.SceneViewVisibleListEntityCount += visibleListCount;
+		m_RenderFrameStats.SceneViewCulledEntityCount += culledCount;
+	}
+}
+
+bool Engine::ShouldSubmitEntityForCamera(EntityId entityId, const Camera& camera)
+{
+	++m_RenderFrameStats.ViewCullingRequestCount;
+	if (const auto cachedVisibilityIt = m_ViewCullingCache.find(entityId);
+		cachedVisibilityIt != m_ViewCullingCache.end())
+	{
+		++m_RenderFrameStats.ViewCullingCacheHitCount;
+		if (cachedVisibilityIt->second)
+		{
+			++m_RenderFrameStats.ViewVisibleEntityCount;
+		}
+		else
+		{
+			++m_RenderFrameStats.ViewCulledEntityCount;
+		}
+		return cachedVisibilityIt->second;
+	}
+
+	++m_RenderFrameStats.ViewCullingCacheMissCount;
+	++m_RenderFrameStats.ViewCullingTestCount;
+
+	const TransformComponent* transform = m_Scene.GetTransformComponent(entityId);
+	const BoundsComponent* bounds = m_Scene.GetBoundsComponent(entityId);
+	if (!transform || !bounds)
+	{
+		m_ViewCullingCache[entityId] = true;
+		++m_RenderFrameStats.ViewVisibleEntityCount;
+		return true;
+	}
+
+	const DirectX::XMVECTOR localMin = DirectX::XMLoadFloat3(&bounds->LocalMin);
+	const DirectX::XMVECTOR localMax = DirectX::XMLoadFloat3(&bounds->LocalMax);
+	const DirectX::XMVECTOR localCenter = DirectX::XMVectorScale(DirectX::XMVectorAdd(localMin, localMax), 0.5f);
+	const DirectX::XMVECTOR localExtent = DirectX::XMVectorScale(DirectX::XMVectorSubtract(localMax, localMin), 0.5f);
+	const DirectX::XMVECTOR worldCenter = DirectX::XMVector3TransformCoord(localCenter, transform->GetWorldXmMatrix());
+
+	const DirectX::XMFLOAT3& scale = transform->WorldTransform.Scale;
+	const float maxScale = (std::max)(0.0001f, (std::max)(std::fabs(scale.x), (std::max)(std::fabs(scale.y), std::fabs(scale.z))));
+	const float localRadius = DirectX::XMVectorGetX(DirectX::XMVector3Length(localExtent));
+	const float radius = (std::max)(localRadius * maxScale, 0.001f);
+
+	const DirectX::XMFLOAT3 cameraPositionValue = camera.GetPosition();
+	const DirectX::XMFLOAT3 cameraForwardValue = camera.GetForward();
+	const DirectX::XMFLOAT3 cameraRightValue = camera.GetRight();
+	const DirectX::XMFLOAT3 cameraUpValue = camera.GetUp();
+	const DirectX::XMVECTOR cameraPosition = DirectX::XMLoadFloat3(&cameraPositionValue);
+	const DirectX::XMVECTOR cameraForward = DirectX::XMVector3Normalize(DirectX::XMLoadFloat3(&cameraForwardValue));
+	const DirectX::XMVECTOR cameraRight = DirectX::XMVector3Normalize(DirectX::XMLoadFloat3(&cameraRightValue));
+	const DirectX::XMVECTOR cameraUp = DirectX::XMVector3Normalize(DirectX::XMLoadFloat3(&cameraUpValue));
+	const DirectX::XMVECTOR toCenter = DirectX::XMVectorSubtract(worldCenter, cameraPosition);
+
+	const float z = DirectX::XMVectorGetX(DirectX::XMVector3Dot(toCenter, cameraForward));
+	const float x = DirectX::XMVectorGetX(DirectX::XMVector3Dot(toCenter, cameraRight));
+	const float y = DirectX::XMVectorGetX(DirectX::XMVector3Dot(toCenter, cameraUp));
+	const float nearZ = (std::max)(camera.GetNearZ(), 0.001f);
+	const float farZ = (std::max)(camera.GetFarZ(), nearZ + 0.001f);
+	const float tanY = std::tan((std::max)(camera.GetFovY(), 0.001f) * 0.5f);
+	const float tanX = tanY * (std::max)(camera.GetAspect(), 0.001f);
+	const float invSideLengthX = 1.0f / std::sqrt(tanX * tanX + 1.0f);
+	const float invSideLengthY = 1.0f / std::sqrt(tanY * tanY + 1.0f);
+	const float sideCosX = invSideLengthX;
+	const float sideSinX = tanX * invSideLengthX;
+	const float sideCosY = invSideLengthY;
+	const float sideSinY = tanY * invSideLengthY;
+
+	const bool visible =
+		z + radius >= nearZ &&
+		z - radius <= farZ &&
+		(x * sideCosX + z * sideSinX) >= -radius &&
+		(-x * sideCosX + z * sideSinX) >= -radius &&
+		(y * sideCosY + z * sideSinY) >= -radius &&
+		(-y * sideCosY + z * sideSinY) >= -radius;
+
+	if (visible)
+	{
+		++m_RenderFrameStats.ViewVisibleEntityCount;
+	}
+	else
+	{
+		++m_RenderFrameStats.ViewCulledEntityCount;
+	}
+	m_ViewCullingCache[entityId] = visible;
+	return visible;
+}
+
+void Engine::RecordIndexedDraw(Rendering::DrawSubmissionKind kind, uint32_t indexCount, uint32_t instanceCount) noexcept
+{
+	const uint32_t safeInstanceCount = (std::max)(instanceCount, 1u);
+	++m_RenderFrameStats.DrawCallCount;
+	++m_RenderFrameStats.IndexedDrawCallCount;
+	if (safeInstanceCount > 1)
+	{
+		++m_RenderFrameStats.InstancedDrawCallCount;
+	}
+	m_RenderFrameStats.SubmittedIndexCount += static_cast<uint64_t>(indexCount) * safeInstanceCount;
+	m_RenderFrameStats.SubmittedTriangleCount += static_cast<uint64_t>(indexCount / 3u) * safeInstanceCount;
+	m_RenderFrameStats.SubmittedInstanceCount += safeInstanceCount;
+
+	switch (kind)
+	{
+	case Rendering::DrawSubmissionKind::Transparent:
+		++m_RenderFrameStats.TransparentDrawCallCount;
+		break;
+	case Rendering::DrawSubmissionKind::Shadow:
+		++m_RenderFrameStats.ShadowDrawCallCount;
+		break;
+	case Rendering::DrawSubmissionKind::DeferredGeometry:
+		++m_RenderFrameStats.DeferredGeometryDrawCallCount;
+		break;
+	case Rendering::DrawSubmissionKind::Benchmark:
+		++m_RenderFrameStats.BenchmarkDrawCallCount;
+		break;
+	case Rendering::DrawSubmissionKind::Fullscreen:
+		++m_RenderFrameStats.FullscreenDrawCallCount;
+		break;
+	case Rendering::DrawSubmissionKind::Opaque:
+	default:
+		++m_RenderFrameStats.OpaqueDrawCallCount;
+		break;
+	}
+}
+
+void Engine::RecordFullscreenDraw(Rendering::DrawSubmissionKind kind, uint32_t vertexCount, uint32_t instanceCount) noexcept
+{
+	const uint32_t safeInstanceCount = (std::max)(instanceCount, 1u);
+	++m_RenderFrameStats.DrawCallCount;
+	++m_RenderFrameStats.FullscreenDrawCallCount;
+	if (safeInstanceCount > 1)
+	{
+		++m_RenderFrameStats.InstancedDrawCallCount;
+	}
+	m_RenderFrameStats.SubmittedTriangleCount += static_cast<uint64_t>(vertexCount / 3u) * safeInstanceCount;
+	m_RenderFrameStats.SubmittedInstanceCount += safeInstanceCount;
+
+	if (kind == Rendering::DrawSubmissionKind::Benchmark)
+	{
+		++m_RenderFrameStats.BenchmarkDrawCallCount;
+	}
 }
 
 void Engine::FramePrimaryRenderableCamera()
@@ -4036,8 +5517,9 @@ void Engine::DrawDx12BenchmarkInstances(const Camera& camera)
 {
 	auto native = static_cast<ID3D12GraphicsCommandList*>(m_Graphics.CommandList->GetNativeResource());
 	auto cameraResource = m_StaticMeshRenderer.CameraBuffer ? static_cast<ID3D12Resource*>(m_StaticMeshRenderer.CameraBuffer->GetNativeResource()) : nullptr;
+	auto lightResource = m_StaticMeshRenderer.DeferredLightBuffer ? static_cast<ID3D12Resource*>(m_StaticMeshRenderer.DeferredLightBuffer->GetNativeResource()) : nullptr;
 	auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device.get());
-	if (!native || !cameraResource || !dx12Device || !m_StaticMeshRenderer.Dx12.PipelineState || !m_StaticMeshRenderer.Dx12.RootSignature)
+	if (!native || !cameraResource || !lightResource || !dx12Device || !m_StaticMeshRenderer.Dx12.PipelineState || !m_StaticMeshRenderer.Dx12.RootSignature)
 	{
 		return;
 	}
@@ -4089,6 +5571,7 @@ void Engine::DrawDx12BenchmarkInstances(const Camera& camera)
 
 	native->SetGraphicsRootSignature(m_StaticMeshRenderer.Dx12.RootSignature.Get());
 	native->SetGraphicsRootConstantBufferView(0, cameraResource->GetGPUVirtualAddress() + cameraOffset);
+	native->SetGraphicsRootShaderResourceView(2, lightResource->GetGPUVirtualAddress());
 	ID3D12DescriptorHeap* descriptorHeaps[] = { m_StaticMeshRenderer.Dx12.ShaderResourceHeap.Get() };
 	native->SetDescriptorHeaps(1, descriptorHeaps);
 	native->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -4102,16 +5585,18 @@ void Engine::DrawDx12BenchmarkInstances(const Camera& camera)
 		if (meshAsset->Submeshes.empty())
 		{
 			native->SetGraphicsRootDescriptorTable(1, baseHandle);
+			RecordIndexedDraw(Rendering::DrawSubmissionKind::Benchmark, static_cast<uint32_t>(meshAsset->Indices.size()), instanceCount);
 			m_Graphics.CommandList->DrawIndexedInstanced(static_cast<uint32_t>(meshAsset->Indices.size()), instanceCount, 0, 0, 0);
 			return;
 		}
 
 		for (const auto& submesh : meshAsset->Submeshes)
 		{
-			const size_t materialIndex = submesh.MaterialIndex < m_StaticMeshRenderer.Dx12.MaterialTextures.size() ? submesh.MaterialIndex : 0;
+			const size_t materialIndex = submesh.MaterialIndex < m_StaticMeshRenderer.Dx12.MaterialCount ? submesh.MaterialIndex : 0;
 			D3D12_GPU_DESCRIPTOR_HANDLE materialHandle = baseHandle;
-			materialHandle.ptr += static_cast<SIZE_T>(descriptorSize) * materialIndex;
+			materialHandle.ptr += static_cast<SIZE_T>(descriptorSize) * materialIndex * MaterialSlotCount();
 			native->SetGraphicsRootDescriptorTable(1, materialHandle);
+			RecordIndexedDraw(Rendering::DrawSubmissionKind::Benchmark, submesh.IndexCount, instanceCount);
 			m_Graphics.CommandList->DrawIndexedInstanced(submesh.IndexCount, instanceCount, submesh.IndexOffset, 0, 0);
 		}
 		return;
@@ -4121,6 +5606,7 @@ void Engine::DrawDx12BenchmarkInstances(const Camera& camera)
 	const BenchmarkGeometry& geometry = config.ObjectType == Samples::Benchmark::BenchmarkObjectType::Spider
 		? GetBenchmarkSpiderGlyphGeometry()
 		: GetBenchmarkPrimitiveGeometry();
+	RecordIndexedDraw(Rendering::DrawSubmissionKind::Benchmark, static_cast<uint32_t>(geometry.Indices.size()), instanceCount);
 	m_Graphics.CommandList->DrawIndexedInstanced(static_cast<uint32_t>(geometry.Indices.size()), instanceCount, 0, 0, 0);
 }
 
@@ -4195,6 +5681,7 @@ void Engine::DrawVulkanBenchmarkInstances(const Camera& camera)
 				&descriptorSet,
 				1,
 				&cameraDynamicOffset);
+			RecordIndexedDraw(Rendering::DrawSubmissionKind::Benchmark, static_cast<uint32_t>(meshAsset->Indices.size()), instanceCount);
 			m_Graphics.CommandList->DrawIndexedInstanced(static_cast<uint32_t>(meshAsset->Indices.size()), instanceCount, 0, 0, 0);
 			return;
 		}
@@ -4212,6 +5699,7 @@ void Engine::DrawVulkanBenchmarkInstances(const Camera& camera)
 				&descriptorSet,
 				1,
 				&cameraDynamicOffset);
+			RecordIndexedDraw(Rendering::DrawSubmissionKind::Benchmark, submesh.IndexCount, instanceCount);
 			m_Graphics.CommandList->DrawIndexedInstanced(submesh.IndexCount, instanceCount, submesh.IndexOffset, 0, 0);
 		}
 		return;
@@ -4230,6 +5718,7 @@ void Engine::DrawVulkanBenchmarkInstances(const Camera& camera)
 	const BenchmarkGeometry& geometry = config.ObjectType == Samples::Benchmark::BenchmarkObjectType::Spider
 		? GetBenchmarkSpiderGlyphGeometry()
 		: GetBenchmarkPrimitiveGeometry();
+	RecordIndexedDraw(Rendering::DrawSubmissionKind::Benchmark, static_cast<uint32_t>(geometry.Indices.size()), instanceCount);
 	m_Graphics.CommandList->DrawIndexedInstanced(static_cast<uint32_t>(geometry.Indices.size()), instanceCount, 0, 0, 0);
 }
 
@@ -4268,6 +5757,7 @@ uint64_t Engine::UpdateBenchmarkCameraBuffer(const Camera& camera, uint32_t inst
 	DirectX::XMStoreFloat4x4(&cameraConstants.WorldViewProjection, camera.GetProjectionMatrix());
 	DirectX::XMStoreFloat4x4(&cameraConstants.ViewProjection, camera.GetViewProjectionMatrix());
 	DirectX::XMStoreFloat4x4(&cameraConstants.World, DirectX::XMMatrixIdentity());
+	DirectX::XMStoreFloat4x4(&cameraConstants.WorldInverseTranspose, DirectX::XMMatrixIdentity());
 	const auto position = camera.GetPosition();
 	cameraConstants.CameraPosition = { position.x, position.y, position.z, 1.0f };
 	cameraConstants.BenchmarkParams = {
@@ -4277,6 +5767,10 @@ uint64_t Engine::UpdateBenchmarkCameraBuffer(const Camera& camera, uint32_t inst
 		camera.GetAspect()
 	};
 	cameraConstants.AmbientSpecular = { 1.0f, 0.0f, 1.0f, 0.0f };
+	cameraConstants.AmbientColorIntensity = { 1.0f, 1.0f, 1.0f, 1.0f };
+	cameraConstants.ExposureDebug = { 1.0f, 0.0f, 0.0f, 0.0f };
+	cameraConstants.LightCountParams = { 0.0f, 0.0f, 0.0f, 0.0f };
+	cameraConstants.MaterialTextureFlags2.w = 1.0f;
 
 	return WriteCameraConstants(cameraConstants);
 }
@@ -4313,11 +5807,12 @@ bool Engine::CreateDx12TriangleResources()
 	}
 
 	CD3DX12_DESCRIPTOR_RANGE descriptorRange = {};
-	descriptorRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+	descriptorRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, static_cast<UINT>(MaterialSlotCount()), 0);
 
-	CD3DX12_ROOT_PARAMETER rootParameters[2] = {};
+	CD3DX12_ROOT_PARAMETER rootParameters[3] = {};
 	rootParameters[0].InitAsConstantBufferView(0);
 	rootParameters[1].InitAsDescriptorTable(1, &descriptorRange, D3D12_SHADER_VISIBILITY_PIXEL);
+	rootParameters[2].InitAsShaderResourceView(10, 0, D3D12_SHADER_VISIBILITY_PIXEL);
 
 	CD3DX12_STATIC_SAMPLER_DESC samplerDesc(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
 	samplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
@@ -4325,7 +5820,7 @@ bool Engine::CreateDx12TriangleResources()
 	samplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
 
 	CD3DX12_ROOT_SIGNATURE_DESC rootSignatureDesc;
-	rootSignatureDesc.Init(2, rootParameters, 1, &samplerDesc, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+	rootSignatureDesc.Init(static_cast<UINT>(std::size(rootParameters)), rootParameters, 1, &samplerDesc, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
 	ComPtr<ID3DBlob> signature;
 	if (FAILED(D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &errors)))
@@ -4341,10 +5836,12 @@ bool Engine::CreateDx12TriangleResources()
 
 	static constexpr D3D12_INPUT_ELEMENT_DESC inputLayout[] =
 	{
-		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(Asset::StaticMeshVertex, Position)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(Asset::StaticMeshVertex, Normal)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(Asset::StaticMeshVertex, TexCoord)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, static_cast<UINT>(offsetof(Asset::StaticMeshVertex, Color)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TANGENT", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(Asset::StaticMeshVertex, Tangent)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TANGENTSIGN", 0, DXGI_FORMAT_R32_FLOAT, 0, static_cast<UINT>(offsetof(Asset::StaticMeshVertex, TangentSign)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
 	};
 
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
@@ -4383,22 +5880,1054 @@ bool Engine::CreateDx12TriangleResources()
 	transparentPsoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
 	transparentPsoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
 
-	return SUCCEEDED(dx12Device->GetD3DDevice()->CreateGraphicsPipelineState(&transparentPsoDesc, IID_PPV_ARGS(&m_StaticMeshRenderer.Dx12.TransparentPipelineState)));
+	if (FAILED(dx12Device->GetD3DDevice()->CreateGraphicsPipelineState(&transparentPsoDesc, IID_PPV_ARGS(&m_StaticMeshRenderer.Dx12.TransparentPipelineState))))
+	{
+		return false;
+	}
+
+	if (!CreateDx12ShadowResources())
+	{
+		return false;
+	}
+
+	return CreateDx12DeferredResources();
+}
+
+bool Engine::CreateDx12DeferredResources()
+{
+	auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device.get());
+	if (!dx12Device || !m_StaticMeshRenderer.Dx12.RootSignature)
+	{
+		return false;
+	}
+
+	const std::string geometryShaderSource = ShaderUtils::LoadShaderSource(GetDx12DeferredGeometryShaderPath());
+	const std::string lightingShaderSource = ShaderUtils::LoadShaderSource(GetDx12DeferredLightingShaderPath());
+	const std::string toneMapShaderSource = ShaderUtils::LoadShaderSource(GetDx12ToneMapShaderPath());
+	if (geometryShaderSource.empty() || lightingShaderSource.empty() || toneMapShaderSource.empty())
+	{
+		MessageBoxW(m_hMainWnd, L"DirectX12 Deferred 셰이더 파일을 읽을 수 없습니다.", L"Shader Error", MB_OK | MB_ICONERROR);
+		return false;
+	}
+
+	ComPtr<ID3DBlob> geometryVertexShader;
+	ComPtr<ID3DBlob> geometryPixelShader;
+	ComPtr<ID3DBlob> lightingVertexShader;
+	ComPtr<ID3DBlob> lightingPixelShader;
+	ComPtr<ID3DBlob> toneMapVertexShader;
+	ComPtr<ID3DBlob> toneMapPixelShader;
+	ComPtr<ID3DBlob> errors;
+	if (FAILED(D3DCompile(geometryShaderSource.c_str(), geometryShaderSource.size(), nullptr, nullptr, nullptr, "VSMain", "vs_5_0", 0, 0, &geometryVertexShader, &errors)) ||
+		FAILED(D3DCompile(geometryShaderSource.c_str(), geometryShaderSource.size(), nullptr, nullptr, nullptr, "PSMain", "ps_5_0", 0, 0, &geometryPixelShader, &errors)) ||
+		FAILED(D3DCompile(lightingShaderSource.c_str(), lightingShaderSource.size(), nullptr, nullptr, nullptr, "VSMain", "vs_5_0", 0, 0, &lightingVertexShader, &errors)) ||
+		FAILED(D3DCompile(lightingShaderSource.c_str(), lightingShaderSource.size(), nullptr, nullptr, nullptr, "PSMain", "ps_5_0", 0, 0, &lightingPixelShader, &errors)) ||
+		FAILED(D3DCompile(toneMapShaderSource.c_str(), toneMapShaderSource.size(), nullptr, nullptr, nullptr, "VSMain", "vs_5_0", 0, 0, &toneMapVertexShader, &errors)) ||
+		FAILED(D3DCompile(toneMapShaderSource.c_str(), toneMapShaderSource.size(), nullptr, nullptr, nullptr, "PSMain", "ps_5_0", 0, 0, &toneMapPixelShader, &errors)))
+	{
+		return false;
+	}
+
+	static constexpr D3D12_INPUT_ELEMENT_DESC inputLayout[] =
+	{
+		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(Asset::StaticMeshVertex, Position)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(Asset::StaticMeshVertex, Normal)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(Asset::StaticMeshVertex, TexCoord)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, static_cast<UINT>(offsetof(Asset::StaticMeshVertex, Color)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TANGENT", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(Asset::StaticMeshVertex, Tangent)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TANGENTSIGN", 0, DXGI_FORMAT_R32_FLOAT, 0, static_cast<UINT>(offsetof(Asset::StaticMeshVertex, TangentSign)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+	};
+
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC geometryPsoDesc = {};
+	geometryPsoDesc.pRootSignature = m_StaticMeshRenderer.Dx12.RootSignature.Get();
+	geometryPsoDesc.VS = { geometryVertexShader->GetBufferPointer(), geometryVertexShader->GetBufferSize() };
+	geometryPsoDesc.PS = { geometryPixelShader->GetBufferPointer(), geometryPixelShader->GetBufferSize() };
+	geometryPsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+	geometryPsoDesc.SampleMask = UINT_MAX;
+	geometryPsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+	geometryPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+	geometryPsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+	geometryPsoDesc.DepthStencilState.DepthEnable = TRUE;
+	geometryPsoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+	geometryPsoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+	geometryPsoDesc.DepthStencilState.StencilEnable = FALSE;
+	geometryPsoDesc.InputLayout = { inputLayout, _countof(inputLayout) };
+	geometryPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	geometryPsoDesc.NumRenderTargets = static_cast<UINT>(Rendering::Dx12StaticMeshResources::DeferredResources::GBufferCount);
+	for (UINT targetIndex = 0; targetIndex < geometryPsoDesc.NumRenderTargets; ++targetIndex)
+	{
+		geometryPsoDesc.RTVFormats[targetIndex] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+	}
+	geometryPsoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+	geometryPsoDesc.SampleDesc.Count = 1;
+	if (FAILED(dx12Device->GetD3DDevice()->CreateGraphicsPipelineState(&geometryPsoDesc, IID_PPV_ARGS(&m_StaticMeshRenderer.Dx12.Deferred.GeometryPipelineState))))
+	{
+		return false;
+	}
+
+	CD3DX12_DESCRIPTOR_RANGE gbufferRange = {};
+	gbufferRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, static_cast<UINT>(Rendering::Dx12StaticMeshResources::DeferredResources::LightingSrvCount), 0);
+	CD3DX12_ROOT_PARAMETER lightingRootParameters[5] = {};
+	lightingRootParameters[0].InitAsConstantBufferView(0);
+	lightingRootParameters[1].InitAsDescriptorTable(1, &gbufferRange, D3D12_SHADER_VISIBILITY_PIXEL);
+	lightingRootParameters[2].InitAsShaderResourceView(10, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+	lightingRootParameters[3].InitAsShaderResourceView(11, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+	lightingRootParameters[4].InitAsShaderResourceView(12, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+	CD3DX12_STATIC_SAMPLER_DESC lightingSamplers[2] = {
+		CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR),
+		CD3DX12_STATIC_SAMPLER_DESC(1, D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT)
+	};
+	lightingSamplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+	lightingSamplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+	lightingSamplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+	lightingSamplers[1].AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+	lightingSamplers[1].AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+	lightingSamplers[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+	lightingSamplers[1].ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+	lightingSamplers[1].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+	CD3DX12_ROOT_SIGNATURE_DESC lightingRootSignatureDesc;
+	lightingRootSignatureDesc.Init(static_cast<UINT>(std::size(lightingRootParameters)), lightingRootParameters, static_cast<UINT>(std::size(lightingSamplers)), lightingSamplers, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+
+	ComPtr<ID3DBlob> lightingSignature;
+	if (FAILED(D3D12SerializeRootSignature(&lightingRootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &lightingSignature, &errors)) ||
+		FAILED(dx12Device->GetD3DDevice()->CreateRootSignature(0, lightingSignature->GetBufferPointer(), lightingSignature->GetBufferSize(), IID_PPV_ARGS(&m_StaticMeshRenderer.Dx12.Deferred.LightingRootSignature))))
+	{
+		return false;
+	}
+
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC lightingPsoDesc = {};
+	lightingPsoDesc.pRootSignature = m_StaticMeshRenderer.Dx12.Deferred.LightingRootSignature.Get();
+	lightingPsoDesc.VS = { lightingVertexShader->GetBufferPointer(), lightingVertexShader->GetBufferSize() };
+	lightingPsoDesc.PS = { lightingPixelShader->GetBufferPointer(), lightingPixelShader->GetBufferSize() };
+	lightingPsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+	lightingPsoDesc.SampleMask = UINT_MAX;
+	lightingPsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+	lightingPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+	lightingPsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+	lightingPsoDesc.DepthStencilState.DepthEnable = FALSE;
+	lightingPsoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+	lightingPsoDesc.InputLayout = {};
+	lightingPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	lightingPsoDesc.NumRenderTargets = 1;
+	lightingPsoDesc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+	lightingPsoDesc.SampleDesc.Count = 1;
+	if (FAILED(dx12Device->GetD3DDevice()->CreateGraphicsPipelineState(&lightingPsoDesc, IID_PPV_ARGS(&m_StaticMeshRenderer.Dx12.Deferred.LightingPipelineState))))
+	{
+		return false;
+	}
+
+	CD3DX12_DESCRIPTOR_RANGE hdrRange = {};
+	hdrRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+	CD3DX12_ROOT_PARAMETER toneMapRootParameters[2] = {};
+	toneMapRootParameters[0].InitAsConstants(4, 0, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+	toneMapRootParameters[1].InitAsDescriptorTable(1, &hdrRange, D3D12_SHADER_VISIBILITY_PIXEL);
+	CD3DX12_STATIC_SAMPLER_DESC toneMapSamplerDesc(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
+	toneMapSamplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+	toneMapSamplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+	toneMapSamplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+	CD3DX12_ROOT_SIGNATURE_DESC toneMapRootSignatureDesc;
+	toneMapRootSignatureDesc.Init(static_cast<UINT>(std::size(toneMapRootParameters)), toneMapRootParameters, 1, &toneMapSamplerDesc, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+
+	ComPtr<ID3DBlob> toneMapSignature;
+	if (FAILED(D3D12SerializeRootSignature(&toneMapRootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &toneMapSignature, &errors)) ||
+		FAILED(dx12Device->GetD3DDevice()->CreateRootSignature(0, toneMapSignature->GetBufferPointer(), toneMapSignature->GetBufferSize(), IID_PPV_ARGS(&m_StaticMeshRenderer.Dx12.Deferred.ToneMapRootSignature))))
+	{
+		return false;
+	}
+
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC toneMapPsoDesc = {};
+	toneMapPsoDesc.pRootSignature = m_StaticMeshRenderer.Dx12.Deferred.ToneMapRootSignature.Get();
+	toneMapPsoDesc.VS = { toneMapVertexShader->GetBufferPointer(), toneMapVertexShader->GetBufferSize() };
+	toneMapPsoDesc.PS = { toneMapPixelShader->GetBufferPointer(), toneMapPixelShader->GetBufferSize() };
+	toneMapPsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+	toneMapPsoDesc.SampleMask = UINT_MAX;
+	toneMapPsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+	toneMapPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+	toneMapPsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+	toneMapPsoDesc.DepthStencilState.DepthEnable = FALSE;
+	toneMapPsoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+	toneMapPsoDesc.InputLayout = {};
+	toneMapPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	toneMapPsoDesc.NumRenderTargets = 1;
+	toneMapPsoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+	toneMapPsoDesc.SampleDesc.Count = 1;
+	if (FAILED(dx12Device->GetD3DDevice()->CreateGraphicsPipelineState(&toneMapPsoDesc, IID_PPV_ARGS(&m_StaticMeshRenderer.Dx12.Deferred.ToneMapPipelineState))))
+	{
+		return false;
+	}
+
+	return EnsureDx12DeferredResources();
+}
+
+bool Engine::CreateDx12ShadowResources()
+{
+	auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device.get());
+	if (!dx12Device)
+	{
+		return false;
+	}
+
+	const std::string shadowShaderSource = ShaderUtils::LoadShaderSource(GetDx12ShadowDepthShaderPath());
+	if (shadowShaderSource.empty())
+	{
+		MessageBoxW(m_hMainWnd, L"DirectX12 Shadow 셰이더 파일을 읽을 수 없습니다.", L"Shader Error", MB_OK | MB_ICONERROR);
+		return false;
+	}
+
+	ComPtr<ID3DBlob> vertexShader;
+	ComPtr<ID3DBlob> errors;
+	if (FAILED(D3DCompile(shadowShaderSource.c_str(), shadowShaderSource.size(), nullptr, nullptr, nullptr, "VSMain", "vs_5_0", 0, 0, &vertexShader, &errors)))
+	{
+		return false;
+	}
+
+	CD3DX12_ROOT_PARAMETER rootParameters[1] = {};
+	rootParameters[0].InitAsConstantBufferView(0);
+
+	CD3DX12_ROOT_SIGNATURE_DESC rootSignatureDesc;
+	rootSignatureDesc.Init(static_cast<UINT>(std::size(rootParameters)), rootParameters, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+	ComPtr<ID3DBlob> signature;
+	if (FAILED(D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &errors)) ||
+		FAILED(dx12Device->GetD3DDevice()->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&m_StaticMeshRenderer.Dx12.Shadow.RootSignature))))
+	{
+		return false;
+	}
+
+	static constexpr D3D12_INPUT_ELEMENT_DESC inputLayout[] =
+	{
+		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(Asset::StaticMeshVertex, Position)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(Asset::StaticMeshVertex, Normal)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, static_cast<UINT>(offsetof(Asset::StaticMeshVertex, TexCoord)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, static_cast<UINT>(offsetof(Asset::StaticMeshVertex, Color)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TANGENT", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(Asset::StaticMeshVertex, Tangent)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TANGENTSIGN", 0, DXGI_FORMAT_R32_FLOAT, 0, static_cast<UINT>(offsetof(Asset::StaticMeshVertex, TangentSign)), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+	};
+
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+	psoDesc.pRootSignature = m_StaticMeshRenderer.Dx12.Shadow.RootSignature.Get();
+	psoDesc.VS = { vertexShader->GetBufferPointer(), vertexShader->GetBufferSize() };
+	psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+	psoDesc.SampleMask = UINT_MAX;
+	psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+	psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+	psoDesc.RasterizerState.DepthBias = 1000;
+	psoDesc.RasterizerState.SlopeScaledDepthBias = 2.0f;
+	psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+	psoDesc.DepthStencilState.DepthEnable = TRUE;
+	psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+	psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+	psoDesc.DepthStencilState.StencilEnable = FALSE;
+	psoDesc.InputLayout = { inputLayout, _countof(inputLayout) };
+	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	psoDesc.NumRenderTargets = 0;
+	psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+	psoDesc.SampleDesc.Count = 1;
+	if (FAILED(dx12Device->GetD3DDevice()->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_StaticMeshRenderer.Dx12.Shadow.PipelineState))))
+	{
+		return false;
+	}
+
+	return EnsureDx12ShadowResources();
+}
+
+bool Engine::EnsureDx12ShadowResources()
+{
+	auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device.get());
+	if (!dx12Device)
+	{
+		return false;
+	}
+
+	auto& shadow = m_StaticMeshRenderer.Dx12.Shadow;
+	if (!m_ShadowSettings.Enabled)
+	{
+		shadow.DepthTexture.Reset();
+		shadow.DsvHeap.Reset();
+		shadow.Size = 0;
+		shadow.IsValid = false;
+		WriteDx12DeferredShadowSrv();
+		return true;
+	}
+
+	const uint32_t mapSize = std::clamp(m_ShadowSettings.MapSize, 256u, 8192u);
+	if (shadow.IsValid && shadow.Size == mapSize)
+	{
+		WriteDx12DeferredShadowSrv();
+		return true;
+	}
+
+	m_Graphics.Device->WaitForGPU();
+	shadow.DepthTexture.Reset();
+	shadow.DsvHeap.Reset();
+	shadow.Size = mapSize;
+
+	D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
+	dsvHeapDesc.NumDescriptors = 1;
+	dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+	dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+	if (FAILED(dx12Device->GetD3DDevice()->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&shadow.DsvHeap))))
+	{
+		shadow.IsValid = false;
+		return false;
+	}
+
+	const CD3DX12_HEAP_PROPERTIES heapProperties(D3D12_HEAP_TYPE_DEFAULT);
+	const D3D12_CLEAR_VALUE clearValue = {
+		.Format = DXGI_FORMAT_D32_FLOAT,
+		.DepthStencil = { 1.0f, 0 }
+	};
+	D3D12_RESOURCE_DESC textureDesc = CD3DX12_RESOURCE_DESC::Tex2D(
+		DXGI_FORMAT_R32_TYPELESS,
+		mapSize,
+		mapSize,
+		1,
+		1,
+		1,
+		0,
+		D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+	if (FAILED(dx12Device->GetD3DDevice()->CreateCommittedResource(
+		&heapProperties,
+		D3D12_HEAP_FLAG_NONE,
+		&textureDesc,
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+		&clearValue,
+		IID_PPV_ARGS(&shadow.DepthTexture))))
+	{
+		shadow.IsValid = false;
+		return false;
+	}
+
+	D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
+	dsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
+	dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+	dx12Device->GetD3DDevice()->CreateDepthStencilView(shadow.DepthTexture.Get(), &dsvDesc, shadow.DsvHeap->GetCPUDescriptorHandleForHeapStart());
+
+	shadow.IsValid = true;
+	WriteDx12DeferredShadowSrv();
+	return true;
+}
+
+void Engine::WriteDx12DeferredShadowSrv()
+{
+	auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device.get());
+	auto& deferred = m_StaticMeshRenderer.Dx12.Deferred;
+	if (!dx12Device || !deferred.GBufferSrvHeap)
+	{
+		return;
+	}
+
+	const UINT descriptorSize = dx12Device->GetD3DDevice()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(
+		deferred.GBufferSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+		static_cast<INT>(Rendering::Dx12StaticMeshResources::DeferredResources::ShadowSrvIndex),
+		descriptorSize);
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srvDesc.Texture2D.MipLevels = 1;
+	dx12Device->GetD3DDevice()->CreateShaderResourceView(m_StaticMeshRenderer.Dx12.Shadow.DepthTexture.Get(), &srvDesc, srvHandle);
+}
+
+void Engine::WriteDx12DeferredHdrSrv()
+{
+	auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device.get());
+	auto& deferred = m_StaticMeshRenderer.Dx12.Deferred;
+	if (!dx12Device || !deferred.GBufferSrvHeap)
+	{
+		return;
+	}
+
+	const UINT descriptorSize = dx12Device->GetD3DDevice()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(
+		deferred.GBufferSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+		static_cast<INT>(Rendering::Dx12StaticMeshResources::DeferredResources::HdrSrvIndex),
+		descriptorSize);
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srvDesc.Texture2D.MipLevels = 1;
+	dx12Device->GetD3DDevice()->CreateShaderResourceView(deferred.HdrColorTexture.Get(), &srvDesc, srvHandle);
+}
+
+bool Engine::EnsureDx12DeferredResources()
+{
+	auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device.get());
+	if (!dx12Device)
+	{
+		return false;
+	}
+
+	auto& deferred = m_StaticMeshRenderer.Dx12.Deferred;
+	if (!EnsureDx12ShadowResources())
+	{
+		return false;
+	}
+
+	const uint32_t width = static_cast<uint32_t>((std::max)(m_ClientWidth, 1));
+	const uint32_t height = static_cast<uint32_t>((std::max)(m_ClientHeight, 1));
+	bool gBuffersValid = true;
+	for (const auto& texture : deferred.GBufferTextures)
+	{
+		gBuffersValid = gBuffersValid && texture != nullptr;
+	}
+
+	if (deferred.IsValid &&
+		deferred.Width == width &&
+		deferred.Height == height &&
+		gBuffersValid &&
+		deferred.GBufferRtvHeap &&
+		deferred.GBufferSrvHeap &&
+		deferred.HdrColorTexture &&
+		deferred.HdrRtvHeap)
+	{
+		WriteDx12DeferredShadowSrv();
+		WriteDx12DeferredHdrSrv();
+		return true;
+	}
+
+	m_Graphics.Device->WaitForGPU();
+	for (auto& texture : deferred.GBufferTextures)
+	{
+		texture.Reset();
+	}
+	deferred.HdrColorTexture.Reset();
+	deferred.GBufferRtvHeap.Reset();
+	deferred.HdrRtvHeap.Reset();
+	deferred.GBufferSrvHeap.Reset();
+	deferred.Width = width;
+	deferred.Height = height;
+
+	D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
+	rtvHeapDesc.NumDescriptors = static_cast<UINT>(Rendering::Dx12StaticMeshResources::DeferredResources::GBufferCount);
+	rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+	rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+	if (FAILED(dx12Device->GetD3DDevice()->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&deferred.GBufferRtvHeap))))
+	{
+		deferred.IsValid = false;
+		return false;
+	}
+	deferred.RtvDescriptorSize = dx12Device->GetD3DDevice()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+
+	D3D12_DESCRIPTOR_HEAP_DESC hdrRtvHeapDesc = {};
+	hdrRtvHeapDesc.NumDescriptors = 1;
+	hdrRtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+	hdrRtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+	if (FAILED(dx12Device->GetD3DDevice()->CreateDescriptorHeap(&hdrRtvHeapDesc, IID_PPV_ARGS(&deferred.HdrRtvHeap))))
+	{
+		deferred.IsValid = false;
+		return false;
+	}
+
+	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
+	srvHeapDesc.NumDescriptors = static_cast<UINT>(Rendering::Dx12StaticMeshResources::DeferredResources::PostProcessSrvCount);
+	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+	if (FAILED(dx12Device->GetD3DDevice()->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&deferred.GBufferSrvHeap))))
+	{
+		deferred.IsValid = false;
+		return false;
+	}
+
+	const CD3DX12_HEAP_PROPERTIES heapProperties(D3D12_HEAP_TYPE_DEFAULT);
+	const D3D12_CLEAR_VALUE clearValue = {
+		.Format = DXGI_FORMAT_R16G16B16A16_FLOAT,
+		.Color = { 0.0f, 0.0f, 0.0f, 0.0f }
+	};
+	CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(deferred.GBufferRtvHeap->GetCPUDescriptorHandleForHeapStart());
+	CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(deferred.GBufferSrvHeap->GetCPUDescriptorHandleForHeapStart());
+	const UINT srvDescriptorSize = dx12Device->GetD3DDevice()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+	for (size_t targetIndex = 0; targetIndex < Rendering::Dx12StaticMeshResources::DeferredResources::GBufferCount; ++targetIndex)
+	{
+		D3D12_RESOURCE_DESC textureDesc = CD3DX12_RESOURCE_DESC::Tex2D(
+			DXGI_FORMAT_R16G16B16A16_FLOAT,
+			width,
+			height,
+			1,
+			1,
+			1,
+			0,
+			D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+		if (FAILED(dx12Device->GetD3DDevice()->CreateCommittedResource(
+			&heapProperties,
+			D3D12_HEAP_FLAG_NONE,
+			&textureDesc,
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+			&clearValue,
+			IID_PPV_ARGS(&deferred.GBufferTextures[targetIndex]))))
+		{
+			deferred.IsValid = false;
+			return false;
+		}
+
+		dx12Device->GetD3DDevice()->CreateRenderTargetView(deferred.GBufferTextures[targetIndex].Get(), nullptr, rtvHandle);
+		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+		srvDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srvDesc.Texture2D.MipLevels = 1;
+		dx12Device->GetD3DDevice()->CreateShaderResourceView(deferred.GBufferTextures[targetIndex].Get(), &srvDesc, srvHandle);
+
+		rtvHandle.Offset(1, deferred.RtvDescriptorSize);
+		srvHandle.Offset(1, srvDescriptorSize);
+	}
+
+	D3D12_RESOURCE_DESC hdrTextureDesc = CD3DX12_RESOURCE_DESC::Tex2D(
+		DXGI_FORMAT_R16G16B16A16_FLOAT,
+		width,
+		height,
+		1,
+		1,
+		1,
+		0,
+		D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+	if (FAILED(dx12Device->GetD3DDevice()->CreateCommittedResource(
+		&heapProperties,
+		D3D12_HEAP_FLAG_NONE,
+		&hdrTextureDesc,
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+		&clearValue,
+		IID_PPV_ARGS(&deferred.HdrColorTexture))))
+	{
+		deferred.IsValid = false;
+		return false;
+	}
+	dx12Device->GetD3DDevice()->CreateRenderTargetView(deferred.HdrColorTexture.Get(), nullptr, deferred.HdrRtvHeap->GetCPUDescriptorHandleForHeapStart());
+
+	WriteDx12DeferredShadowSrv();
+	WriteDx12DeferredHdrSrv();
+	deferred.IsValid = true;
+	return true;
 }
 
 void Engine::DestroyDx12TriangleResources()
 {
+	DestroyDx12DeferredResources();
+	DestroyDx12ShadowResources();
 	m_StaticMeshRenderer.Dx12.TransparentPipelineState.Reset();
 	m_StaticMeshRenderer.Dx12.PipelineState.Reset();
 	m_StaticMeshRenderer.Dx12.RootSignature.Reset();
+}
+
+void Engine::DestroyDx12DeferredResources()
+{
+	auto& deferred = m_StaticMeshRenderer.Dx12.Deferred;
+	for (auto& texture : deferred.GBufferTextures)
+	{
+		texture.Reset();
+	}
+	deferred.GBufferRtvHeap.Reset();
+	deferred.GBufferSrvHeap.Reset();
+	deferred.HdrColorTexture.Reset();
+	deferred.HdrRtvHeap.Reset();
+	deferred.GeometryPipelineState.Reset();
+	deferred.LightingRootSignature.Reset();
+	deferred.LightingPipelineState.Reset();
+	deferred.ToneMapRootSignature.Reset();
+	deferred.ToneMapPipelineState.Reset();
+	deferred.Width = 0;
+	deferred.Height = 0;
+	deferred.RtvDescriptorSize = 0;
+	deferred.IsValid = false;
+}
+
+void Engine::DestroyDx12ShadowResources()
+{
+	auto& shadow = m_StaticMeshRenderer.Dx12.Shadow;
+	shadow.DepthTexture.Reset();
+	shadow.DsvHeap.Reset();
+	shadow.RootSignature.Reset();
+	shadow.PipelineState.Reset();
+	shadow.Size = 0;
+	shadow.IsValid = false;
+}
+
+void Engine::DrawDx12ShadowDepthPass(const Camera& camera)
+{
+	(void)camera;
+	if (!m_ShadowFrameData.Enabled || !m_ShadowFrameData.HasDirectionalCaster || !EnsureDx12ShadowResources())
+	{
+		return;
+	}
+
+	auto native = static_cast<ID3D12GraphicsCommandList*>(m_Graphics.CommandList->GetNativeResource());
+	auto cameraResource = m_StaticMeshRenderer.CameraBuffer ? static_cast<ID3D12Resource*>(m_StaticMeshRenderer.CameraBuffer->GetNativeResource()) : nullptr;
+	auto& shadow = m_StaticMeshRenderer.Dx12.Shadow;
+	if (!native || !cameraResource || !shadow.DepthTexture || !shadow.DsvHeap || !shadow.RootSignature || !shadow.PipelineState)
+	{
+		return;
+	}
+
+	m_Graphics.CommandList->SetViewport(0.0f, 0.0f, static_cast<float>(shadow.Size), static_cast<float>(shadow.Size));
+	m_Graphics.CommandList->SetScissorRect(0, 0, static_cast<long>(shadow.Size), static_cast<long>(shadow.Size));
+	m_Graphics.CommandList->SetVertexBuffer(m_StaticMeshRenderer.VertexBuffer.get());
+	m_Graphics.CommandList->SetIndexBuffer(m_StaticMeshRenderer.IndexBuffer.get());
+
+	D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+		shadow.DepthTexture.Get(),
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+		D3D12_RESOURCE_STATE_DEPTH_WRITE);
+	native->ResourceBarrier(1, &barrier);
+
+	const D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = shadow.DsvHeap->GetCPUDescriptorHandleForHeapStart();
+	native->OMSetRenderTargets(0, nullptr, FALSE, &dsvHandle);
+	native->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+	native->SetGraphicsRootSignature(shadow.RootSignature.Get());
+	native->SetPipelineState(shadow.PipelineState.Get());
+	native->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+	for (EntityId entityId : m_RenderState.RenderEntities)
+	{
+		if (!m_Scene.IsMeshEnabled(entityId))
+		{
+			continue;
+		}
+
+		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+		if (!meshAsset)
+		{
+			continue;
+		}
+
+		UploadEntityGeometry(entityId);
+		const uint64_t cameraOffset = UpdateShadowCameraBuffer(entityId);
+		if (cameraOffset == InvalidCameraConstantOffset())
+		{
+			continue;
+		}
+		native->SetGraphicsRootConstantBufferView(0, cameraResource->GetGPUVirtualAddress() + cameraOffset);
+
+		if (meshAsset->Submeshes.empty())
+		{
+			if (!IsMaterialTransparent(entityId, 0))
+			{
+				RecordIndexedDraw(Rendering::DrawSubmissionKind::Shadow, static_cast<uint32_t>(meshAsset->Indices.size()), 1);
+				m_Graphics.CommandList->DrawIndexedInstanced(static_cast<uint32_t>(meshAsset->Indices.size()), 1, 0, 0, 0);
+			}
+			continue;
+		}
+
+		for (const auto& submesh : meshAsset->Submeshes)
+		{
+			if (!IsMaterialTransparent(entityId, submesh.MaterialIndex))
+			{
+				RecordIndexedDraw(Rendering::DrawSubmissionKind::Shadow, submesh.IndexCount, 1);
+				m_Graphics.CommandList->DrawIndexedInstanced(submesh.IndexCount, 1, submesh.IndexOffset, 0, 0);
+			}
+		}
+	}
+
+	barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+		shadow.DepthTexture.Get(),
+		D3D12_RESOURCE_STATE_DEPTH_WRITE,
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+	native->ResourceBarrier(1, &barrier);
+}
+
+void Engine::DrawDx12ToneMapPass(const Editor::ViewportPanelState& viewport)
+{
+	auto native = static_cast<ID3D12GraphicsCommandList*>(m_Graphics.CommandList->GetNativeResource());
+	auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device.get());
+	auto& deferred = m_StaticMeshRenderer.Dx12.Deferred;
+	if (!native || !dx12Device || !deferred.HdrColorTexture || !deferred.GBufferSrvHeap || !deferred.ToneMapRootSignature || !deferred.ToneMapPipelineState)
+	{
+		return;
+	}
+
+	const long left = (std::max)(0L, static_cast<long>(std::floor(viewport.Left)));
+	const long top = (std::max)(0L, static_cast<long>(std::floor(viewport.Top)));
+	const long right = (std::min)(static_cast<long>(m_ClientWidth), static_cast<long>(std::ceil(viewport.Left + viewport.Width)));
+	const long bottom = (std::min)(static_cast<long>(m_ClientHeight), static_cast<long>(std::ceil(viewport.Top + viewport.Height)));
+	if (right <= left || bottom <= top)
+	{
+		return;
+	}
+	const float width = static_cast<float>(right - left);
+	const float height = static_cast<float>(bottom - top);
+
+	D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv = {};
+	backBufferRtv.ptr = reinterpret_cast<SIZE_T>(m_Graphics.Device->GetCurrentBackBufferRTV());
+	native->OMSetRenderTargets(1, &backBufferRtv, FALSE, nullptr);
+	m_Graphics.CommandList->SetViewport(static_cast<float>(left), static_cast<float>(top), width, height);
+	m_Graphics.CommandList->SetScissorRect(left, top, right, bottom);
+	native->SetGraphicsRootSignature(deferred.ToneMapRootSignature.Get());
+	native->SetPipelineState(deferred.ToneMapPipelineState.Get());
+	ID3D12DescriptorHeap* descriptorHeaps[] = { deferred.GBufferSrvHeap.Get() };
+	native->SetDescriptorHeaps(1, descriptorHeaps);
+	const DirectX::XMFLOAT4 postProcessConstants = {
+		std::clamp(m_Exposure, 0.05f, 8.0f),
+		static_cast<float>(static_cast<uint32_t>(m_MaterialDebugView)),
+		0.0f,
+		0.0f
+	};
+	native->SetGraphicsRoot32BitConstants(0, 4, &postProcessConstants, 0);
+	const UINT descriptorSize = dx12Device->GetD3DDevice()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	CD3DX12_GPU_DESCRIPTOR_HANDLE hdrHandle(
+		deferred.GBufferSrvHeap->GetGPUDescriptorHandleForHeapStart(),
+		static_cast<INT>(Rendering::Dx12StaticMeshResources::DeferredResources::HdrSrvIndex),
+		descriptorSize);
+	native->SetGraphicsRootDescriptorTable(1, hdrHandle);
+	native->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	RecordFullscreenDraw(Rendering::DrawSubmissionKind::Fullscreen, 3, 1);
+	m_Graphics.CommandList->DrawInstanced(3, 1, 0, 0);
+}
+
+void Engine::DrawDx12DeferredTriangle(const Editor::ViewportPanelState& viewport, const Camera& camera, const DeferredPassTimingIndices& timings)
+{
+	if (!EnsureDx12DeferredResources())
+	{
+		DrawDx12Triangle(camera);
+		return;
+	}
+
+	const long left = (std::max)(0L, static_cast<long>(std::floor(viewport.Left)));
+	const long top = (std::max)(0L, static_cast<long>(std::floor(viewport.Top)));
+	const long right = (std::min)(static_cast<long>(m_ClientWidth), static_cast<long>(std::ceil(viewport.Left + viewport.Width)));
+	const long bottom = (std::min)(static_cast<long>(m_ClientHeight), static_cast<long>(std::ceil(viewport.Top + viewport.Height)));
+	if (right <= left || bottom <= top)
+	{
+		return;
+	}
+	const float width = static_cast<float>(right - left);
+	const float height = static_cast<float>(bottom - top);
+
+	auto native = static_cast<ID3D12GraphicsCommandList*>(m_Graphics.CommandList->GetNativeResource());
+	auto cameraResource = m_StaticMeshRenderer.CameraBuffer ? static_cast<ID3D12Resource*>(m_StaticMeshRenderer.CameraBuffer->GetNativeResource()) : nullptr;
+	auto lightResource = m_StaticMeshRenderer.DeferredLightBuffer ? static_cast<ID3D12Resource*>(m_StaticMeshRenderer.DeferredLightBuffer->GetNativeResource()) : nullptr;
+	auto lightingResource = m_StaticMeshRenderer.DeferredLightingBuffer ? static_cast<ID3D12Resource*>(m_StaticMeshRenderer.DeferredLightingBuffer->GetNativeResource()) : nullptr;
+	auto tileRangeResource = m_StaticMeshRenderer.DeferredTileRangeBuffer ? static_cast<ID3D12Resource*>(m_StaticMeshRenderer.DeferredTileRangeBuffer->GetNativeResource()) : nullptr;
+	auto tileIndexResource = m_StaticMeshRenderer.DeferredTileLightIndexBuffer ? static_cast<ID3D12Resource*>(m_StaticMeshRenderer.DeferredTileLightIndexBuffer->GetNativeResource()) : nullptr;
+	auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device.get());
+	auto& deferred = m_StaticMeshRenderer.Dx12.Deferred;
+	if (!native || !cameraResource || !lightResource || !lightingResource || !dx12Device ||
+		!deferred.GeometryPipelineState || !deferred.LightingRootSignature || !deferred.LightingPipelineState ||
+		!deferred.ToneMapRootSignature || !deferred.ToneMapPipelineState ||
+		!deferred.GBufferRtvHeap || !deferred.HdrRtvHeap || !deferred.GBufferSrvHeap || !deferred.HdrColorTexture)
+	{
+		DrawDx12Triangle(camera);
+		return;
+	}
+
+	const auto geometryBegin = std::chrono::steady_clock::now();
+	std::array<D3D12_RESOURCE_BARRIER, Rendering::Dx12StaticMeshResources::DeferredResources::GBufferCount> barriers = {};
+	for (size_t targetIndex = 0; targetIndex < barriers.size(); ++targetIndex)
+	{
+		barriers[targetIndex] = CD3DX12_RESOURCE_BARRIER::Transition(
+			deferred.GBufferTextures[targetIndex].Get(),
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+			D3D12_RESOURCE_STATE_RENDER_TARGET);
+	}
+	native->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+
+	std::array<D3D12_CPU_DESCRIPTOR_HANDLE, Rendering::Dx12StaticMeshResources::DeferredResources::GBufferCount> rtvHandles = {};
+	CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(deferred.GBufferRtvHeap->GetCPUDescriptorHandleForHeapStart());
+	for (size_t targetIndex = 0; targetIndex < rtvHandles.size(); ++targetIndex)
+	{
+		rtvHandles[targetIndex] = rtvHandle;
+		rtvHandle.Offset(1, deferred.RtvDescriptorSize);
+	}
+	D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = {};
+	dsvHandle.ptr = reinterpret_cast<SIZE_T>(m_Graphics.Device->GetDepthStencilView());
+	native->OMSetRenderTargets(static_cast<UINT>(rtvHandles.size()), rtvHandles.data(), FALSE, &dsvHandle);
+	m_Graphics.CommandList->SetViewport(static_cast<float>(left), static_cast<float>(top), width, height);
+	m_Graphics.CommandList->SetScissorRect(left, top, right, bottom);
+	const float gbufferClear[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	for (D3D12_CPU_DESCRIPTOR_HANDLE handle : rtvHandles)
+	{
+		native->ClearRenderTargetView(handle, gbufferClear, 0, nullptr);
+	}
+	native->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
+
+	native->SetGraphicsRootSignature(m_StaticMeshRenderer.Dx12.RootSignature.Get());
+	native->SetGraphicsRootShaderResourceView(2, lightResource->GetGPUVirtualAddress());
+	native->SetPipelineState(deferred.GeometryPipelineState.Get());
+	native->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+	const UINT descriptorSize = dx12Device->GetD3DDevice()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	for (EntityId entityId : m_ViewportVisibleRenderEntities)
+	{
+		if (!m_Scene.IsMeshEnabled(entityId))
+		{
+			continue;
+		}
+
+		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+		if (!meshAsset)
+		{
+			continue;
+		}
+
+		UploadEntityGeometry(entityId);
+		ID3D12DescriptorHeap* selectedHeap = m_StaticMeshRenderer.Dx12.ShaderResourceHeap.Get();
+		size_t selectedMaterialCount = m_StaticMeshRenderer.Dx12.MaterialCount;
+		if (auto entityMaterialIt = m_StaticMeshRenderer.Dx12.EntityMaterials.find(entityId);
+			entityMaterialIt != m_StaticMeshRenderer.Dx12.EntityMaterials.end()
+			&& entityMaterialIt->second.ShaderResourceHeap
+			&& !entityMaterialIt->second.MaterialTextures.empty())
+		{
+			selectedHeap = entityMaterialIt->second.ShaderResourceHeap.Get();
+			selectedMaterialCount = entityMaterialIt->second.MaterialCount;
+		}
+		if (!selectedHeap || selectedMaterialCount == 0)
+		{
+			continue;
+		}
+
+		ID3D12DescriptorHeap* descriptorHeaps[] = { selectedHeap };
+		native->SetDescriptorHeaps(1, descriptorHeaps);
+		const D3D12_GPU_DESCRIPTOR_HANDLE baseHandle = selectedHeap->GetGPUDescriptorHandleForHeapStart();
+
+		auto drawOpaqueMaterial = [&](uint32_t indexCount, uint32_t indexOffset, size_t materialIndex)
+		{
+			const uint64_t cameraOffset = UpdateCameraBuffer(entityId, camera, materialIndex, false);
+			if (cameraOffset == InvalidCameraConstantOffset())
+			{
+				return;
+			}
+			native->SetGraphicsRootConstantBufferView(0, cameraResource->GetGPUVirtualAddress() + cameraOffset);
+			D3D12_GPU_DESCRIPTOR_HANDLE materialHandle = baseHandle;
+			materialHandle.ptr += static_cast<SIZE_T>(descriptorSize) * materialIndex * MaterialSlotCount();
+			native->SetGraphicsRootDescriptorTable(1, materialHandle);
+			RecordIndexedDraw(Rendering::DrawSubmissionKind::DeferredGeometry, indexCount, 1);
+			m_Graphics.CommandList->DrawIndexedInstanced(indexCount, 1, indexOffset, 0, 0);
+		};
+
+		if (meshAsset->Submeshes.empty())
+		{
+			if (!IsMaterialTransparent(entityId, 0))
+			{
+				drawOpaqueMaterial(static_cast<uint32_t>(meshAsset->Indices.size()), 0, 0);
+			}
+			continue;
+		}
+
+		for (const auto& submesh : meshAsset->Submeshes)
+		{
+			if (!IsMaterialTransparent(entityId, submesh.MaterialIndex))
+			{
+				const size_t materialIndex = submesh.MaterialIndex < selectedMaterialCount ? submesh.MaterialIndex : 0;
+				drawOpaqueMaterial(submesh.IndexCount, submesh.IndexOffset, materialIndex);
+			}
+		}
+	}
+
+	for (size_t targetIndex = 0; targetIndex < barriers.size(); ++targetIndex)
+	{
+		barriers[targetIndex] = CD3DX12_RESOURCE_BARRIER::Transition(
+			deferred.GBufferTextures[targetIndex].Get(),
+			D3D12_RESOURCE_STATE_RENDER_TARGET,
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+	}
+	native->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+
+	const auto geometryEnd = std::chrono::steady_clock::now();
+	m_RenderGraph.SetPassCpuTime(timings.Geometry, std::chrono::duration<double, std::milli>(geometryEnd - geometryBegin).count());
+
+	MeasureRenderGraphPass(m_RenderGraph, timings.TileCulling, [this, &camera, left, top, right, bottom]()
+		{
+			static_cast<void>(UpdateDeferredLightTiles(
+				camera,
+				static_cast<uint32_t>((std::max)(left, 0L)),
+				static_cast<uint32_t>((std::max)(top, 0L)),
+				static_cast<uint32_t>((std::max)(right - left, 1L)),
+				static_cast<uint32_t>((std::max)(bottom - top, 1L)),
+				static_cast<uint32_t>((std::max)(m_ClientWidth, 1)),
+				static_cast<uint32_t>((std::max)(m_ClientHeight, 1))));
+		});
+	tileRangeResource = m_StaticMeshRenderer.DeferredTileRangeBuffer ? static_cast<ID3D12Resource*>(m_StaticMeshRenderer.DeferredTileRangeBuffer->GetNativeResource()) : nullptr;
+	tileIndexResource = m_StaticMeshRenderer.DeferredTileLightIndexBuffer ? static_cast<ID3D12Resource*>(m_StaticMeshRenderer.DeferredTileLightIndexBuffer->GetNativeResource()) : nullptr;
+	if (!tileRangeResource || !tileIndexResource)
+	{
+		return;
+	}
+
+	const auto lightingBegin = std::chrono::steady_clock::now();
+	const auto cameraPosition = camera.GetPosition();
+	DeferredLightingConstants lightingConstants = {};
+	lightingConstants.CameraPosition = { cameraPosition.x, cameraPosition.y, cameraPosition.z, 1.0f };
+	lightingConstants.AmbientColorIntensity = {
+		std::clamp(m_AmbientColor.x, 0.0f, 4.0f),
+		std::clamp(m_AmbientColor.y, 0.0f, 4.0f),
+		std::clamp(m_AmbientColor.z, 0.0f, 4.0f),
+		std::clamp(m_AmbientIntensity, 0.0f, 2.0f)
+	};
+	lightingConstants.ExposureDebug = {
+		std::clamp(m_Exposure, 0.05f, 8.0f),
+		static_cast<float>(static_cast<uint32_t>(m_MaterialDebugView)),
+		0.0f,
+		0.0f
+	};
+	lightingConstants.LightCountParams = {
+		static_cast<float>(m_StaticMeshRenderer.DeferredLightCount),
+		static_cast<float>(m_StaticMeshRenderer.DeferredTileCountX),
+		static_cast<float>(m_StaticMeshRenderer.DeferredTileCountY),
+		m_StaticMeshRenderer.DeferredTileCountX > 0 && m_StaticMeshRenderer.DeferredTileCountY > 0 ? 1.0f : 0.0f
+	};
+	lightingConstants.ScreenSize = {
+		static_cast<float>((std::max)(m_ClientWidth, 1)),
+		static_cast<float>((std::max)(m_ClientHeight, 1)),
+		1.0f / static_cast<float>((std::max)(m_ClientWidth, 1)),
+		1.0f / static_cast<float>((std::max)(m_ClientHeight, 1))
+	};
+	Rendering::ShadowFrameData shadowData = m_ShadowFrameData;
+	if (!m_StaticMeshRenderer.Dx12.Shadow.IsValid)
+	{
+		shadowData.Params.x = 0.0f;
+	}
+	lightingConstants.ShadowViewProjection = shadowData.LightViewProjection;
+	lightingConstants.ShadowParams = shadowData.Params;
+	lightingConstants.ShadowDirection = shadowData.DirectionToLight;
+	if (WriteDeferredLightingConstants(lightingConstants) == InvalidCameraConstantOffset())
+	{
+		return;
+	}
+
+	D3D12_RESOURCE_BARRIER hdrBarrier = CD3DX12_RESOURCE_BARRIER::Transition(
+		deferred.HdrColorTexture.Get(),
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+		D3D12_RESOURCE_STATE_RENDER_TARGET);
+	native->ResourceBarrier(1, &hdrBarrier);
+
+	const D3D12_CPU_DESCRIPTOR_HANDLE hdrRtv = deferred.HdrRtvHeap->GetCPUDescriptorHandleForHeapStart();
+	native->OMSetRenderTargets(1, &hdrRtv, FALSE, nullptr);
+	m_Graphics.CommandList->SetViewport(static_cast<float>(left), static_cast<float>(top), width, height);
+	m_Graphics.CommandList->SetScissorRect(left, top, right, bottom);
+	const float hdrClear[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	native->ClearRenderTargetView(hdrRtv, hdrClear, 0, nullptr);
+	native->SetGraphicsRootSignature(deferred.LightingRootSignature.Get());
+	native->SetPipelineState(deferred.LightingPipelineState.Get());
+	ID3D12DescriptorHeap* gbufferHeap[] = { deferred.GBufferSrvHeap.Get() };
+	native->SetDescriptorHeaps(1, gbufferHeap);
+	native->SetGraphicsRootConstantBufferView(0, lightingResource->GetGPUVirtualAddress());
+	native->SetGraphicsRootDescriptorTable(1, deferred.GBufferSrvHeap->GetGPUDescriptorHandleForHeapStart());
+	native->SetGraphicsRootShaderResourceView(2, lightResource->GetGPUVirtualAddress());
+	native->SetGraphicsRootShaderResourceView(3, tileRangeResource->GetGPUVirtualAddress());
+	native->SetGraphicsRootShaderResourceView(4, tileIndexResource->GetGPUVirtualAddress());
+	native->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	RecordFullscreenDraw(Rendering::DrawSubmissionKind::Fullscreen, 3, 1);
+	m_Graphics.CommandList->DrawInstanced(3, 1, 0, 0);
+
+	hdrBarrier = CD3DX12_RESOURCE_BARRIER::Transition(
+		deferred.HdrColorTexture.Get(),
+		D3D12_RESOURCE_STATE_RENDER_TARGET,
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+	native->ResourceBarrier(1, &hdrBarrier);
+
+	const auto lightingEnd = std::chrono::steady_clock::now();
+	m_RenderGraph.SetPassCpuTime(timings.Lighting, std::chrono::duration<double, std::milli>(lightingEnd - lightingBegin).count());
+
+	MeasureRenderGraphPass(m_RenderGraph, timings.PostProcess, [this, &viewport]()
+		{
+			DrawDx12ToneMapPass(viewport);
+		});
+
+	MeasureRenderGraphPass(m_RenderGraph, timings.Transparency, [this, native, dsvHandle, &camera, left, top, right, bottom, width, height]()
+		{
+			D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv = {};
+			backBufferRtv.ptr = reinterpret_cast<SIZE_T>(m_Graphics.Device->GetCurrentBackBufferRTV());
+			native->OMSetRenderTargets(1, &backBufferRtv, FALSE, &dsvHandle);
+			m_Graphics.CommandList->SetViewport(static_cast<float>(left), static_cast<float>(top), width, height);
+			m_Graphics.CommandList->SetScissorRect(left, top, right, bottom);
+			DrawDx12ForwardTransparentPass(camera);
+		});
+}
+
+void Engine::DrawDx12ForwardTransparentPass(const Camera& camera)
+{
+	auto native = static_cast<ID3D12GraphicsCommandList*>(m_Graphics.CommandList->GetNativeResource());
+	auto cameraResource = m_StaticMeshRenderer.CameraBuffer ? static_cast<ID3D12Resource*>(m_StaticMeshRenderer.CameraBuffer->GetNativeResource()) : nullptr;
+	auto lightResource = m_StaticMeshRenderer.DeferredLightBuffer ? static_cast<ID3D12Resource*>(m_StaticMeshRenderer.DeferredLightBuffer->GetNativeResource()) : nullptr;
+	auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device.get());
+	if (!native || !cameraResource || !lightResource || !dx12Device || !m_StaticMeshRenderer.Dx12.TransparentPipelineState || !m_StaticMeshRenderer.Dx12.RootSignature)
+	{
+		return;
+	}
+
+	native->SetGraphicsRootSignature(m_StaticMeshRenderer.Dx12.RootSignature.Get());
+	native->SetGraphicsRootShaderResourceView(2, lightResource->GetGPUVirtualAddress());
+	native->SetPipelineState(m_StaticMeshRenderer.Dx12.TransparentPipelineState.Get());
+	native->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+	const UINT descriptorSize = dx12Device->GetD3DDevice()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	for (EntityId entityId : m_ViewportVisibleRenderEntities)
+	{
+		if (!m_Scene.IsMeshEnabled(entityId))
+		{
+			continue;
+		}
+
+		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+		if (!meshAsset)
+		{
+			continue;
+		}
+
+		ID3D12DescriptorHeap* selectedHeap = m_StaticMeshRenderer.Dx12.ShaderResourceHeap.Get();
+		size_t selectedMaterialCount = m_StaticMeshRenderer.Dx12.MaterialCount;
+		if (auto entityMaterialIt = m_StaticMeshRenderer.Dx12.EntityMaterials.find(entityId);
+			entityMaterialIt != m_StaticMeshRenderer.Dx12.EntityMaterials.end()
+			&& entityMaterialIt->second.ShaderResourceHeap
+			&& !entityMaterialIt->second.MaterialTextures.empty())
+		{
+			selectedHeap = entityMaterialIt->second.ShaderResourceHeap.Get();
+			selectedMaterialCount = entityMaterialIt->second.MaterialCount;
+		}
+		if (!selectedHeap || selectedMaterialCount == 0)
+		{
+			continue;
+		}
+
+		ID3D12DescriptorHeap* descriptorHeaps[] = { selectedHeap };
+		native->SetDescriptorHeaps(1, descriptorHeaps);
+		const D3D12_GPU_DESCRIPTOR_HANDLE baseHandle = selectedHeap->GetGPUDescriptorHandleForHeapStart();
+		UploadEntityGeometry(entityId);
+
+		auto drawTransparentMaterial = [&](uint32_t indexCount, uint32_t indexOffset, size_t materialIndex)
+		{
+			const uint64_t cameraOffset = UpdateCameraBuffer(entityId, camera, materialIndex, false);
+			if (cameraOffset == InvalidCameraConstantOffset())
+			{
+				return;
+			}
+			native->SetGraphicsRootConstantBufferView(0, cameraResource->GetGPUVirtualAddress() + cameraOffset);
+			D3D12_GPU_DESCRIPTOR_HANDLE materialHandle = baseHandle;
+			materialHandle.ptr += static_cast<SIZE_T>(descriptorSize) * materialIndex * MaterialSlotCount();
+			native->SetGraphicsRootDescriptorTable(1, materialHandle);
+			RecordIndexedDraw(Rendering::DrawSubmissionKind::Transparent, indexCount, 1);
+			m_Graphics.CommandList->DrawIndexedInstanced(indexCount, 1, indexOffset, 0, 0);
+		};
+
+		if (meshAsset->Submeshes.empty())
+		{
+			if (IsMaterialTransparent(entityId, 0))
+			{
+				drawTransparentMaterial(static_cast<uint32_t>(meshAsset->Indices.size()), 0, 0);
+			}
+			continue;
+		}
+
+		for (const auto& submesh : meshAsset->Submeshes)
+		{
+			if (IsMaterialTransparent(entityId, submesh.MaterialIndex))
+			{
+				const size_t materialIndex = submesh.MaterialIndex < selectedMaterialCount ? submesh.MaterialIndex : 0;
+				drawTransparentMaterial(submesh.IndexCount, submesh.IndexOffset, materialIndex);
+			}
+		}
+	}
 }
 
 void Engine::DrawDx12Triangle(const Camera& camera)
 {
 	auto native = static_cast<ID3D12GraphicsCommandList*>(m_Graphics.CommandList->GetNativeResource());
 	auto cameraResource = m_StaticMeshRenderer.CameraBuffer ? static_cast<ID3D12Resource*>(m_StaticMeshRenderer.CameraBuffer->GetNativeResource()) : nullptr;
+	auto lightResource = m_StaticMeshRenderer.DeferredLightBuffer ? static_cast<ID3D12Resource*>(m_StaticMeshRenderer.DeferredLightBuffer->GetNativeResource()) : nullptr;
 	auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device.get());
-	if (!native || !cameraResource || !dx12Device || !m_StaticMeshRenderer.Dx12.PipelineState || !m_StaticMeshRenderer.Dx12.RootSignature)
+	if (!native || !cameraResource || !lightResource || !dx12Device || !m_StaticMeshRenderer.Dx12.PipelineState || !m_StaticMeshRenderer.Dx12.RootSignature)
 	{
 		return;
 	}
@@ -4410,16 +6939,17 @@ void Engine::DrawDx12Triangle(const Camera& camera)
 	}
 
 	native->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	native->SetGraphicsRootShaderResourceView(2, lightResource->GetGPUVirtualAddress());
 
 	const UINT descriptorSize = dx12Device->GetD3DDevice()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-	const bool drawTransparentInSecondPass = (m_RenderMode == RenderMode::Forward || m_RenderMode == RenderMode::ForwardPlus) && m_StaticMeshRenderer.Dx12.TransparentPipelineState;
+	const bool drawTransparentInSecondPass = m_StaticMeshRenderer.Dx12.TransparentPipelineState != nullptr;
 	const bool drawOpaquePass = true;
 	if (drawOpaquePass)
 	{
 		native->SetPipelineState(m_StaticMeshRenderer.Dx12.PipelineState.Get());
 	}
 
-	for (EntityId entityId : m_RenderState.RenderEntities)
+	for (EntityId entityId : m_ViewportVisibleRenderEntities)
 	{
 		if (!m_Scene.IsMeshEnabled(entityId))
 		{
@@ -4443,16 +6973,16 @@ void Engine::DrawDx12Triangle(const Camera& camera)
 		native->SetGraphicsRootConstantBufferView(0, cameraResource->GetGPUVirtualAddress() + cameraOffset);
 
 		ID3D12DescriptorHeap* selectedHeap = m_StaticMeshRenderer.Dx12.ShaderResourceHeap.Get();
-		size_t selectedTextureCount = m_StaticMeshRenderer.Dx12.MaterialTextures.size();
+		size_t selectedMaterialCount = m_StaticMeshRenderer.Dx12.MaterialCount;
 		if (auto entityMaterialIt = m_StaticMeshRenderer.Dx12.EntityMaterials.find(entityId);
 			entityMaterialIt != m_StaticMeshRenderer.Dx12.EntityMaterials.end()
 			&& entityMaterialIt->second.ShaderResourceHeap
 			&& !entityMaterialIt->second.MaterialTextures.empty())
 		{
 			selectedHeap = entityMaterialIt->second.ShaderResourceHeap.Get();
-			selectedTextureCount = entityMaterialIt->second.MaterialTextures.size();
+			selectedMaterialCount = entityMaterialIt->second.MaterialCount;
 		}
-		if (!selectedHeap || selectedTextureCount == 0)
+		if (!selectedHeap || selectedMaterialCount == 0)
 		{
 			continue;
 		}
@@ -4469,18 +6999,36 @@ void Engine::DrawDx12Triangle(const Camera& camera)
 				continue;
 			}
 
+			if (entityIsTransparent)
+			{
+				const uint64_t transparentCameraOffset = UpdateCameraBuffer(entityId, camera, 0, false);
+				if (transparentCameraOffset == InvalidCameraConstantOffset())
+				{
+					continue;
+				}
+				native->SetGraphicsRootConstantBufferView(0, cameraResource->GetGPUVirtualAddress() + transparentCameraOffset);
+			}
+
 			native->SetPipelineState(entityIsTransparent ? m_StaticMeshRenderer.Dx12.TransparentPipelineState.Get() : m_StaticMeshRenderer.Dx12.PipelineState.Get());
 			native->SetGraphicsRootDescriptorTable(1, baseHandle);
+			RecordIndexedDraw(entityIsTransparent ? Rendering::DrawSubmissionKind::Transparent : Rendering::DrawSubmissionKind::Opaque, static_cast<uint32_t>(meshAsset->Indices.size()), 1);
 			m_Graphics.CommandList->DrawIndexedInstanced(static_cast<uint32_t>(meshAsset->Indices.size()), 1, 0, 0, 0);
 			continue;
 		}
 
-		auto drawSubmesh = [&](const Asset::StaticMeshSubmesh& submesh)
+		auto drawSubmesh = [&](const Asset::StaticMeshSubmesh& submesh, bool useDeferredLighting)
 		{
-			const size_t materialIndex = submesh.MaterialIndex < selectedTextureCount ? submesh.MaterialIndex : 0;
+			const size_t materialIndex = submesh.MaterialIndex < selectedMaterialCount ? submesh.MaterialIndex : 0;
+			const uint64_t materialCameraOffset = UpdateCameraBuffer(entityId, camera, materialIndex, useDeferredLighting);
+			if (materialCameraOffset == InvalidCameraConstantOffset())
+			{
+				return;
+			}
+			native->SetGraphicsRootConstantBufferView(0, cameraResource->GetGPUVirtualAddress() + materialCameraOffset);
 			D3D12_GPU_DESCRIPTOR_HANDLE materialHandle = baseHandle;
-			materialHandle.ptr += static_cast<SIZE_T>(descriptorSize) * materialIndex;
+			materialHandle.ptr += static_cast<SIZE_T>(descriptorSize) * materialIndex * MaterialSlotCount();
 			native->SetGraphicsRootDescriptorTable(1, materialHandle);
+			RecordIndexedDraw(IsMaterialTransparent(entityId, materialIndex) ? Rendering::DrawSubmissionKind::Transparent : Rendering::DrawSubmissionKind::Opaque, submesh.IndexCount, 1);
 			m_Graphics.CommandList->DrawIndexedInstanced(submesh.IndexCount, 1, submesh.IndexOffset, 0, 0);
 		};
 
@@ -4491,7 +7039,7 @@ void Engine::DrawDx12Triangle(const Camera& camera)
 			{
 				if (!IsMaterialTransparent(entityId, submesh.MaterialIndex))
 				{
-					drawSubmesh(submesh);
+					drawSubmesh(submesh, m_RenderMode == RenderMode::Deferred);
 				}
 			}
 		}
@@ -4503,7 +7051,7 @@ void Engine::DrawDx12Triangle(const Camera& camera)
 			{
 				if (IsMaterialTransparent(entityId, submesh.MaterialIndex))
 				{
-					drawSubmesh(submesh);
+					drawSubmesh(submesh, false);
 				}
 			}
 		}
@@ -4534,6 +7082,396 @@ bool Engine::CreateCameraBuffer()
 
 	m_StaticMeshRenderer.CameraBuffer = m_Graphics.Device->CreateBuffer(bufferDesc);
 	return m_StaticMeshRenderer.CameraBuffer != nullptr;
+}
+
+bool Engine::CreateDeferredLightBuffer(uint32_t capacity)
+{
+	if (!m_Graphics.Device)
+	{
+		return false;
+	}
+
+	if (!m_StaticMeshRenderer.DeferredLightingBuffer)
+	{
+		const BufferDesc lightingBufferDesc = {
+			.Size = sizeof(DeferredLightingConstants),
+			.Stride = static_cast<uint32_t>(sizeof(DeferredLightingConstants)),
+			.Heap = HeapType::Upload,
+			.InitialState = ResourceState::GenericRead
+		};
+		m_StaticMeshRenderer.DeferredLightingBuffer = m_Graphics.Device->CreateBuffer(lightingBufferDesc);
+		if (!m_StaticMeshRenderer.DeferredLightingBuffer)
+		{
+			return false;
+		}
+	}
+
+	const uint32_t clampedCapacity = (std::max)(capacity, 1u);
+	const BufferDesc bufferDesc = {
+		.Size = static_cast<uint64_t>(clampedCapacity) * sizeof(LightGpuData),
+		.Stride = static_cast<uint32_t>(sizeof(LightGpuData)),
+		.Heap = HeapType::Upload,
+		.InitialState = ResourceState::GenericRead
+	};
+
+	m_StaticMeshRenderer.DeferredLightBuffer = m_Graphics.Device->CreateBuffer(bufferDesc);
+	if (!m_StaticMeshRenderer.DeferredLightBuffer)
+	{
+		m_StaticMeshRenderer.DeferredLightBufferCapacity = 0;
+		m_StaticMeshRenderer.DeferredLightCount = 0;
+		return false;
+	}
+
+	m_StaticMeshRenderer.DeferredLightBufferCapacity = clampedCapacity;
+	m_StaticMeshRenderer.DeferredLightCount = 0;
+	if (!EnsureDeferredTileLightBufferCapacity(1, 1))
+	{
+		return false;
+	}
+	return RefreshVulkanDeferredLightBufferDescriptors();
+}
+
+uint64_t Engine::WriteDeferredLightingConstants(const DeferredLightingConstants& lightingConstants)
+{
+	if (!m_StaticMeshRenderer.DeferredLightingBuffer)
+	{
+		return InvalidCameraConstantOffset();
+	}
+
+	void* mappedData = nullptr;
+	m_StaticMeshRenderer.DeferredLightingBuffer->Map(&mappedData);
+	if (!mappedData)
+	{
+		return InvalidCameraConstantOffset();
+	}
+
+	std::memcpy(mappedData, &lightingConstants, sizeof(lightingConstants));
+	m_StaticMeshRenderer.DeferredLightingBuffer->Unmap();
+	return 0;
+}
+
+bool Engine::EnsureDeferredLightBufferCapacity(uint32_t lightCount)
+{
+	const uint32_t requiredCount = (std::max)(lightCount, 1u);
+	if (m_StaticMeshRenderer.DeferredLightBuffer && m_StaticMeshRenderer.DeferredLightBufferCapacity >= requiredCount)
+	{
+		return true;
+	}
+
+	uint32_t newCapacity = (std::max)(m_StaticMeshRenderer.DeferredLightBufferCapacity, kInitialDeferredLightBufferCapacity);
+	while (newCapacity < requiredCount)
+	{
+		newCapacity *= 2;
+	}
+	if (m_Graphics.Device)
+	{
+		m_Graphics.Device->WaitForGPU();
+	}
+	return CreateDeferredLightBuffer(newCapacity);
+}
+
+bool Engine::EnsureDeferredTileLightBufferCapacity(uint32_t tileCount, uint32_t lightReferenceCount)
+{
+	if (!m_Graphics.Device)
+	{
+		return false;
+	}
+
+	const uint32_t requiredTileCount = (std::max)(tileCount, 1u);
+	const uint32_t requiredReferenceCount = (std::max)(lightReferenceCount, 1u);
+	const bool hasEnoughRangeCapacity =
+		m_StaticMeshRenderer.DeferredTileRangeBuffer &&
+		m_StaticMeshRenderer.DeferredTileRangeCapacity >= requiredTileCount;
+	const bool hasEnoughIndexCapacity =
+		m_StaticMeshRenderer.DeferredTileLightIndexBuffer &&
+		m_StaticMeshRenderer.DeferredTileLightIndexCapacity >= requiredReferenceCount;
+	if (hasEnoughRangeCapacity && hasEnoughIndexCapacity)
+	{
+		return true;
+	}
+
+	if (m_Graphics.Device)
+	{
+		m_Graphics.Device->WaitForGPU();
+	}
+
+	if (!hasEnoughRangeCapacity)
+	{
+		uint32_t newRangeCapacity = (std::max)(m_StaticMeshRenderer.DeferredTileRangeCapacity, 64u);
+		while (newRangeCapacity < requiredTileCount)
+		{
+			newRangeCapacity *= 2;
+		}
+		const BufferDesc rangeBufferDesc = {
+			.Size = static_cast<uint64_t>(newRangeCapacity) * sizeof(DeferredTileLightRange),
+			.Stride = static_cast<uint32_t>(sizeof(DeferredTileLightRange)),
+			.Heap = HeapType::Upload,
+			.InitialState = ResourceState::GenericRead
+		};
+		m_StaticMeshRenderer.DeferredTileRangeBuffer = m_Graphics.Device->CreateBuffer(rangeBufferDesc);
+		if (!m_StaticMeshRenderer.DeferredTileRangeBuffer)
+		{
+			m_StaticMeshRenderer.DeferredTileRangeCapacity = 0;
+			return false;
+		}
+		m_StaticMeshRenderer.DeferredTileRangeCapacity = newRangeCapacity;
+	}
+
+	if (!hasEnoughIndexCapacity)
+	{
+		uint32_t newIndexCapacity = (std::max)(m_StaticMeshRenderer.DeferredTileLightIndexCapacity, 256u);
+		while (newIndexCapacity < requiredReferenceCount)
+		{
+			newIndexCapacity *= 2;
+		}
+		const BufferDesc indexBufferDesc = {
+			.Size = static_cast<uint64_t>(newIndexCapacity) * sizeof(uint32_t),
+			.Stride = static_cast<uint32_t>(sizeof(uint32_t)),
+			.Heap = HeapType::Upload,
+			.InitialState = ResourceState::GenericRead
+		};
+		m_StaticMeshRenderer.DeferredTileLightIndexBuffer = m_Graphics.Device->CreateBuffer(indexBufferDesc);
+		if (!m_StaticMeshRenderer.DeferredTileLightIndexBuffer)
+		{
+			m_StaticMeshRenderer.DeferredTileLightIndexCapacity = 0;
+			return false;
+		}
+		m_StaticMeshRenderer.DeferredTileLightIndexCapacity = newIndexCapacity;
+	}
+
+	return RefreshVulkanDeferredLightBufferDescriptors();
+}
+
+uint32_t Engine::UpdateDeferredLightBuffer()
+{
+	if (m_RenderMode != RenderMode::Deferred)
+	{
+		m_StaticMeshRenderer.DeferredLightCount = 0;
+		m_StaticMeshRenderer.DeferredCpuLights.clear();
+		m_StaticMeshRenderer.DeferredTileCountX = 0;
+		m_StaticMeshRenderer.DeferredTileCountY = 0;
+		m_StaticMeshRenderer.DeferredTileLightReferenceCount = 0;
+		m_StaticMeshRenderer.DeferredMaxTileLightCount = 0;
+		m_StaticMeshRenderer.DeferredFullTileLightCount = 0;
+		return 0;
+	}
+
+	const std::vector<LightGpuData> lights = RenderSystem::CollectSceneLights(m_Scene, ResolveKeyLightEntity(), kUnlimitedDeferredGpuLights);
+	const uint32_t lightCount = static_cast<uint32_t>((std::min)(lights.size(), static_cast<size_t>((std::numeric_limits<uint32_t>::max)())));
+	if (!EnsureDeferredLightBufferCapacity(lightCount))
+	{
+		m_StaticMeshRenderer.DeferredLightCount = 0;
+		m_StaticMeshRenderer.DeferredTileCountX = 0;
+		m_StaticMeshRenderer.DeferredTileCountY = 0;
+		m_StaticMeshRenderer.DeferredTileLightReferenceCount = 0;
+		m_StaticMeshRenderer.DeferredMaxTileLightCount = 0;
+		m_StaticMeshRenderer.DeferredFullTileLightCount = 0;
+		return 0;
+	}
+
+	void* mappedData = nullptr;
+	m_StaticMeshRenderer.DeferredLightBuffer->Map(&mappedData);
+	if (!mappedData)
+	{
+		m_StaticMeshRenderer.DeferredLightCount = 0;
+		m_StaticMeshRenderer.DeferredTileCountX = 0;
+		m_StaticMeshRenderer.DeferredTileCountY = 0;
+		m_StaticMeshRenderer.DeferredTileLightReferenceCount = 0;
+		m_StaticMeshRenderer.DeferredMaxTileLightCount = 0;
+		m_StaticMeshRenderer.DeferredFullTileLightCount = 0;
+		return 0;
+	}
+
+	std::memcpy(mappedData, lights.data(), static_cast<size_t>(lightCount) * sizeof(LightGpuData));
+	m_StaticMeshRenderer.DeferredLightBuffer->Unmap();
+	m_StaticMeshRenderer.DeferredLightCount = lightCount;
+	m_StaticMeshRenderer.DeferredCpuLights = lights;
+	return lightCount;
+}
+
+bool Engine::UpdateDeferredLightTiles(
+	const Camera& camera,
+	uint32_t viewportLeft,
+	uint32_t viewportTop,
+	uint32_t viewportWidth,
+	uint32_t viewportHeight,
+	uint32_t screenWidth,
+	uint32_t screenHeight)
+{
+	auto resetDeferredTileStats = [this]()
+	{
+		m_StaticMeshRenderer.DeferredTileCountX = 0;
+		m_StaticMeshRenderer.DeferredTileCountY = 0;
+		m_StaticMeshRenderer.DeferredTileLightReferenceCount = 0;
+		m_StaticMeshRenderer.DeferredMaxTileLightCount = 0;
+		m_StaticMeshRenderer.DeferredFullTileLightCount = 0;
+	};
+
+	if (m_RenderMode != RenderMode::Deferred || m_StaticMeshRenderer.DeferredCpuLights.empty())
+	{
+		resetDeferredTileStats();
+		return false;
+	}
+
+	viewportWidth = (std::max)(viewportWidth, 1u);
+	viewportHeight = (std::max)(viewportHeight, 1u);
+	const uint32_t tileCountX = (std::max)(1u, (screenWidth + kDeferredLightTileSize - 1u) / kDeferredLightTileSize);
+	const uint32_t tileCountY = (std::max)(1u, (screenHeight + kDeferredLightTileSize - 1u) / kDeferredLightTileSize);
+	const uint32_t tileCount = tileCountX * tileCountY;
+	std::vector<std::vector<uint32_t>> perTileLightIndices(tileCount);
+
+	auto appendLightToTile = [&](uint32_t tileIndex, uint32_t lightIndex)
+	{
+		if (tileIndex < perTileLightIndices.size())
+		{
+			perTileLightIndices[tileIndex].push_back(lightIndex);
+		}
+	};
+
+	auto appendLightRect = [&](uint32_t lightIndex, int minTileX, int minTileY, int maxTileX, int maxTileY)
+	{
+		const int clampedMinX = std::clamp(minTileX, 0, static_cast<int>(tileCountX) - 1);
+		const int clampedMaxX = std::clamp(maxTileX, 0, static_cast<int>(tileCountX) - 1);
+		const int clampedMinY = std::clamp(minTileY, 0, static_cast<int>(tileCountY) - 1);
+		const int clampedMaxY = std::clamp(maxTileY, 0, static_cast<int>(tileCountY) - 1);
+		if (clampedMaxX < clampedMinX || clampedMaxY < clampedMinY)
+		{
+			return;
+		}
+		for (int tileY = clampedMinY; tileY <= clampedMaxY; ++tileY)
+		{
+			for (int tileX = clampedMinX; tileX <= clampedMaxX; ++tileX)
+			{
+				appendLightToTile(static_cast<uint32_t>(tileY) * tileCountX + static_cast<uint32_t>(tileX), lightIndex);
+			}
+		}
+	};
+
+	uint32_t fullTileLightCount = 0;
+	auto appendLightToAllTiles = [&](uint32_t lightIndex)
+	{
+		appendLightRect(lightIndex, 0, 0, static_cast<int>(tileCountX) - 1, static_cast<int>(tileCountY) - 1);
+		++fullTileLightCount;
+	};
+
+	const DirectX::XMMATRIX viewProjection = camera.GetViewProjectionMatrix();
+	const DirectX::XMFLOAT3 cameraPosition = camera.GetPosition();
+	const DirectX::XMFLOAT3 cameraForward = camera.GetForward();
+	const DirectX::XMVECTOR cameraPositionVector = DirectX::XMLoadFloat3(&cameraPosition);
+	const DirectX::XMVECTOR cameraForwardVector = DirectX::XMVector3Normalize(DirectX::XMLoadFloat3(&cameraForward));
+	const float nearZ = (std::max)(camera.GetNearZ(), 0.001f);
+	const float projectionScale = static_cast<float>(viewportHeight) / (2.0f * std::tan((std::max)(camera.GetFovY(), 0.001f) * 0.5f));
+
+	for (uint32_t lightIndex = 0; lightIndex < m_StaticMeshRenderer.DeferredCpuLights.size(); ++lightIndex)
+	{
+		const LightGpuData& light = m_StaticMeshRenderer.DeferredCpuLights[lightIndex];
+		if (light.PositionType.w <= 0.5f)
+		{
+			appendLightToAllTiles(lightIndex);
+			continue;
+		}
+
+		const DirectX::XMVECTOR lightPosition = DirectX::XMVectorSet(light.PositionType.x, light.PositionType.y, light.PositionType.z, 1.0f);
+		const float range = (std::max)(light.DirectionRange.w, 0.001f);
+		const DirectX::XMVECTOR cameraToLight = DirectX::XMVectorSubtract(lightPosition, cameraPositionVector);
+		const float centerDepth = DirectX::XMVectorGetX(DirectX::XMVector3Dot(cameraToLight, cameraForwardVector));
+		const DirectX::XMVECTOR clipPosition = DirectX::XMVector4Transform(lightPosition, viewProjection);
+		const float clipW = DirectX::XMVectorGetW(clipPosition);
+		if (clipW <= 0.001f)
+		{
+			if (centerDepth + range >= nearZ)
+			{
+				appendLightToAllTiles(lightIndex);
+			}
+			continue;
+		}
+
+		const float ndcX = DirectX::XMVectorGetX(clipPosition) / clipW;
+		const float ndcY = DirectX::XMVectorGetY(clipPosition) / clipW;
+		const float screenX = static_cast<float>(viewportLeft) + (ndcX * 0.5f + 0.5f) * static_cast<float>(viewportWidth);
+		const float screenY = static_cast<float>(viewportTop) + (-ndcY * 0.5f + 0.5f) * static_cast<float>(viewportHeight);
+		const float distanceToCamera = (std::max)(
+			DirectX::XMVectorGetX(DirectX::XMVector3Length(cameraToLight)),
+			0.001f);
+		const float radiusPixels = std::clamp(range * projectionScale / distanceToCamera, 1.0f, static_cast<float>((std::max)(viewportWidth, viewportHeight)));
+		if (screenX + radiusPixels < 0.0f ||
+			screenY + radiusPixels < 0.0f ||
+			screenX - radiusPixels > static_cast<float>(screenWidth) ||
+			screenY - radiusPixels > static_cast<float>(screenHeight))
+		{
+			continue;
+		}
+
+		appendLightRect(
+			lightIndex,
+			static_cast<int>(std::floor((screenX - radiusPixels) / static_cast<float>(kDeferredLightTileSize))),
+			static_cast<int>(std::floor((screenY - radiusPixels) / static_cast<float>(kDeferredLightTileSize))),
+			static_cast<int>(std::floor((screenX + radiusPixels) / static_cast<float>(kDeferredLightTileSize))),
+			static_cast<int>(std::floor((screenY + radiusPixels) / static_cast<float>(kDeferredLightTileSize))));
+	}
+
+	std::vector<DeferredTileLightRange> ranges(tileCount);
+	std::vector<uint32_t> lightIndices;
+	uint64_t actualLightReferenceCount = 0;
+	uint32_t maxTileLightCount = 0;
+	for (uint32_t tileIndex = 0; tileIndex < tileCount; ++tileIndex)
+	{
+		ranges[tileIndex].Offset = static_cast<uint32_t>(lightIndices.size());
+		ranges[tileIndex].Count = static_cast<uint32_t>((std::min)(perTileLightIndices[tileIndex].size(), static_cast<size_t>((std::numeric_limits<uint32_t>::max)())));
+		actualLightReferenceCount = (std::min)(
+			actualLightReferenceCount + static_cast<uint64_t>(ranges[tileIndex].Count),
+			static_cast<uint64_t>((std::numeric_limits<uint32_t>::max)()));
+		maxTileLightCount = (std::max)(maxTileLightCount, ranges[tileIndex].Count);
+		lightIndices.insert(lightIndices.end(), perTileLightIndices[tileIndex].begin(), perTileLightIndices[tileIndex].end());
+	}
+	if (lightIndices.empty())
+	{
+		lightIndices.push_back(0);
+	}
+
+	if (!EnsureDeferredTileLightBufferCapacity(static_cast<uint32_t>(ranges.size()), static_cast<uint32_t>(lightIndices.size())))
+	{
+		resetDeferredTileStats();
+		return false;
+	}
+
+	void* mappedRanges = nullptr;
+	m_StaticMeshRenderer.DeferredTileRangeBuffer->Map(&mappedRanges);
+	if (!mappedRanges)
+	{
+		resetDeferredTileStats();
+		return false;
+	}
+	std::memcpy(mappedRanges, ranges.data(), ranges.size() * sizeof(DeferredTileLightRange));
+	m_StaticMeshRenderer.DeferredTileRangeBuffer->Unmap();
+
+	void* mappedIndices = nullptr;
+	m_StaticMeshRenderer.DeferredTileLightIndexBuffer->Map(&mappedIndices);
+	if (!mappedIndices)
+	{
+		resetDeferredTileStats();
+		return false;
+	}
+	std::memcpy(mappedIndices, lightIndices.data(), lightIndices.size() * sizeof(uint32_t));
+	m_StaticMeshRenderer.DeferredTileLightIndexBuffer->Unmap();
+
+	m_StaticMeshRenderer.DeferredTileCountX = tileCountX;
+	m_StaticMeshRenderer.DeferredTileCountY = tileCountY;
+	m_StaticMeshRenderer.DeferredTileLightReferenceCount = static_cast<uint32_t>(actualLightReferenceCount);
+	m_StaticMeshRenderer.DeferredMaxTileLightCount = maxTileLightCount;
+	m_StaticMeshRenderer.DeferredFullTileLightCount = fullTileLightCount;
+	++m_RenderFrameStats.DeferredTileViewportCount;
+	m_RenderFrameStats.DeferredTileCountTotal = static_cast<uint32_t>((std::min)(
+		static_cast<uint64_t>(m_RenderFrameStats.DeferredTileCountTotal) + static_cast<uint64_t>(tileCount),
+		static_cast<uint64_t>((std::numeric_limits<uint32_t>::max)())));
+	m_RenderFrameStats.DeferredTileLightReferenceCount = static_cast<uint32_t>((std::min)(
+		static_cast<uint64_t>(m_RenderFrameStats.DeferredTileLightReferenceCount) + actualLightReferenceCount,
+		static_cast<uint64_t>((std::numeric_limits<uint32_t>::max)())));
+	m_RenderFrameStats.DeferredMaxTileLightCount = (std::max)(m_RenderFrameStats.DeferredMaxTileLightCount, maxTileLightCount);
+	m_RenderFrameStats.DeferredFullTileLightCount = static_cast<uint32_t>((std::min)(
+		static_cast<uint64_t>(m_RenderFrameStats.DeferredFullTileLightCount) + static_cast<uint64_t>(fullTileLightCount),
+		static_cast<uint64_t>((std::numeric_limits<uint32_t>::max)())));
+	return true;
 }
 
 void Engine::ResetCameraConstantAllocator() noexcept
@@ -4600,17 +7538,67 @@ uint64_t Engine::UpdateCameraBuffer(const Camera& camera)
 
 uint64_t Engine::UpdateCameraBuffer(EntityId entityId, const Camera& camera)
 {
+	return UpdateCameraBuffer(entityId, camera, 0);
+}
+
+uint64_t Engine::UpdateCameraBuffer(EntityId entityId, const Camera& camera, size_t materialIndex)
+{
+	return UpdateCameraBuffer(entityId, camera, materialIndex, m_RenderMode == RenderMode::Deferred);
+}
+
+uint64_t Engine::UpdateCameraBuffer(EntityId entityId, const Camera& camera, size_t materialIndex, bool useDeferredLighting)
+{
+	if (!m_StaticMeshRenderer.CameraBuffer)
+	{
+		return InvalidCameraConstantOffset();
+	}
+	TouchShaderVariant(entityId, materialIndex, useDeferredLighting);
+
+	CameraConstants cameraConstants = {};
+	if (!RenderSystem::BuildCameraConstants(
+		m_Scene,
+		camera,
+		entityId,
+		materialIndex,
+		cameraConstants,
+		m_AmbientColor,
+		m_AmbientIntensity,
+		m_Exposure,
+		m_MaterialDebugView,
+		ResolveKeyLightEntity(),
+		useDeferredLighting,
+		useDeferredLighting ? m_StaticMeshRenderer.DeferredLightCount : 0,
+		m_ShadowSettings))
+	{
+		return InvalidCameraConstantOffset();
+	}
+
+	return WriteCameraConstants(cameraConstants);
+}
+
+uint64_t Engine::UpdateShadowCameraBuffer(EntityId entityId)
+{
 	if (!m_StaticMeshRenderer.CameraBuffer)
 	{
 		return InvalidCameraConstantOffset();
 	}
 
-	CameraConstants cameraConstants = {};
-	if (!RenderSystem::BuildCameraConstants(m_Scene, camera, entityId, cameraConstants))
+	const TransformComponent* transform = m_Scene.GetTransformComponent(entityId);
+	if (!transform)
 	{
 		return InvalidCameraConstantOffset();
 	}
 
+	CameraConstants cameraConstants = {};
+	const DirectX::XMMATRIX worldMatrix = transform->GetWorldXmMatrix();
+	const DirectX::XMMATRIX lightViewProjection = DirectX::XMLoadFloat4x4(&m_ShadowFrameData.LightViewProjection);
+	Math::Store(cameraConstants.WorldViewProjection, worldMatrix * lightViewProjection);
+	Math::Store(cameraConstants.ViewProjection, lightViewProjection);
+	Math::Store(cameraConstants.World, worldMatrix);
+	Math::Store(cameraConstants.WorldInverseTranspose, DirectX::XMMatrixTranspose(DirectX::XMMatrixInverse(nullptr, worldMatrix)));
+	cameraConstants.ShadowViewProjection = m_ShadowFrameData.LightViewProjection;
+	cameraConstants.ShadowParams = m_ShadowFrameData.Params;
+	cameraConstants.ShadowDirection = m_ShadowFrameData.DirectionToLight;
 	return WriteCameraConstants(cameraConstants);
 }
 
@@ -4699,6 +7687,17 @@ EntityId Engine::TryPickEntity(float mouseX, float mouseY, const Camera& camera,
 
 void Engine::UpdateAnimatedMesh(float deltaTime)
 {
+	struct AnimationTask
+	{
+		EntityId Entity = InvalidEntityId;
+		Asset::StaticMeshAsset* Mesh = nullptr;
+		uint32_t ClipIndex = 0;
+		double AnimationTimeTicks = 0.0;
+		std::vector<Asset::StaticMeshVertex> SkinnedVertices;
+		bool Success = false;
+	};
+
+	std::vector<AnimationTask> tasks;
 	for (EntityId entityId : m_RenderState.RenderEntities)
 	{
 		if (!m_Scene.IsMeshEnabled(entityId) || !m_Scene.IsAnimatorEnabled(entityId))
@@ -4708,7 +7707,57 @@ void Engine::UpdateAnimatedMesh(float deltaTime)
 
 		if (AnimatorComponent* animator = m_Scene.GetAnimatorComponent(entityId))
 		{
-			AnimationSystem::UpdateAnimatedMesh(m_Scene, entityId, deltaTime, *animator);
+			Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+			if (!meshAsset)
+			{
+				continue;
+			}
+
+			AnimationTask task;
+			task.Entity = entityId;
+			task.Mesh = meshAsset;
+			if (AnimationSystem::AdvanceAnimator(*meshAsset, deltaTime, *animator, task.ClipIndex, task.AnimationTimeTicks))
+			{
+				tasks.push_back(std::move(task));
+			}
+		}
+	}
+
+	if (tasks.empty())
+	{
+		return;
+	}
+
+	if (m_JobSystem.IsInitialized() && tasks.size() > 1)
+	{
+		m_JobSystem.RunParallelFor(
+			tasks.size(),
+			1,
+			"Animation Skinning",
+			[&tasks](size_t begin, size_t end, Jobs::JobContext&)
+			{
+				for (size_t taskIndex = begin; taskIndex < end; ++taskIndex)
+				{
+					AnimationTask& task = tasks[taskIndex];
+					task.Success = task.Mesh
+						&& AnimationSystem::BuildSkinnedVertices(*task.Mesh, task.ClipIndex, task.AnimationTimeTicks, task.SkinnedVertices);
+				}
+			});
+	}
+	else
+	{
+		for (AnimationTask& task : tasks)
+		{
+			task.Success = task.Mesh
+				&& AnimationSystem::BuildSkinnedVertices(*task.Mesh, task.ClipIndex, task.AnimationTimeTicks, task.SkinnedVertices);
+		}
+	}
+
+	for (AnimationTask& task : tasks)
+	{
+		if (task.Success && task.Mesh)
+		{
+			task.Mesh->Vertices.assign(task.SkinnedVertices.begin(), task.SkinnedVertices.end());
 		}
 	}
 }
@@ -4717,7 +7766,8 @@ bool Engine::CreateVulkanTriangleResources()
 {
 	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
 	auto vulkanCameraBuffer = dynamic_cast<VulkanBuffer*>(m_StaticMeshRenderer.CameraBuffer.get());
-	if (!vulkanDevice || !vulkanCameraBuffer)
+	auto vulkanLightBuffer = dynamic_cast<VulkanBuffer*>(m_StaticMeshRenderer.DeferredLightBuffer.get());
+	if (!vulkanDevice || !vulkanCameraBuffer || !vulkanLightBuffer)
 	{
 		return false;
 	}
@@ -4770,27 +7820,43 @@ bool Engine::CreateVulkanTriangleResources()
 		.descriptorCount = 1,
 		.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
 	};
-	// Vulkan 경로는 diffuse texture를 combined image sampler로 fragment shader에 바인딩합니다.
-	const VkDescriptorSetLayoutBinding textureBinding = {
-		.binding = 1,
-		.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+	std::array<VkDescriptorSetLayoutBinding, Asset::kMaterialTextureSlotCount + 2> bindings = {};
+	bindings[0] = cameraBinding;
+	for (size_t slotIndex = 0; slotIndex < MaterialSlotCount(); ++slotIndex)
+	{
+		bindings[slotIndex + 1] = {
+			.binding = static_cast<uint32_t>(1 + slotIndex),
+			.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			.descriptorCount = 1,
+			.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT
+		};
+	}
+	bindings[MaterialSlotCount() + 1] = {
+		.binding = static_cast<uint32_t>(MaterialSlotCount() + 1),
+		.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
 		.descriptorCount = 1,
 		.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT
 	};
-	const VkDescriptorSetLayoutBinding bindings[] = { cameraBinding, textureBinding };
 
 	const VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCreateInfo = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-		.bindingCount = static_cast<uint32_t>(std::size(bindings)),
-		.pBindings = bindings
+		.bindingCount = static_cast<uint32_t>(bindings.size()),
+		.pBindings = bindings.data()
 	};
 
 	if (vkCreateDescriptorSetLayout(vulkanDevice->GetVkDevice(), &descriptorSetLayoutCreateInfo, nullptr, &m_StaticMeshRenderer.Vulkan.DescriptorSetLayout) != VK_SUCCESS)
 	{
 		return false;
 	}
+	if (m_StaticMeshRenderer.Vulkan.MaterialTextures.empty())
+	{
+		return false;
+	}
 
-	const uint32_t materialTextureCount = static_cast<uint32_t>((std::max)(static_cast<size_t>(1), m_StaticMeshRenderer.Vulkan.MaterialTextures.size()));
+	const uint32_t materialTextureCount = static_cast<uint32_t>(
+		m_StaticMeshRenderer.Vulkan.MaterialCount > 0
+			? m_StaticMeshRenderer.Vulkan.MaterialCount
+			: MaterialCountFromFlattenedTextureCount(m_StaticMeshRenderer.Vulkan.MaterialTextures.size()));
 
 	const VkDescriptorPoolSize descriptorPoolSize = {
 		.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
@@ -4798,9 +7864,13 @@ bool Engine::CreateVulkanTriangleResources()
 	};
 	const VkDescriptorPoolSize textureDescriptorPoolSize = {
 		.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		.descriptorCount = materialTextureCount * static_cast<uint32_t>(MaterialSlotCount())
+	};
+	const VkDescriptorPoolSize lightDescriptorPoolSize = {
+		.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
 		.descriptorCount = materialTextureCount
 	};
-	const VkDescriptorPoolSize descriptorPoolSizes[] = { descriptorPoolSize, textureDescriptorPoolSize };
+	const VkDescriptorPoolSize descriptorPoolSizes[] = { descriptorPoolSize, textureDescriptorPoolSize, lightDescriptorPoolSize };
 
 	const VkDescriptorPoolCreateInfo descriptorPoolCreateInfo = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -4833,16 +7903,26 @@ bool Engine::CreateVulkanTriangleResources()
 		.offset = 0,
 		.range = sizeof(CameraConstants)
 	};
+	const VkDescriptorBufferInfo lightBufferInfo = {
+		.buffer = vulkanLightBuffer->GetVkBuffer(),
+		.offset = 0,
+		.range = m_StaticMeshRenderer.DeferredLightBuffer->GetSize()
+	};
 	// Vulkan 경로는 material 수만큼 descriptor set을 만들고, 각 set에 동일한 camera buffer와 material별 texture를 기록합니다.
 	// 이렇게 해 두면 draw 시 submesh.MaterialIndex에 맞는 descriptor set 하나만 다시 바인딩하면 됩니다.
 	for (uint32_t materialIndex = 0; materialIndex < materialTextureCount; ++materialIndex)
 	{
-		const auto& materialTexture = m_StaticMeshRenderer.Vulkan.MaterialTextures[materialIndex];
-		const VkDescriptorImageInfo textureImageInfo = {
-			.sampler = materialTexture.Sampler,
-			.imageView = materialTexture.ImageView,
-			.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-		};
+		std::array<VkDescriptorImageInfo, Asset::kMaterialTextureSlotCount> textureImageInfos = {};
+		for (size_t slotIndex = 0; slotIndex < MaterialSlotCount(); ++slotIndex)
+		{
+			const size_t flattenedIndex = FlattenMaterialTextureIndex(materialIndex, slotIndex);
+			const auto& materialTexture = m_StaticMeshRenderer.Vulkan.MaterialTextures[(std::min)(flattenedIndex, m_StaticMeshRenderer.Vulkan.MaterialTextures.size() - 1)];
+			textureImageInfos[slotIndex] = {
+				.sampler = materialTexture.Sampler,
+				.imageView = materialTexture.ImageView,
+				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+			};
+		}
 
 		const VkWriteDescriptorSet writeDescriptorSet = {
 			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -4852,17 +7932,29 @@ bool Engine::CreateVulkanTriangleResources()
 			.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
 			.pBufferInfo = &cameraBufferInfo
 		};
-		const VkWriteDescriptorSet textureWriteDescriptorSet = {
+		std::array<VkWriteDescriptorSet, Asset::kMaterialTextureSlotCount + 2> writeDescriptorSets = {};
+		writeDescriptorSets[0] = writeDescriptorSet;
+		for (size_t slotIndex = 0; slotIndex < MaterialSlotCount(); ++slotIndex)
+		{
+			writeDescriptorSets[slotIndex + 1] = {
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = m_StaticMeshRenderer.Vulkan.DescriptorSets[materialIndex],
+				.dstBinding = static_cast<uint32_t>(1 + slotIndex),
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				.pImageInfo = &textureImageInfos[slotIndex]
+			};
+		}
+		writeDescriptorSets[MaterialSlotCount() + 1] = {
 			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 			.dstSet = m_StaticMeshRenderer.Vulkan.DescriptorSets[materialIndex],
-			.dstBinding = 1,
+			.dstBinding = static_cast<uint32_t>(MaterialSlotCount() + 1),
 			.descriptorCount = 1,
-			.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-			.pImageInfo = &textureImageInfo
+			.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+			.pBufferInfo = &lightBufferInfo
 		};
-		const VkWriteDescriptorSet writeDescriptorSets[] = { writeDescriptorSet, textureWriteDescriptorSet };
 
-		vkUpdateDescriptorSets(vulkanDevice->GetVkDevice(), static_cast<uint32_t>(std::size(writeDescriptorSets)), writeDescriptorSets, 0, nullptr);
+		vkUpdateDescriptorSets(vulkanDevice->GetVkDevice(), static_cast<uint32_t>(writeDescriptorSets.size()), writeDescriptorSets.data(), 0, nullptr);
 	}
 
 	const VkPipelineShaderStageCreateInfo shaderStages[2] = {
@@ -4912,6 +8004,18 @@ bool Engine::CreateVulkanTriangleResources()
 			.binding = 0,
 			.format = VK_FORMAT_R32G32B32A32_SFLOAT,
 			.offset = offsetof(Asset::StaticMeshVertex, Color)
+		},
+		{
+			.location = 4,
+			.binding = 0,
+			.format = VK_FORMAT_R32G32B32_SFLOAT,
+			.offset = offsetof(Asset::StaticMeshVertex, Tangent)
+		},
+		{
+			.location = 5,
+			.binding = 0,
+			.format = VK_FORMAT_R32_SFLOAT,
+			.offset = offsetof(Asset::StaticMeshVertex, TangentSign)
 		}
 	};
 
@@ -5035,7 +8139,1175 @@ bool Engine::CreateVulkanTriangleResources()
 		return false;
 	}
 
+	if (!CreateVulkanShadowResources())
+	{
+		return false;
+	}
+
+	if (!CreateVulkanDeferredResources())
+	{
+		return false;
+	}
+
 	m_StaticMeshRenderer.Vulkan.IsValid = true;
+	return true;
+}
+
+bool Engine::CreateVulkanDeferredResources()
+{
+	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
+	if (!vulkanDevice || m_StaticMeshRenderer.Vulkan.PipelineLayout == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+
+	auto& deferred = m_StaticMeshRenderer.Vulkan.Deferred;
+	const std::string geometryVertexSource = ShaderUtils::LoadShaderSource(GetVulkanDeferredGeometryVertexShaderPath());
+	const std::string geometryFragmentSource = ShaderUtils::LoadShaderSource(GetVulkanDeferredGeometryFragmentShaderPath());
+	const std::string lightingVertexSource = ShaderUtils::LoadShaderSource(GetVulkanDeferredLightingVertexShaderPath());
+	const std::string lightingFragmentSource = ShaderUtils::LoadShaderSource(GetVulkanDeferredLightingFragmentShaderPath());
+	const std::string toneMapVertexSource = ShaderUtils::LoadShaderSource(GetVulkanToneMapVertexShaderPath());
+	const std::string toneMapFragmentSource = ShaderUtils::LoadShaderSource(GetVulkanToneMapFragmentShaderPath());
+	if (geometryVertexSource.empty() ||
+		geometryFragmentSource.empty() ||
+		lightingVertexSource.empty() ||
+		lightingFragmentSource.empty() ||
+		toneMapVertexSource.empty() ||
+		toneMapFragmentSource.empty())
+	{
+		MessageBoxW(m_hMainWnd, L"Vulkan Deferred 셰이더 파일을 읽을 수 없습니다.", L"Shader Error", MB_OK | MB_ICONERROR);
+		return false;
+	}
+
+	auto createShaderModule = [&](const std::vector<uint32_t>& code, VkShaderModule& shaderModule)
+	{
+		if (code.empty())
+		{
+			return false;
+		}
+		const VkShaderModuleCreateInfo createInfo = {
+			.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+			.codeSize = code.size() * sizeof(uint32_t),
+			.pCode = code.data()
+		};
+		return vkCreateShaderModule(vulkanDevice->GetVkDevice(), &createInfo, nullptr, &shaderModule) == VK_SUCCESS;
+	};
+
+	if (!createShaderModule(ShaderUtils::CompileGlslToSpirv(GLSLANG_STAGE_VERTEX, geometryVertexSource), deferred.GeometryVertexShader) ||
+		!createShaderModule(ShaderUtils::CompileGlslToSpirv(GLSLANG_STAGE_FRAGMENT, geometryFragmentSource), deferred.GeometryFragmentShader) ||
+		!createShaderModule(ShaderUtils::CompileGlslToSpirv(GLSLANG_STAGE_VERTEX, lightingVertexSource), deferred.LightingVertexShader) ||
+		!createShaderModule(ShaderUtils::CompileGlslToSpirv(GLSLANG_STAGE_FRAGMENT, lightingFragmentSource), deferred.LightingFragmentShader) ||
+		!createShaderModule(ShaderUtils::CompileGlslToSpirv(GLSLANG_STAGE_VERTEX, toneMapVertexSource), deferred.ToneMapVertexShader) ||
+		!createShaderModule(ShaderUtils::CompileGlslToSpirv(GLSLANG_STAGE_FRAGMENT, toneMapFragmentSource), deferred.ToneMapFragmentShader))
+	{
+		return false;
+	}
+
+	std::array<VkAttachmentDescription, Rendering::VulkanStaticMeshResources::DeferredResources::GBufferCount + 1> attachments = {};
+	for (size_t attachmentIndex = 0; attachmentIndex < Rendering::VulkanStaticMeshResources::DeferredResources::GBufferCount; ++attachmentIndex)
+	{
+		attachments[attachmentIndex] = {
+			.format = VK_FORMAT_R16G16B16A16_SFLOAT,
+			.samples = VK_SAMPLE_COUNT_1_BIT,
+			.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+			.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+			.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+			.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+		};
+	}
+	attachments.back() = {
+		.format = VK_FORMAT_D32_SFLOAT,
+		.samples = VK_SAMPLE_COUNT_1_BIT,
+		.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+		.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+		.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+		.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+		.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+	};
+
+	std::array<VkAttachmentReference, Rendering::VulkanStaticMeshResources::DeferredResources::GBufferCount> colorAttachmentRefs = {};
+	for (uint32_t attachmentIndex = 0; attachmentIndex < colorAttachmentRefs.size(); ++attachmentIndex)
+	{
+		colorAttachmentRefs[attachmentIndex] = {
+			.attachment = attachmentIndex,
+			.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+		};
+	}
+	const VkAttachmentReference depthAttachmentRef = {
+		.attachment = static_cast<uint32_t>(Rendering::VulkanStaticMeshResources::DeferredResources::GBufferCount),
+		.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+	};
+	const VkSubpassDescription subpass = {
+		.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+		.colorAttachmentCount = static_cast<uint32_t>(colorAttachmentRefs.size()),
+		.pColorAttachments = colorAttachmentRefs.data(),
+		.pDepthStencilAttachment = &depthAttachmentRef
+	};
+	const VkRenderPassCreateInfo renderPassCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+		.attachmentCount = static_cast<uint32_t>(attachments.size()),
+		.pAttachments = attachments.data(),
+		.subpassCount = 1,
+		.pSubpasses = &subpass
+	};
+	if (vkCreateRenderPass(vulkanDevice->GetVkDevice(), &renderPassCreateInfo, nullptr, &deferred.GeometryRenderPass) != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	const VkAttachmentDescription hdrAttachment = {
+		.format = VK_FORMAT_R16G16B16A16_SFLOAT,
+		.samples = VK_SAMPLE_COUNT_1_BIT,
+		.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+		.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+		.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+		.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+		.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+	};
+	const VkAttachmentReference hdrAttachmentRef = {
+		.attachment = 0,
+		.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+	};
+	const VkSubpassDescription hdrSubpass = {
+		.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+		.colorAttachmentCount = 1,
+		.pColorAttachments = &hdrAttachmentRef
+	};
+	const VkSubpassDependency hdrDependencies[] = {
+		{
+			.srcSubpass = VK_SUBPASS_EXTERNAL,
+			.dstSubpass = 0,
+			.srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+			.srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
+			.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+		},
+		{
+			.srcSubpass = 0,
+			.dstSubpass = VK_SUBPASS_EXTERNAL,
+			.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+			.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+			.dstAccessMask = VK_ACCESS_SHADER_READ_BIT
+		}
+	};
+	const VkRenderPassCreateInfo hdrRenderPassCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+		.attachmentCount = 1,
+		.pAttachments = &hdrAttachment,
+		.subpassCount = 1,
+		.pSubpasses = &hdrSubpass,
+		.dependencyCount = static_cast<uint32_t>(std::size(hdrDependencies)),
+		.pDependencies = hdrDependencies
+	};
+	if (vkCreateRenderPass(vulkanDevice->GetVkDevice(), &hdrRenderPassCreateInfo, nullptr, &deferred.LightingRenderPass) != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	const VkVertexInputBindingDescription vertexBindingDescription = {
+		.binding = 0,
+		.stride = sizeof(Asset::StaticMeshVertex),
+		.inputRate = VK_VERTEX_INPUT_RATE_VERTEX
+	};
+	const VkVertexInputAttributeDescription vertexAttributeDescriptions[] = {
+		{ .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Asset::StaticMeshVertex, Position) },
+		{ .location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Asset::StaticMeshVertex, Normal) },
+		{ .location = 2, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Asset::StaticMeshVertex, TexCoord) },
+		{ .location = 3, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(Asset::StaticMeshVertex, Color) },
+		{ .location = 4, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Asset::StaticMeshVertex, Tangent) },
+		{ .location = 5, .binding = 0, .format = VK_FORMAT_R32_SFLOAT, .offset = offsetof(Asset::StaticMeshVertex, TangentSign) }
+	};
+	const VkPipelineVertexInputStateCreateInfo vertexInput = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+		.vertexBindingDescriptionCount = 1,
+		.pVertexBindingDescriptions = &vertexBindingDescription,
+		.vertexAttributeDescriptionCount = static_cast<uint32_t>(std::size(vertexAttributeDescriptions)),
+		.pVertexAttributeDescriptions = vertexAttributeDescriptions
+	};
+	const VkPipelineInputAssemblyStateCreateInfo inputAssembly = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+		.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
+	};
+	const VkPipelineViewportStateCreateInfo viewportState = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+		.viewportCount = 1,
+		.scissorCount = 1
+	};
+	const VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	const VkPipelineDynamicStateCreateInfo dynamicState = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+		.dynamicStateCount = 2,
+		.pDynamicStates = dynamicStates
+	};
+	const VkPipelineRasterizationStateCreateInfo rasterizer = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+		.polygonMode = VK_POLYGON_MODE_FILL,
+		.cullMode = VK_CULL_MODE_NONE,
+		.frontFace = VK_FRONT_FACE_CLOCKWISE,
+		.lineWidth = 1.0f
+	};
+	const VkPipelineMultisampleStateCreateInfo multisampling = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+		.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
+	};
+	std::array<VkPipelineColorBlendAttachmentState, Rendering::VulkanStaticMeshResources::DeferredResources::GBufferCount> colorBlendAttachments = {};
+	for (auto& attachment : colorBlendAttachments)
+	{
+		attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+	}
+	const VkPipelineColorBlendStateCreateInfo colorBlending = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+		.attachmentCount = static_cast<uint32_t>(colorBlendAttachments.size()),
+		.pAttachments = colorBlendAttachments.data()
+	};
+	const VkPipelineDepthStencilStateCreateInfo depthStencil = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+		.depthTestEnable = VK_TRUE,
+		.depthWriteEnable = VK_TRUE,
+		.depthCompareOp = VK_COMPARE_OP_LESS
+	};
+	const VkPipelineShaderStageCreateInfo geometryShaderStages[] = {
+		{ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = deferred.GeometryVertexShader, .pName = "main" },
+		{ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = deferred.GeometryFragmentShader, .pName = "main" }
+	};
+	const VkGraphicsPipelineCreateInfo geometryPipelineCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+		.stageCount = static_cast<uint32_t>(std::size(geometryShaderStages)),
+		.pStages = geometryShaderStages,
+		.pVertexInputState = &vertexInput,
+		.pInputAssemblyState = &inputAssembly,
+		.pViewportState = &viewportState,
+		.pRasterizationState = &rasterizer,
+		.pMultisampleState = &multisampling,
+		.pDepthStencilState = &depthStencil,
+		.pColorBlendState = &colorBlending,
+		.pDynamicState = &dynamicState,
+		.layout = m_StaticMeshRenderer.Vulkan.PipelineLayout,
+		.renderPass = deferred.GeometryRenderPass,
+		.subpass = 0
+	};
+	if (vkCreateGraphicsPipelines(vulkanDevice->GetVkDevice(), VK_NULL_HANDLE, 1, &geometryPipelineCreateInfo, nullptr, &deferred.GeometryPipeline) != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	const VkDescriptorSetLayoutBinding lightingBindings[] = {
+		{ .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+		{ .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+		{ .binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+		{ .binding = 3, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+		{ .binding = 4, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+		{ .binding = 5, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+		{ .binding = 10, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+		{ .binding = 11, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+		{ .binding = 12, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT }
+	};
+	const VkDescriptorSetLayoutCreateInfo lightingDescriptorSetLayoutInfo = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		.bindingCount = static_cast<uint32_t>(std::size(lightingBindings)),
+		.pBindings = lightingBindings
+	};
+	if (vkCreateDescriptorSetLayout(vulkanDevice->GetVkDevice(), &lightingDescriptorSetLayoutInfo, nullptr, &deferred.LightingDescriptorSetLayout) != VK_SUCCESS)
+	{
+		return false;
+	}
+	const VkPipelineLayoutCreateInfo lightingPipelineLayoutInfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+		.setLayoutCount = 1,
+		.pSetLayouts = &deferred.LightingDescriptorSetLayout
+	};
+	if (vkCreatePipelineLayout(vulkanDevice->GetVkDevice(), &lightingPipelineLayoutInfo, nullptr, &deferred.LightingPipelineLayout) != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	const VkDescriptorSetLayoutBinding toneMapBindings[] = {
+		{ .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+		{ .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT }
+	};
+	const VkDescriptorSetLayoutCreateInfo toneMapDescriptorSetLayoutInfo = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		.bindingCount = static_cast<uint32_t>(std::size(toneMapBindings)),
+		.pBindings = toneMapBindings
+	};
+	if (vkCreateDescriptorSetLayout(vulkanDevice->GetVkDevice(), &toneMapDescriptorSetLayoutInfo, nullptr, &deferred.ToneMapDescriptorSetLayout) != VK_SUCCESS)
+	{
+		return false;
+	}
+	const VkPipelineLayoutCreateInfo toneMapPipelineLayoutInfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+		.setLayoutCount = 1,
+		.pSetLayouts = &deferred.ToneMapDescriptorSetLayout
+	};
+	if (vkCreatePipelineLayout(vulkanDevice->GetVkDevice(), &toneMapPipelineLayoutInfo, nullptr, &deferred.ToneMapPipelineLayout) != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	const VkPipelineVertexInputStateCreateInfo lightingVertexInput = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
+	};
+	const VkPipelineDepthStencilStateCreateInfo lightingDepthStencil = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+		.depthTestEnable = VK_FALSE,
+		.depthWriteEnable = VK_FALSE
+	};
+	const VkPipelineColorBlendAttachmentState lightingBlendAttachment = {
+		.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
+	};
+	const VkPipelineColorBlendStateCreateInfo lightingBlendState = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+		.attachmentCount = 1,
+		.pAttachments = &lightingBlendAttachment
+	};
+	const VkPipelineShaderStageCreateInfo lightingShaderStages[] = {
+		{ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = deferred.LightingVertexShader, .pName = "main" },
+		{ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = deferred.LightingFragmentShader, .pName = "main" }
+	};
+	const VkGraphicsPipelineCreateInfo lightingPipelineCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+		.stageCount = static_cast<uint32_t>(std::size(lightingShaderStages)),
+		.pStages = lightingShaderStages,
+		.pVertexInputState = &lightingVertexInput,
+		.pInputAssemblyState = &inputAssembly,
+		.pViewportState = &viewportState,
+		.pRasterizationState = &rasterizer,
+		.pMultisampleState = &multisampling,
+		.pDepthStencilState = &lightingDepthStencil,
+		.pColorBlendState = &lightingBlendState,
+		.pDynamicState = &dynamicState,
+		.layout = deferred.LightingPipelineLayout,
+		.renderPass = deferred.LightingRenderPass,
+		.subpass = 0
+	};
+	if (vkCreateGraphicsPipelines(vulkanDevice->GetVkDevice(), VK_NULL_HANDLE, 1, &lightingPipelineCreateInfo, nullptr, &deferred.LightingPipeline) != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	const VkPipelineShaderStageCreateInfo toneMapShaderStages[] = {
+		{ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = deferred.ToneMapVertexShader, .pName = "main" },
+		{ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = deferred.ToneMapFragmentShader, .pName = "main" }
+	};
+	VkGraphicsPipelineCreateInfo toneMapPipelineCreateInfo = lightingPipelineCreateInfo;
+	toneMapPipelineCreateInfo.stageCount = static_cast<uint32_t>(std::size(toneMapShaderStages));
+	toneMapPipelineCreateInfo.pStages = toneMapShaderStages;
+	toneMapPipelineCreateInfo.layout = deferred.ToneMapPipelineLayout;
+	toneMapPipelineCreateInfo.renderPass = vulkanDevice->GetVkLoadRenderPass() != VK_NULL_HANDLE ? vulkanDevice->GetVkLoadRenderPass() : vulkanDevice->GetVkRenderPass();
+	if (vkCreateGraphicsPipelines(vulkanDevice->GetVkDevice(), VK_NULL_HANDLE, 1, &toneMapPipelineCreateInfo, nullptr, &deferred.ToneMapPipeline) != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	return EnsureVulkanDeferredResources();
+}
+
+bool Engine::CreateVulkanShadowResources()
+{
+	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
+	if (!vulkanDevice || m_StaticMeshRenderer.Vulkan.PipelineLayout == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+
+	auto& shadow = m_StaticMeshRenderer.Vulkan.Shadow;
+	const std::string shadowVertexSource = ShaderUtils::LoadShaderSource(GetVulkanShadowDepthVertexShaderPath());
+	if (shadowVertexSource.empty())
+	{
+		MessageBoxW(m_hMainWnd, L"Vulkan Shadow 셰이더 파일을 읽을 수 없습니다.", L"Shader Error", MB_OK | MB_ICONERROR);
+		return false;
+	}
+
+	const std::vector<uint32_t> shaderCode = ShaderUtils::CompileGlslToSpirv(GLSLANG_STAGE_VERTEX, shadowVertexSource);
+	if (shaderCode.empty())
+	{
+		return false;
+	}
+
+	const VkShaderModuleCreateInfo shaderModuleCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+		.codeSize = shaderCode.size() * sizeof(uint32_t),
+		.pCode = shaderCode.data()
+	};
+	if (vkCreateShaderModule(vulkanDevice->GetVkDevice(), &shaderModuleCreateInfo, nullptr, &shadow.VertexShader) != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	const VkAttachmentDescription depthAttachment = {
+		.format = VK_FORMAT_D32_SFLOAT,
+		.samples = VK_SAMPLE_COUNT_1_BIT,
+		.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+		.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+		.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+		.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+		.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+	};
+	const VkAttachmentReference depthAttachmentRef = {
+		.attachment = 0,
+		.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+	};
+	const VkSubpassDescription subpass = {
+		.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+		.pDepthStencilAttachment = &depthAttachmentRef
+	};
+	const VkSubpassDependency dependencies[] = {
+		{
+			.srcSubpass = VK_SUBPASS_EXTERNAL,
+			.dstSubpass = 0,
+			.srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			.dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+			.srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
+			.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
+		},
+		{
+			.srcSubpass = 0,
+			.dstSubpass = VK_SUBPASS_EXTERNAL,
+			.srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+			.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+			.dstAccessMask = VK_ACCESS_SHADER_READ_BIT
+		}
+	};
+	const VkRenderPassCreateInfo renderPassCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+		.attachmentCount = 1,
+		.pAttachments = &depthAttachment,
+		.subpassCount = 1,
+		.pSubpasses = &subpass,
+		.dependencyCount = static_cast<uint32_t>(std::size(dependencies)),
+		.pDependencies = dependencies
+	};
+	if (vkCreateRenderPass(vulkanDevice->GetVkDevice(), &renderPassCreateInfo, nullptr, &shadow.RenderPass) != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	const VkVertexInputBindingDescription vertexBindingDescription = {
+		.binding = 0,
+		.stride = sizeof(Asset::StaticMeshVertex),
+		.inputRate = VK_VERTEX_INPUT_RATE_VERTEX
+	};
+	const VkVertexInputAttributeDescription vertexAttributeDescriptions[] = {
+		{ .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Asset::StaticMeshVertex, Position) }
+	};
+	const VkPipelineVertexInputStateCreateInfo vertexInput = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+		.vertexBindingDescriptionCount = 1,
+		.pVertexBindingDescriptions = &vertexBindingDescription,
+		.vertexAttributeDescriptionCount = static_cast<uint32_t>(std::size(vertexAttributeDescriptions)),
+		.pVertexAttributeDescriptions = vertexAttributeDescriptions
+	};
+	const VkPipelineInputAssemblyStateCreateInfo inputAssembly = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+		.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
+	};
+	const VkPipelineViewportStateCreateInfo viewportState = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+		.viewportCount = 1,
+		.scissorCount = 1
+	};
+	const VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	const VkPipelineDynamicStateCreateInfo dynamicState = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+		.dynamicStateCount = static_cast<uint32_t>(std::size(dynamicStates)),
+		.pDynamicStates = dynamicStates
+	};
+	const VkPipelineRasterizationStateCreateInfo rasterizer = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+		.polygonMode = VK_POLYGON_MODE_FILL,
+		.cullMode = VK_CULL_MODE_NONE,
+		.frontFace = VK_FRONT_FACE_CLOCKWISE,
+		.depthBiasEnable = VK_TRUE,
+		.depthBiasConstantFactor = 1.25f,
+		.depthBiasSlopeFactor = 1.75f,
+		.lineWidth = 1.0f
+	};
+	const VkPipelineMultisampleStateCreateInfo multisampling = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+		.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
+	};
+	const VkPipelineDepthStencilStateCreateInfo depthStencil = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+		.depthTestEnable = VK_TRUE,
+		.depthWriteEnable = VK_TRUE,
+		.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL
+	};
+	const VkPipelineColorBlendStateCreateInfo colorBlending = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO
+	};
+	const VkPipelineShaderStageCreateInfo shaderStage = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+		.stage = VK_SHADER_STAGE_VERTEX_BIT,
+		.module = shadow.VertexShader,
+		.pName = "main"
+	};
+	const VkGraphicsPipelineCreateInfo pipelineCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+		.stageCount = 1,
+		.pStages = &shaderStage,
+		.pVertexInputState = &vertexInput,
+		.pInputAssemblyState = &inputAssembly,
+		.pViewportState = &viewportState,
+		.pRasterizationState = &rasterizer,
+		.pMultisampleState = &multisampling,
+		.pDepthStencilState = &depthStencil,
+		.pColorBlendState = &colorBlending,
+		.pDynamicState = &dynamicState,
+		.layout = m_StaticMeshRenderer.Vulkan.PipelineLayout,
+		.renderPass = shadow.RenderPass,
+		.subpass = 0
+	};
+	if (vkCreateGraphicsPipelines(vulkanDevice->GetVkDevice(), VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr, &shadow.Pipeline) != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	return EnsureVulkanShadowResources();
+}
+
+bool Engine::EnsureVulkanShadowResources()
+{
+	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
+	auto& shadow = m_StaticMeshRenderer.Vulkan.Shadow;
+	if (!vulkanDevice || shadow.RenderPass == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+
+	const uint32_t mapSize = m_ShadowSettings.Enabled
+		? std::clamp(m_ShadowSettings.MapSize, 256u, 8192u)
+		: 1u;
+	if (shadow.IsValid && shadow.Size == mapSize)
+	{
+		WriteVulkanDeferredShadowDescriptor();
+		return true;
+	}
+
+	m_Graphics.Device->WaitForGPU();
+	const VkDevice device = vulkanDevice->GetVkDevice();
+	if (shadow.Framebuffer != VK_NULL_HANDLE)
+	{
+		vkDestroyFramebuffer(device, shadow.Framebuffer, nullptr);
+		shadow.Framebuffer = VK_NULL_HANDLE;
+	}
+	if (shadow.DepthSampler != VK_NULL_HANDLE)
+	{
+		vkDestroySampler(device, shadow.DepthSampler, nullptr);
+		shadow.DepthSampler = VK_NULL_HANDLE;
+	}
+	if (shadow.DepthImageView != VK_NULL_HANDLE)
+	{
+		vkDestroyImageView(device, shadow.DepthImageView, nullptr);
+		shadow.DepthImageView = VK_NULL_HANDLE;
+	}
+	if (shadow.DepthImage != VK_NULL_HANDLE)
+	{
+		vkDestroyImage(device, shadow.DepthImage, nullptr);
+		shadow.DepthImage = VK_NULL_HANDLE;
+	}
+	if (shadow.DepthMemory != VK_NULL_HANDLE)
+	{
+		vkFreeMemory(device, shadow.DepthMemory, nullptr);
+		shadow.DepthMemory = VK_NULL_HANDLE;
+	}
+
+	const VkImageCreateInfo imageCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+		.imageType = VK_IMAGE_TYPE_2D,
+		.format = VK_FORMAT_D32_SFLOAT,
+		.extent = { mapSize, mapSize, 1 },
+		.mipLevels = 1,
+		.arrayLayers = 1,
+		.samples = VK_SAMPLE_COUNT_1_BIT,
+		.tiling = VK_IMAGE_TILING_OPTIMAL,
+		.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+		.sharingMode = VK_SHARING_MODE_EXCLUSIVE
+	};
+	if (vkCreateImage(device, &imageCreateInfo, nullptr, &shadow.DepthImage) != VK_SUCCESS)
+	{
+		shadow.IsValid = false;
+		return false;
+	}
+
+	VkMemoryRequirements memoryRequirements = {};
+	vkGetImageMemoryRequirements(device, shadow.DepthImage, &memoryRequirements);
+	const VkMemoryAllocateInfo allocateInfo = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		.allocationSize = memoryRequirements.size,
+		.memoryTypeIndex = vulkanDevice->FindMemoryTypeForTexture(memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+	};
+	if (vkAllocateMemory(device, &allocateInfo, nullptr, &shadow.DepthMemory) != VK_SUCCESS)
+	{
+		shadow.IsValid = false;
+		return false;
+	}
+	vkBindImageMemory(device, shadow.DepthImage, shadow.DepthMemory, 0);
+
+	const VkImageViewCreateInfo imageViewCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+		.image = shadow.DepthImage,
+		.viewType = VK_IMAGE_VIEW_TYPE_2D,
+		.format = VK_FORMAT_D32_SFLOAT,
+		.subresourceRange = {
+			.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+			.baseMipLevel = 0,
+			.levelCount = 1,
+			.baseArrayLayer = 0,
+			.layerCount = 1
+		}
+	};
+	if (vkCreateImageView(device, &imageViewCreateInfo, nullptr, &shadow.DepthImageView) != VK_SUCCESS)
+	{
+		shadow.IsValid = false;
+		return false;
+	}
+
+	const VkSamplerCreateInfo samplerCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+		.magFilter = VK_FILTER_LINEAR,
+		.minFilter = VK_FILTER_LINEAR,
+		.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+		.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+		.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+		.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+		.compareEnable = VK_TRUE,
+		.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+		.minLod = 0.0f,
+		.maxLod = 1.0f,
+		.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE
+	};
+	if (vkCreateSampler(device, &samplerCreateInfo, nullptr, &shadow.DepthSampler) != VK_SUCCESS)
+	{
+		shadow.IsValid = false;
+		return false;
+	}
+
+	const VkFramebufferCreateInfo framebufferCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+		.renderPass = shadow.RenderPass,
+		.attachmentCount = 1,
+		.pAttachments = &shadow.DepthImageView,
+		.width = mapSize,
+		.height = mapSize,
+		.layers = 1
+	};
+	if (vkCreateFramebuffer(device, &framebufferCreateInfo, nullptr, &shadow.Framebuffer) != VK_SUCCESS)
+	{
+		shadow.IsValid = false;
+		return false;
+	}
+
+	shadow.Size = mapSize;
+	shadow.IsValid = true;
+	WriteVulkanDeferredShadowDescriptor();
+	return true;
+}
+
+void Engine::WriteVulkanDeferredShadowDescriptor()
+{
+	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
+	auto& deferred = m_StaticMeshRenderer.Vulkan.Deferred;
+	auto& shadow = m_StaticMeshRenderer.Vulkan.Shadow;
+	if (!vulkanDevice || deferred.LightingDescriptorSet == VK_NULL_HANDLE || shadow.DepthSampler == VK_NULL_HANDLE || shadow.DepthImageView == VK_NULL_HANDLE)
+	{
+		return;
+	}
+
+	const VkDescriptorImageInfo shadowInfo = {
+		.sampler = shadow.DepthSampler,
+		.imageView = shadow.DepthImageView,
+		.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+	};
+	const VkWriteDescriptorSet write = {
+		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.dstSet = deferred.LightingDescriptorSet,
+		.dstBinding = 5,
+		.descriptorCount = 1,
+		.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		.pImageInfo = &shadowInfo
+	};
+	vkUpdateDescriptorSets(vulkanDevice->GetVkDevice(), 1, &write, 0, nullptr);
+}
+
+void Engine::WriteVulkanToneMapDescriptor()
+{
+	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
+	auto vulkanLightingBuffer = dynamic_cast<VulkanBuffer*>(m_StaticMeshRenderer.DeferredLightingBuffer.get());
+	auto& deferred = m_StaticMeshRenderer.Vulkan.Deferred;
+	if (!vulkanDevice ||
+		!vulkanLightingBuffer ||
+		deferred.ToneMapDescriptorSet == VK_NULL_HANDLE ||
+		deferred.HdrSampler == VK_NULL_HANDLE ||
+		deferred.HdrColorImageView == VK_NULL_HANDLE)
+	{
+		return;
+	}
+
+	const VkDescriptorBufferInfo postProcessBufferInfo = {
+		.buffer = vulkanLightingBuffer->GetVkBuffer(),
+		.offset = 0,
+		.range = sizeof(DeferredLightingConstants)
+	};
+	const VkDescriptorImageInfo hdrImageInfo = {
+		.sampler = deferred.HdrSampler,
+		.imageView = deferred.HdrColorImageView,
+		.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+	};
+	const VkWriteDescriptorSet writes[] = {
+		{
+			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.dstSet = deferred.ToneMapDescriptorSet,
+			.dstBinding = 0,
+			.descriptorCount = 1,
+			.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+			.pBufferInfo = &postProcessBufferInfo
+		},
+		{
+			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.dstSet = deferred.ToneMapDescriptorSet,
+			.dstBinding = 1,
+			.descriptorCount = 1,
+			.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			.pImageInfo = &hdrImageInfo
+		}
+	};
+	vkUpdateDescriptorSets(vulkanDevice->GetVkDevice(), static_cast<uint32_t>(std::size(writes)), writes, 0, nullptr);
+}
+
+bool Engine::EnsureVulkanDeferredResources()
+{
+	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
+	auto vulkanLightingBuffer = dynamic_cast<VulkanBuffer*>(m_StaticMeshRenderer.DeferredLightingBuffer.get());
+	auto vulkanLightBuffer = dynamic_cast<VulkanBuffer*>(m_StaticMeshRenderer.DeferredLightBuffer.get());
+	auto vulkanTileRangeBuffer = dynamic_cast<VulkanBuffer*>(m_StaticMeshRenderer.DeferredTileRangeBuffer.get());
+	auto vulkanTileIndexBuffer = dynamic_cast<VulkanBuffer*>(m_StaticMeshRenderer.DeferredTileLightIndexBuffer.get());
+	auto& deferred = m_StaticMeshRenderer.Vulkan.Deferred;
+	if (!vulkanDevice || !vulkanLightingBuffer || !vulkanLightBuffer || !vulkanTileRangeBuffer || !vulkanTileIndexBuffer ||
+		deferred.GeometryRenderPass == VK_NULL_HANDLE || deferred.LightingDescriptorSetLayout == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+	if (deferred.LightingRenderPass == VK_NULL_HANDLE ||
+		deferred.ToneMapDescriptorSetLayout == VK_NULL_HANDLE ||
+		deferred.ToneMapPipelineLayout == VK_NULL_HANDLE ||
+		deferred.ToneMapPipeline == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+
+	if (!EnsureVulkanShadowResources())
+	{
+		return false;
+	}
+
+	const VkExtent2D extent = vulkanDevice->GetVkSwapchainExtent();
+	const uint32_t width = (std::max)(extent.width, 1u);
+	const uint32_t height = (std::max)(extent.height, 1u);
+	bool gBuffersValid = true;
+	for (size_t targetIndex = 0; targetIndex < deferred.GBufferImages.size(); ++targetIndex)
+	{
+		gBuffersValid = gBuffersValid &&
+			deferred.GBufferImages[targetIndex] != VK_NULL_HANDLE &&
+			deferred.GBufferMemories[targetIndex] != VK_NULL_HANDLE &&
+			deferred.GBufferImageViews[targetIndex] != VK_NULL_HANDLE;
+	}
+
+	if (deferred.IsValid &&
+		deferred.Width == width &&
+		deferred.Height == height &&
+		gBuffersValid &&
+		deferred.GeometryFramebuffer != VK_NULL_HANDLE &&
+		deferred.LightingFramebuffer != VK_NULL_HANDLE &&
+		deferred.HdrColorImage != VK_NULL_HANDLE &&
+		deferred.HdrColorMemory != VK_NULL_HANDLE &&
+		deferred.HdrColorImageView != VK_NULL_HANDLE &&
+		deferred.HdrSampler != VK_NULL_HANDLE &&
+		deferred.LightingDescriptorSet != VK_NULL_HANDLE &&
+		deferred.ToneMapDescriptorSet != VK_NULL_HANDLE)
+	{
+		WriteVulkanDeferredShadowDescriptor();
+		WriteVulkanToneMapDescriptor();
+		return true;
+	}
+
+	m_Graphics.Device->WaitForGPU();
+	const VkDevice device = vulkanDevice->GetVkDevice();
+	if (deferred.LightingFramebuffer != VK_NULL_HANDLE)
+	{
+		vkDestroyFramebuffer(device, deferred.LightingFramebuffer, nullptr);
+		deferred.LightingFramebuffer = VK_NULL_HANDLE;
+	}
+	if (deferred.GeometryFramebuffer != VK_NULL_HANDLE)
+	{
+		vkDestroyFramebuffer(device, deferred.GeometryFramebuffer, nullptr);
+		deferred.GeometryFramebuffer = VK_NULL_HANDLE;
+	}
+	if (deferred.ToneMapDescriptorPool != VK_NULL_HANDLE)
+	{
+		vkDestroyDescriptorPool(device, deferred.ToneMapDescriptorPool, nullptr);
+		deferred.ToneMapDescriptorPool = VK_NULL_HANDLE;
+		deferred.ToneMapDescriptorSet = VK_NULL_HANDLE;
+	}
+	if (deferred.LightingDescriptorPool != VK_NULL_HANDLE)
+	{
+		vkDestroyDescriptorPool(device, deferred.LightingDescriptorPool, nullptr);
+		deferred.LightingDescriptorPool = VK_NULL_HANDLE;
+		deferred.LightingDescriptorSet = VK_NULL_HANDLE;
+	}
+	if (deferred.HdrSampler != VK_NULL_HANDLE)
+	{
+		vkDestroySampler(device, deferred.HdrSampler, nullptr);
+		deferred.HdrSampler = VK_NULL_HANDLE;
+	}
+	if (deferred.GBufferSampler != VK_NULL_HANDLE)
+	{
+		vkDestroySampler(device, deferred.GBufferSampler, nullptr);
+		deferred.GBufferSampler = VK_NULL_HANDLE;
+	}
+	if (deferred.HdrColorImageView != VK_NULL_HANDLE)
+	{
+		vkDestroyImageView(device, deferred.HdrColorImageView, nullptr);
+		deferred.HdrColorImageView = VK_NULL_HANDLE;
+	}
+	if (deferred.HdrColorImage != VK_NULL_HANDLE)
+	{
+		vkDestroyImage(device, deferred.HdrColorImage, nullptr);
+		deferred.HdrColorImage = VK_NULL_HANDLE;
+	}
+	if (deferred.HdrColorMemory != VK_NULL_HANDLE)
+	{
+		vkFreeMemory(device, deferred.HdrColorMemory, nullptr);
+		deferred.HdrColorMemory = VK_NULL_HANDLE;
+	}
+	for (size_t targetIndex = 0; targetIndex < deferred.GBufferImageViews.size(); ++targetIndex)
+	{
+		if (deferred.GBufferImageViews[targetIndex] != VK_NULL_HANDLE)
+		{
+			vkDestroyImageView(device, deferred.GBufferImageViews[targetIndex], nullptr);
+			deferred.GBufferImageViews[targetIndex] = VK_NULL_HANDLE;
+		}
+		if (deferred.GBufferImages[targetIndex] != VK_NULL_HANDLE)
+		{
+			vkDestroyImage(device, deferred.GBufferImages[targetIndex], nullptr);
+			deferred.GBufferImages[targetIndex] = VK_NULL_HANDLE;
+		}
+		if (deferred.GBufferMemories[targetIndex] != VK_NULL_HANDLE)
+		{
+			vkFreeMemory(device, deferred.GBufferMemories[targetIndex], nullptr);
+			deferred.GBufferMemories[targetIndex] = VK_NULL_HANDLE;
+		}
+	}
+	if (deferred.DepthImageView != VK_NULL_HANDLE)
+	{
+		vkDestroyImageView(device, deferred.DepthImageView, nullptr);
+		deferred.DepthImageView = VK_NULL_HANDLE;
+	}
+	if (deferred.DepthImage != VK_NULL_HANDLE)
+	{
+		vkDestroyImage(device, deferred.DepthImage, nullptr);
+		deferred.DepthImage = VK_NULL_HANDLE;
+	}
+	if (deferred.DepthMemory != VK_NULL_HANDLE)
+	{
+		vkFreeMemory(device, deferred.DepthMemory, nullptr);
+		deferred.DepthMemory = VK_NULL_HANDLE;
+	}
+
+	auto createImage = [&](VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect, VkImage& image, VkDeviceMemory& memory, VkImageView& imageView)
+	{
+		const VkImageCreateInfo imageCreateInfo = {
+			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+			.imageType = VK_IMAGE_TYPE_2D,
+			.format = format,
+			.extent = { width, height, 1 },
+			.mipLevels = 1,
+			.arrayLayers = 1,
+			.samples = VK_SAMPLE_COUNT_1_BIT,
+			.tiling = VK_IMAGE_TILING_OPTIMAL,
+			.usage = usage,
+			.sharingMode = VK_SHARING_MODE_EXCLUSIVE
+		};
+		if (vkCreateImage(device, &imageCreateInfo, nullptr, &image) != VK_SUCCESS)
+		{
+			return false;
+		}
+		VkMemoryRequirements memoryRequirements = {};
+		vkGetImageMemoryRequirements(device, image, &memoryRequirements);
+		const VkMemoryAllocateInfo allocateInfo = {
+			.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+			.allocationSize = memoryRequirements.size,
+			.memoryTypeIndex = vulkanDevice->FindMemoryTypeForTexture(memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+		};
+		if (vkAllocateMemory(device, &allocateInfo, nullptr, &memory) != VK_SUCCESS)
+		{
+			return false;
+		}
+		vkBindImageMemory(device, image, memory, 0);
+
+		const VkImageViewCreateInfo imageViewCreateInfo = {
+			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+			.image = image,
+			.viewType = VK_IMAGE_VIEW_TYPE_2D,
+			.format = format,
+			.subresourceRange = {
+				.aspectMask = aspect,
+				.baseMipLevel = 0,
+				.levelCount = 1,
+				.baseArrayLayer = 0,
+				.layerCount = 1
+			}
+		};
+		return vkCreateImageView(device, &imageViewCreateInfo, nullptr, &imageView) == VK_SUCCESS;
+	};
+
+	for (size_t targetIndex = 0; targetIndex < deferred.GBufferImages.size(); ++targetIndex)
+	{
+		if (!createImage(
+			VK_FORMAT_R16G16B16A16_SFLOAT,
+			VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+			VK_IMAGE_ASPECT_COLOR_BIT,
+			deferred.GBufferImages[targetIndex],
+			deferred.GBufferMemories[targetIndex],
+			deferred.GBufferImageViews[targetIndex]))
+		{
+			deferred.IsValid = false;
+			return false;
+		}
+	}
+	if (!createImage(
+		VK_FORMAT_D32_SFLOAT,
+		VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+		VK_IMAGE_ASPECT_DEPTH_BIT,
+		deferred.DepthImage,
+		deferred.DepthMemory,
+		deferred.DepthImageView))
+	{
+		deferred.IsValid = false;
+		return false;
+	}
+	if (!createImage(
+		VK_FORMAT_R16G16B16A16_SFLOAT,
+		VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+		VK_IMAGE_ASPECT_COLOR_BIT,
+		deferred.HdrColorImage,
+		deferred.HdrColorMemory,
+		deferred.HdrColorImageView))
+	{
+		deferred.IsValid = false;
+		return false;
+	}
+
+	const VkSamplerCreateInfo samplerCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+		.magFilter = VK_FILTER_LINEAR,
+		.minFilter = VK_FILTER_LINEAR,
+		.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+		.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+		.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+		.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+		.maxLod = 1.0f
+	};
+	if (vkCreateSampler(device, &samplerCreateInfo, nullptr, &deferred.GBufferSampler) != VK_SUCCESS)
+	{
+		deferred.IsValid = false;
+		return false;
+	}
+	if (vkCreateSampler(device, &samplerCreateInfo, nullptr, &deferred.HdrSampler) != VK_SUCCESS)
+	{
+		deferred.IsValid = false;
+		return false;
+	}
+
+	std::array<VkImageView, Rendering::VulkanStaticMeshResources::DeferredResources::GBufferCount + 1> framebufferAttachments = {};
+	for (size_t targetIndex = 0; targetIndex < deferred.GBufferImageViews.size(); ++targetIndex)
+	{
+		framebufferAttachments[targetIndex] = deferred.GBufferImageViews[targetIndex];
+	}
+	framebufferAttachments.back() = deferred.DepthImageView;
+	const VkFramebufferCreateInfo framebufferCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+		.renderPass = deferred.GeometryRenderPass,
+		.attachmentCount = static_cast<uint32_t>(framebufferAttachments.size()),
+		.pAttachments = framebufferAttachments.data(),
+		.width = width,
+		.height = height,
+		.layers = 1
+	};
+	if (vkCreateFramebuffer(device, &framebufferCreateInfo, nullptr, &deferred.GeometryFramebuffer) != VK_SUCCESS)
+	{
+		deferred.IsValid = false;
+		return false;
+	}
+
+	const VkFramebufferCreateInfo lightingFramebufferCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+		.renderPass = deferred.LightingRenderPass,
+		.attachmentCount = 1,
+		.pAttachments = &deferred.HdrColorImageView,
+		.width = width,
+		.height = height,
+		.layers = 1
+	};
+	if (vkCreateFramebuffer(device, &lightingFramebufferCreateInfo, nullptr, &deferred.LightingFramebuffer) != VK_SUCCESS)
+	{
+		deferred.IsValid = false;
+		return false;
+	}
+
+	const VkDescriptorPoolSize poolSizes[] = {
+		{ .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1 },
+		{ .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = static_cast<uint32_t>(Rendering::VulkanStaticMeshResources::DeferredResources::GBufferCount + 1) },
+		{ .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 3 }
+	};
+	const VkDescriptorPoolCreateInfo descriptorPoolCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+		.maxSets = 1,
+		.poolSizeCount = static_cast<uint32_t>(std::size(poolSizes)),
+		.pPoolSizes = poolSizes
+	};
+	if (vkCreateDescriptorPool(device, &descriptorPoolCreateInfo, nullptr, &deferred.LightingDescriptorPool) != VK_SUCCESS)
+	{
+		deferred.IsValid = false;
+		return false;
+	}
+	const VkDescriptorSetAllocateInfo descriptorSetAllocateInfo = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+		.descriptorPool = deferred.LightingDescriptorPool,
+		.descriptorSetCount = 1,
+		.pSetLayouts = &deferred.LightingDescriptorSetLayout
+	};
+	if (vkAllocateDescriptorSets(device, &descriptorSetAllocateInfo, &deferred.LightingDescriptorSet) != VK_SUCCESS)
+	{
+		deferred.IsValid = false;
+		return false;
+	}
+
+	const VkDescriptorPoolSize toneMapPoolSizes[] = {
+		{ .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1 },
+		{ .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1 }
+	};
+	const VkDescriptorPoolCreateInfo toneMapDescriptorPoolCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+		.maxSets = 1,
+		.poolSizeCount = static_cast<uint32_t>(std::size(toneMapPoolSizes)),
+		.pPoolSizes = toneMapPoolSizes
+	};
+	if (vkCreateDescriptorPool(device, &toneMapDescriptorPoolCreateInfo, nullptr, &deferred.ToneMapDescriptorPool) != VK_SUCCESS)
+	{
+		deferred.IsValid = false;
+		return false;
+	}
+	const VkDescriptorSetAllocateInfo toneMapDescriptorSetAllocateInfo = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+		.descriptorPool = deferred.ToneMapDescriptorPool,
+		.descriptorSetCount = 1,
+		.pSetLayouts = &deferred.ToneMapDescriptorSetLayout
+	};
+	if (vkAllocateDescriptorSets(device, &toneMapDescriptorSetAllocateInfo, &deferred.ToneMapDescriptorSet) != VK_SUCCESS)
+	{
+		deferred.IsValid = false;
+		return false;
+	}
+
+	const VkDescriptorBufferInfo lightingBufferInfo = {
+		.buffer = vulkanLightingBuffer->GetVkBuffer(),
+		.offset = 0,
+		.range = sizeof(DeferredLightingConstants)
+	};
+	const VkDescriptorBufferInfo lightBufferInfo = {
+		.buffer = vulkanLightBuffer->GetVkBuffer(),
+		.offset = 0,
+		.range = m_StaticMeshRenderer.DeferredLightBuffer ? m_StaticMeshRenderer.DeferredLightBuffer->GetSize() : sizeof(LightGpuData)
+	};
+	const VkDescriptorBufferInfo tileRangeBufferInfo = {
+		.buffer = vulkanTileRangeBuffer->GetVkBuffer(),
+		.offset = 0,
+		.range = m_StaticMeshRenderer.DeferredTileRangeBuffer ? m_StaticMeshRenderer.DeferredTileRangeBuffer->GetSize() : sizeof(DeferredTileLightRange)
+	};
+	const VkDescriptorBufferInfo tileIndexBufferInfo = {
+		.buffer = vulkanTileIndexBuffer->GetVkBuffer(),
+		.offset = 0,
+		.range = m_StaticMeshRenderer.DeferredTileLightIndexBuffer ? m_StaticMeshRenderer.DeferredTileLightIndexBuffer->GetSize() : sizeof(uint32_t)
+	};
+	std::array<VkDescriptorImageInfo, Rendering::VulkanStaticMeshResources::DeferredResources::GBufferCount> imageInfos = {};
+	for (size_t targetIndex = 0; targetIndex < imageInfos.size(); ++targetIndex)
+	{
+		imageInfos[targetIndex] = {
+			.sampler = deferred.GBufferSampler,
+			.imageView = deferred.GBufferImageViews[targetIndex],
+			.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+		};
+	}
+	std::array<VkWriteDescriptorSet, Rendering::VulkanStaticMeshResources::DeferredResources::GBufferCount + 5> writes = {};
+	writes[0] = {
+		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.dstSet = deferred.LightingDescriptorSet,
+		.dstBinding = 0,
+		.descriptorCount = 1,
+		.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+		.pBufferInfo = &lightingBufferInfo
+	};
+	for (size_t targetIndex = 0; targetIndex < imageInfos.size(); ++targetIndex)
+	{
+		writes[targetIndex + 1] = {
+			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.dstSet = deferred.LightingDescriptorSet,
+			.dstBinding = static_cast<uint32_t>(targetIndex + 1),
+			.descriptorCount = 1,
+			.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			.pImageInfo = &imageInfos[targetIndex]
+		};
+	}
+	const VkDescriptorImageInfo shadowInfo = {
+		.sampler = m_StaticMeshRenderer.Vulkan.Shadow.DepthSampler,
+		.imageView = m_StaticMeshRenderer.Vulkan.Shadow.DepthImageView,
+		.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+	};
+	writes[Rendering::VulkanStaticMeshResources::DeferredResources::GBufferCount + 1] = {
+		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.dstSet = deferred.LightingDescriptorSet,
+		.dstBinding = 5,
+		.descriptorCount = 1,
+		.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		.pImageInfo = &shadowInfo
+	};
+	writes[Rendering::VulkanStaticMeshResources::DeferredResources::GBufferCount + 2] = {
+		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.dstSet = deferred.LightingDescriptorSet,
+		.dstBinding = 10,
+		.descriptorCount = 1,
+		.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+		.pBufferInfo = &lightBufferInfo
+	};
+	writes[Rendering::VulkanStaticMeshResources::DeferredResources::GBufferCount + 3] = {
+		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.dstSet = deferred.LightingDescriptorSet,
+		.dstBinding = 11,
+		.descriptorCount = 1,
+		.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+		.pBufferInfo = &tileRangeBufferInfo
+	};
+	writes[Rendering::VulkanStaticMeshResources::DeferredResources::GBufferCount + 4] = {
+		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.dstSet = deferred.LightingDescriptorSet,
+		.dstBinding = 12,
+		.descriptorCount = 1,
+		.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+		.pBufferInfo = &tileIndexBufferInfo
+	};
+	vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+
+	deferred.Width = width;
+	deferred.Height = height;
+	deferred.IsValid = true;
+	WriteVulkanToneMapDescriptor();
 	return true;
 }
 
@@ -5045,14 +9317,19 @@ void Engine::DestroyVulkanTriangleResources()
 	if (!vulkanDevice)
 	{
 		auto savedMaterialTextures = std::move(m_StaticMeshRenderer.Vulkan.MaterialTextures);
+		const size_t savedMaterialCount = m_StaticMeshRenderer.Vulkan.MaterialCount;
 		auto savedEntityMaterials = std::move(m_StaticMeshRenderer.Vulkan.EntityMaterials);
 
 		m_StaticMeshRenderer.Vulkan = {};
 
 		m_StaticMeshRenderer.Vulkan.MaterialTextures = std::move(savedMaterialTextures);
+		m_StaticMeshRenderer.Vulkan.MaterialCount = savedMaterialCount;
 		m_StaticMeshRenderer.Vulkan.EntityMaterials = std::move(savedEntityMaterials);
 		return;
 	}
+
+	DestroyVulkanDeferredResources();
+	DestroyVulkanShadowResources();
 
 	if (m_StaticMeshRenderer.Vulkan.Pipeline != VK_NULL_HANDLE)
 	{
@@ -5104,12 +9381,531 @@ void Engine::DestroyVulkanTriangleResources()
 	// Vulkan material texture는 DestroyTextureResources()가 담당하므로, 리사이즈 중에는 벡터를 보존해야
 	// descriptor set과 pipeline만 재생성하면서 기존 텍스처를 다시 사용할 수 있습니다.
 	auto savedMaterialTextures = std::move(m_StaticMeshRenderer.Vulkan.MaterialTextures);
+	const size_t savedMaterialCount = m_StaticMeshRenderer.Vulkan.MaterialCount;
 	auto savedEntityMaterials = std::move(m_StaticMeshRenderer.Vulkan.EntityMaterials);
 
 	m_StaticMeshRenderer.Vulkan = {};
 
 	m_StaticMeshRenderer.Vulkan.MaterialTextures = std::move(savedMaterialTextures);
+	m_StaticMeshRenderer.Vulkan.MaterialCount = savedMaterialCount;
 	m_StaticMeshRenderer.Vulkan.EntityMaterials = std::move(savedEntityMaterials);
+}
+
+void Engine::DestroyVulkanShadowResources()
+{
+	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
+	if (!vulkanDevice)
+	{
+		m_StaticMeshRenderer.Vulkan.Shadow = {};
+		return;
+	}
+
+	const VkDevice device = vulkanDevice->GetVkDevice();
+	auto& shadow = m_StaticMeshRenderer.Vulkan.Shadow;
+	if (shadow.Pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, shadow.Pipeline, nullptr);
+	if (shadow.Framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(device, shadow.Framebuffer, nullptr);
+	if (shadow.RenderPass != VK_NULL_HANDLE) vkDestroyRenderPass(device, shadow.RenderPass, nullptr);
+	if (shadow.VertexShader != VK_NULL_HANDLE) vkDestroyShaderModule(device, shadow.VertexShader, nullptr);
+	if (shadow.DepthSampler != VK_NULL_HANDLE) vkDestroySampler(device, shadow.DepthSampler, nullptr);
+	if (shadow.DepthImageView != VK_NULL_HANDLE) vkDestroyImageView(device, shadow.DepthImageView, nullptr);
+	if (shadow.DepthImage != VK_NULL_HANDLE) vkDestroyImage(device, shadow.DepthImage, nullptr);
+	if (shadow.DepthMemory != VK_NULL_HANDLE) vkFreeMemory(device, shadow.DepthMemory, nullptr);
+	shadow = {};
+}
+
+void Engine::DestroyVulkanDeferredResources()
+{
+	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
+	if (!vulkanDevice)
+	{
+		m_StaticMeshRenderer.Vulkan.Deferred = {};
+		return;
+	}
+
+	const VkDevice device = vulkanDevice->GetVkDevice();
+	auto& deferred = m_StaticMeshRenderer.Vulkan.Deferred;
+	if (deferred.GeometryPipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, deferred.GeometryPipeline, nullptr);
+	if (deferred.LightingPipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, deferred.LightingPipeline, nullptr);
+	if (deferred.ToneMapPipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, deferred.ToneMapPipeline, nullptr);
+	if (deferred.LightingPipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, deferred.LightingPipelineLayout, nullptr);
+	if (deferred.ToneMapPipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, deferred.ToneMapPipelineLayout, nullptr);
+	if (deferred.ToneMapDescriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(device, deferred.ToneMapDescriptorPool, nullptr);
+	if (deferred.LightingDescriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(device, deferred.LightingDescriptorPool, nullptr);
+	if (deferred.ToneMapDescriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device, deferred.ToneMapDescriptorSetLayout, nullptr);
+	if (deferred.LightingDescriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device, deferred.LightingDescriptorSetLayout, nullptr);
+	if (deferred.LightingFramebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(device, deferred.LightingFramebuffer, nullptr);
+	if (deferred.GeometryFramebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(device, deferred.GeometryFramebuffer, nullptr);
+	if (deferred.LightingRenderPass != VK_NULL_HANDLE) vkDestroyRenderPass(device, deferred.LightingRenderPass, nullptr);
+	if (deferred.GeometryRenderPass != VK_NULL_HANDLE) vkDestroyRenderPass(device, deferred.GeometryRenderPass, nullptr);
+	if (deferred.HdrSampler != VK_NULL_HANDLE) vkDestroySampler(device, deferred.HdrSampler, nullptr);
+	if (deferred.GBufferSampler != VK_NULL_HANDLE) vkDestroySampler(device, deferred.GBufferSampler, nullptr);
+
+	for (VkShaderModule shaderModule : {
+		deferred.GeometryVertexShader,
+		deferred.GeometryFragmentShader,
+		deferred.LightingVertexShader,
+		deferred.LightingFragmentShader,
+		deferred.ToneMapVertexShader,
+		deferred.ToneMapFragmentShader })
+	{
+		if (shaderModule != VK_NULL_HANDLE)
+		{
+			vkDestroyShaderModule(device, shaderModule, nullptr);
+		}
+	}
+
+	if (deferred.HdrColorImageView != VK_NULL_HANDLE) vkDestroyImageView(device, deferred.HdrColorImageView, nullptr);
+	if (deferred.HdrColorImage != VK_NULL_HANDLE) vkDestroyImage(device, deferred.HdrColorImage, nullptr);
+	if (deferred.HdrColorMemory != VK_NULL_HANDLE) vkFreeMemory(device, deferred.HdrColorMemory, nullptr);
+	for (size_t targetIndex = 0; targetIndex < deferred.GBufferImageViews.size(); ++targetIndex)
+	{
+		if (deferred.GBufferImageViews[targetIndex] != VK_NULL_HANDLE) vkDestroyImageView(device, deferred.GBufferImageViews[targetIndex], nullptr);
+		if (deferred.GBufferImages[targetIndex] != VK_NULL_HANDLE) vkDestroyImage(device, deferred.GBufferImages[targetIndex], nullptr);
+		if (deferred.GBufferMemories[targetIndex] != VK_NULL_HANDLE) vkFreeMemory(device, deferred.GBufferMemories[targetIndex], nullptr);
+	}
+	if (deferred.DepthImageView != VK_NULL_HANDLE) vkDestroyImageView(device, deferred.DepthImageView, nullptr);
+	if (deferred.DepthImage != VK_NULL_HANDLE) vkDestroyImage(device, deferred.DepthImage, nullptr);
+	if (deferred.DepthMemory != VK_NULL_HANDLE) vkFreeMemory(device, deferred.DepthMemory, nullptr);
+
+	deferred = {};
+}
+
+void Engine::DrawVulkanShadowDepthPass(const Camera& camera)
+{
+	(void)camera;
+	if (!m_ShadowFrameData.Enabled || !m_ShadowFrameData.HasDirectionalCaster || !EnsureVulkanShadowResources())
+	{
+		return;
+	}
+
+	auto commandList = dynamic_cast<VulkanCommandList*>(m_Graphics.CommandList.get());
+	auto commandBuffer = reinterpret_cast<VkCommandBuffer>(m_Graphics.CommandList->GetNativeResource());
+	auto& shadow = m_StaticMeshRenderer.Vulkan.Shadow;
+	if (!commandList || commandBuffer == VK_NULL_HANDLE || shadow.Framebuffer == VK_NULL_HANDLE || shadow.RenderPass == VK_NULL_HANDLE || shadow.Pipeline == VK_NULL_HANDLE)
+	{
+		return;
+	}
+
+	commandList->EndRenderPassForExternalCommands();
+	m_Graphics.CommandList->SetVertexBuffer(m_StaticMeshRenderer.VertexBuffer.get());
+	m_Graphics.CommandList->SetIndexBuffer(m_StaticMeshRenderer.IndexBuffer.get());
+
+	const VkClearValue clearValue = {
+		.depthStencil = { 1.0f, 0 }
+	};
+	const VkRenderPassBeginInfo renderPassBeginInfo = {
+		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+		.renderPass = shadow.RenderPass,
+		.framebuffer = shadow.Framebuffer,
+		.renderArea = {
+			.offset = { 0, 0 },
+			.extent = { shadow.Size, shadow.Size }
+		},
+		.clearValueCount = 1,
+		.pClearValues = &clearValue
+	};
+	vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+	m_Graphics.CommandList->SetViewport(0.0f, 0.0f, static_cast<float>(shadow.Size), static_cast<float>(shadow.Size));
+	m_Graphics.CommandList->SetScissorRect(0, 0, static_cast<long>(shadow.Size), static_cast<long>(shadow.Size));
+	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow.Pipeline);
+
+	for (EntityId entityId : m_RenderState.RenderEntities)
+	{
+		if (!m_Scene.IsMeshEnabled(entityId))
+		{
+			continue;
+		}
+
+		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+		if (!meshAsset)
+		{
+			continue;
+		}
+
+		UploadEntityGeometry(entityId);
+		const std::vector<VkDescriptorSet>* selectedDescriptorSets = &m_StaticMeshRenderer.Vulkan.DescriptorSets;
+		if (auto entityMaterialIt = m_StaticMeshRenderer.Vulkan.EntityMaterials.find(entityId);
+			entityMaterialIt != m_StaticMeshRenderer.Vulkan.EntityMaterials.end()
+			&& !entityMaterialIt->second.DescriptorSets.empty())
+		{
+			selectedDescriptorSets = &entityMaterialIt->second.DescriptorSets;
+		}
+		if (!selectedDescriptorSets || selectedDescriptorSets->empty())
+		{
+			continue;
+		}
+
+		const uint64_t cameraOffset = UpdateShadowCameraBuffer(entityId);
+		if (cameraOffset == InvalidCameraConstantOffset())
+		{
+			continue;
+		}
+		const uint32_t dynamicOffset = static_cast<uint32_t>(cameraOffset);
+		const VkDescriptorSet descriptorSet = selectedDescriptorSets->front();
+		vkCmdBindDescriptorSets(
+			commandBuffer,
+			VK_PIPELINE_BIND_POINT_GRAPHICS,
+			m_StaticMeshRenderer.Vulkan.PipelineLayout,
+			0,
+			1,
+			&descriptorSet,
+			1,
+			&dynamicOffset);
+
+		if (meshAsset->Submeshes.empty())
+		{
+			if (!IsMaterialTransparent(entityId, 0))
+			{
+				RecordIndexedDraw(Rendering::DrawSubmissionKind::Shadow, static_cast<uint32_t>(meshAsset->Indices.size()), 1);
+				m_Graphics.CommandList->DrawIndexedInstanced(static_cast<uint32_t>(meshAsset->Indices.size()), 1, 0, 0, 0);
+			}
+			continue;
+		}
+
+		for (const auto& submesh : meshAsset->Submeshes)
+		{
+			if (!IsMaterialTransparent(entityId, submesh.MaterialIndex))
+			{
+				RecordIndexedDraw(Rendering::DrawSubmissionKind::Shadow, submesh.IndexCount, 1);
+				m_Graphics.CommandList->DrawIndexedInstanced(submesh.IndexCount, 1, submesh.IndexOffset, 0, 0);
+			}
+		}
+	}
+
+	vkCmdEndRenderPass(commandBuffer);
+}
+
+void Engine::DrawVulkanToneMapPass(const Editor::ViewportPanelState& viewport)
+{
+	auto commandList = dynamic_cast<VulkanCommandList*>(m_Graphics.CommandList.get());
+	auto commandBuffer = reinterpret_cast<VkCommandBuffer>(m_Graphics.CommandList->GetNativeResource());
+	auto& deferred = m_StaticMeshRenderer.Vulkan.Deferred;
+	if (!commandList ||
+		commandBuffer == VK_NULL_HANDLE ||
+		deferred.ToneMapPipeline == VK_NULL_HANDLE ||
+		deferred.ToneMapPipelineLayout == VK_NULL_HANDLE ||
+		deferred.ToneMapDescriptorSet == VK_NULL_HANDLE)
+	{
+		return;
+	}
+
+	const long left = (std::max)(0L, static_cast<long>(std::floor(viewport.Left)));
+	const long top = (std::max)(0L, static_cast<long>(std::floor(viewport.Top)));
+	const long right = (std::min)(static_cast<long>(m_ClientWidth), static_cast<long>(std::ceil(viewport.Left + viewport.Width)));
+	const long bottom = (std::min)(static_cast<long>(m_ClientHeight), static_cast<long>(std::ceil(viewport.Top + viewport.Height)));
+	const float width = static_cast<float>(right - left);
+	const float height = static_cast<float>(bottom - top);
+	if (width <= 0.0f || height <= 0.0f)
+	{
+		return;
+	}
+
+	commandList->BeginSwapchainRenderPassForExternalCommands();
+	m_Graphics.CommandList->SetViewport(static_cast<float>(left), static_cast<float>(top), width, height);
+	m_Graphics.CommandList->SetScissorRect(left, top, right, bottom);
+	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, deferred.ToneMapPipeline);
+	vkCmdBindDescriptorSets(
+		commandBuffer,
+		VK_PIPELINE_BIND_POINT_GRAPHICS,
+		deferred.ToneMapPipelineLayout,
+		0,
+		1,
+		&deferred.ToneMapDescriptorSet,
+		0,
+		nullptr);
+	RecordFullscreenDraw(Rendering::DrawSubmissionKind::Fullscreen, 3, 1);
+	m_Graphics.CommandList->DrawInstanced(3, 1, 0, 0);
+}
+
+void Engine::DrawVulkanDeferredTriangle(const Editor::ViewportPanelState& viewport, const Camera& camera, const DeferredPassTimingIndices& timings)
+{
+	if (!EnsureVulkanDeferredResources())
+	{
+		DrawVulkanTriangle(camera);
+		return;
+	}
+
+	auto commandList = dynamic_cast<VulkanCommandList*>(m_Graphics.CommandList.get());
+	auto commandBuffer = reinterpret_cast<VkCommandBuffer>(m_Graphics.CommandList->GetNativeResource());
+	auto& deferred = m_StaticMeshRenderer.Vulkan.Deferred;
+	if (!commandList || commandBuffer == VK_NULL_HANDLE || deferred.GeometryFramebuffer == VK_NULL_HANDLE || deferred.LightingDescriptorSet == VK_NULL_HANDLE)
+	{
+		DrawVulkanTriangle(camera);
+		return;
+	}
+
+	const long left = (std::max)(0L, static_cast<long>(std::floor(viewport.Left)));
+	const long top = (std::max)(0L, static_cast<long>(std::floor(viewport.Top)));
+	const long right = (std::min)(static_cast<long>(m_ClientWidth), static_cast<long>(std::ceil(viewport.Left + viewport.Width)));
+	const long bottom = (std::min)(static_cast<long>(m_ClientHeight), static_cast<long>(std::ceil(viewport.Top + viewport.Height)));
+	const float width = static_cast<float>(right - left);
+	const float height = static_cast<float>(bottom - top);
+
+	const auto geometryBegin = std::chrono::steady_clock::now();
+	commandList->EndRenderPassForExternalCommands();
+	std::array<VkClearValue, Rendering::VulkanStaticMeshResources::DeferredResources::GBufferCount + 1> clearValues = {};
+	clearValues.back().depthStencil = { 1.0f, 0 };
+	const VkRenderPassBeginInfo gbufferBeginInfo = {
+		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+		.renderPass = deferred.GeometryRenderPass,
+		.framebuffer = deferred.GeometryFramebuffer,
+		.renderArea = {
+			.offset = { 0, 0 },
+			.extent = { deferred.Width, deferred.Height }
+		},
+		.clearValueCount = static_cast<uint32_t>(clearValues.size()),
+		.pClearValues = clearValues.data()
+	};
+	vkCmdBeginRenderPass(commandBuffer, &gbufferBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+	m_Graphics.CommandList->SetViewport(static_cast<float>(left), static_cast<float>(top), width, height);
+	m_Graphics.CommandList->SetScissorRect(left, top, right, bottom);
+	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, deferred.GeometryPipeline);
+
+	for (EntityId entityId : m_ViewportVisibleRenderEntities)
+	{
+		if (!m_Scene.IsMeshEnabled(entityId))
+		{
+			continue;
+		}
+		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+		if (!meshAsset)
+		{
+			continue;
+		}
+
+		UploadEntityGeometry(entityId);
+		const std::vector<VkDescriptorSet>* selectedDescriptorSets = &m_StaticMeshRenderer.Vulkan.DescriptorSets;
+		if (auto entityMaterialIt = m_StaticMeshRenderer.Vulkan.EntityMaterials.find(entityId);
+			entityMaterialIt != m_StaticMeshRenderer.Vulkan.EntityMaterials.end()
+			&& !entityMaterialIt->second.DescriptorSets.empty())
+		{
+			selectedDescriptorSets = &entityMaterialIt->second.DescriptorSets;
+		}
+		if (!selectedDescriptorSets || selectedDescriptorSets->empty())
+		{
+			continue;
+		}
+
+		auto drawOpaqueMaterial = [&](uint32_t indexCount, uint32_t indexOffset, size_t materialIndex)
+		{
+			const VkDescriptorSet descriptorSet = (*selectedDescriptorSets)[materialIndex];
+			const uint64_t cameraOffset = UpdateCameraBuffer(entityId, camera, materialIndex, false);
+			if (cameraOffset == InvalidCameraConstantOffset())
+			{
+				return;
+			}
+			const uint32_t dynamicOffset = static_cast<uint32_t>(cameraOffset);
+			vkCmdBindDescriptorSets(
+				commandBuffer,
+				VK_PIPELINE_BIND_POINT_GRAPHICS,
+				m_StaticMeshRenderer.Vulkan.PipelineLayout,
+				0,
+				1,
+				&descriptorSet,
+				1,
+				&dynamicOffset);
+			RecordIndexedDraw(Rendering::DrawSubmissionKind::DeferredGeometry, indexCount, 1);
+			m_Graphics.CommandList->DrawIndexedInstanced(indexCount, 1, indexOffset, 0, 0);
+		};
+
+		if (meshAsset->Submeshes.empty())
+		{
+			if (!IsMaterialTransparent(entityId, 0))
+			{
+				drawOpaqueMaterial(static_cast<uint32_t>(meshAsset->Indices.size()), 0, 0);
+			}
+			continue;
+		}
+		for (const auto& submesh : meshAsset->Submeshes)
+		{
+			if (!IsMaterialTransparent(entityId, submesh.MaterialIndex))
+			{
+				const size_t materialIndex = submesh.MaterialIndex < selectedDescriptorSets->size() ? submesh.MaterialIndex : 0;
+				drawOpaqueMaterial(submesh.IndexCount, submesh.IndexOffset, materialIndex);
+			}
+		}
+	}
+	vkCmdEndRenderPass(commandBuffer);
+
+	const auto geometryEnd = std::chrono::steady_clock::now();
+	m_RenderGraph.SetPassCpuTime(timings.Geometry, std::chrono::duration<double, std::milli>(geometryEnd - geometryBegin).count());
+
+	MeasureRenderGraphPass(m_RenderGraph, timings.TileCulling, [this, &camera, left, top, right, bottom]()
+		{
+			static_cast<void>(UpdateDeferredLightTiles(
+				camera,
+				static_cast<uint32_t>((std::max)(left, 0L)),
+				static_cast<uint32_t>((std::max)(top, 0L)),
+				static_cast<uint32_t>((std::max)(right - left, 1L)),
+				static_cast<uint32_t>((std::max)(bottom - top, 1L)),
+				static_cast<uint32_t>((std::max)(m_ClientWidth, 1)),
+				static_cast<uint32_t>((std::max)(m_ClientHeight, 1))));
+		});
+
+	const auto lightingBegin = std::chrono::steady_clock::now();
+	const auto cameraPosition = camera.GetPosition();
+	DeferredLightingConstants lightingConstants = {};
+	lightingConstants.CameraPosition = { cameraPosition.x, cameraPosition.y, cameraPosition.z, 1.0f };
+	lightingConstants.AmbientColorIntensity = {
+		std::clamp(m_AmbientColor.x, 0.0f, 4.0f),
+		std::clamp(m_AmbientColor.y, 0.0f, 4.0f),
+		std::clamp(m_AmbientColor.z, 0.0f, 4.0f),
+		std::clamp(m_AmbientIntensity, 0.0f, 2.0f)
+	};
+	lightingConstants.ExposureDebug = {
+		std::clamp(m_Exposure, 0.05f, 8.0f),
+		static_cast<float>(static_cast<uint32_t>(m_MaterialDebugView)),
+		0.0f,
+		0.0f
+	};
+	lightingConstants.LightCountParams = {
+		static_cast<float>(m_StaticMeshRenderer.DeferredLightCount),
+		static_cast<float>(m_StaticMeshRenderer.DeferredTileCountX),
+		static_cast<float>(m_StaticMeshRenderer.DeferredTileCountY),
+		m_StaticMeshRenderer.DeferredTileCountX > 0 && m_StaticMeshRenderer.DeferredTileCountY > 0 ? 1.0f : 0.0f
+	};
+	lightingConstants.ScreenSize = {
+		static_cast<float>((std::max)(m_ClientWidth, 1)),
+		static_cast<float>((std::max)(m_ClientHeight, 1)),
+		1.0f / static_cast<float>((std::max)(m_ClientWidth, 1)),
+		1.0f / static_cast<float>((std::max)(m_ClientHeight, 1))
+	};
+	Rendering::ShadowFrameData shadowData = m_ShadowFrameData;
+	if (!m_StaticMeshRenderer.Vulkan.Shadow.IsValid)
+	{
+		shadowData.Params.x = 0.0f;
+	}
+	lightingConstants.ShadowViewProjection = shadowData.LightViewProjection;
+	lightingConstants.ShadowParams = shadowData.Params;
+	lightingConstants.ShadowDirection = shadowData.DirectionToLight;
+	if (WriteDeferredLightingConstants(lightingConstants) == InvalidCameraConstantOffset())
+	{
+		return;
+	}
+
+	VkClearValue hdrClearValue = {};
+	hdrClearValue.color.float32[0] = 0.0f;
+	hdrClearValue.color.float32[1] = 0.0f;
+	hdrClearValue.color.float32[2] = 0.0f;
+	hdrClearValue.color.float32[3] = 0.0f;
+	const VkRenderPassBeginInfo lightingBeginInfo = {
+		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+		.renderPass = deferred.LightingRenderPass,
+		.framebuffer = deferred.LightingFramebuffer,
+		.renderArea = {
+			.offset = { 0, 0 },
+			.extent = { deferred.Width, deferred.Height }
+		},
+		.clearValueCount = 1,
+		.pClearValues = &hdrClearValue
+	};
+	vkCmdBeginRenderPass(commandBuffer, &lightingBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+	m_Graphics.CommandList->SetViewport(static_cast<float>(left), static_cast<float>(top), width, height);
+	m_Graphics.CommandList->SetScissorRect(left, top, right, bottom);
+	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, deferred.LightingPipeline);
+	vkCmdBindDescriptorSets(
+		commandBuffer,
+		VK_PIPELINE_BIND_POINT_GRAPHICS,
+		deferred.LightingPipelineLayout,
+		0,
+		1,
+		&deferred.LightingDescriptorSet,
+		0,
+	nullptr);
+	RecordFullscreenDraw(Rendering::DrawSubmissionKind::Fullscreen, 3, 1);
+	m_Graphics.CommandList->DrawInstanced(3, 1, 0, 0);
+	vkCmdEndRenderPass(commandBuffer);
+	const auto lightingEnd = std::chrono::steady_clock::now();
+	m_RenderGraph.SetPassCpuTime(timings.Lighting, std::chrono::duration<double, std::milli>(lightingEnd - lightingBegin).count());
+
+	MeasureRenderGraphPass(m_RenderGraph, timings.PostProcess, [this, &viewport]()
+		{
+			DrawVulkanToneMapPass(viewport);
+		});
+	MeasureRenderGraphPass(m_RenderGraph, timings.Transparency, [this, &camera]()
+		{
+			DrawVulkanForwardTransparentPass(camera);
+		});
+}
+
+void Engine::DrawVulkanForwardTransparentPass(const Camera& camera)
+{
+	if (m_StaticMeshRenderer.Vulkan.TransparentPipeline == VK_NULL_HANDLE)
+	{
+		return;
+	}
+
+	auto commandBuffer = reinterpret_cast<VkCommandBuffer>(m_Graphics.CommandList->GetNativeResource());
+	if (commandBuffer == VK_NULL_HANDLE)
+	{
+		return;
+	}
+
+	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_StaticMeshRenderer.Vulkan.TransparentPipeline);
+	for (EntityId entityId : m_ViewportVisibleRenderEntities)
+	{
+		if (!m_Scene.IsMeshEnabled(entityId))
+		{
+			continue;
+		}
+		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+		if (!meshAsset)
+		{
+			continue;
+		}
+
+		UploadEntityGeometry(entityId);
+		const std::vector<VkDescriptorSet>* selectedDescriptorSets = &m_StaticMeshRenderer.Vulkan.DescriptorSets;
+		if (auto entityMaterialIt = m_StaticMeshRenderer.Vulkan.EntityMaterials.find(entityId);
+			entityMaterialIt != m_StaticMeshRenderer.Vulkan.EntityMaterials.end()
+			&& !entityMaterialIt->second.DescriptorSets.empty())
+		{
+			selectedDescriptorSets = &entityMaterialIt->second.DescriptorSets;
+		}
+		if (!selectedDescriptorSets || selectedDescriptorSets->empty())
+		{
+			continue;
+		}
+
+		auto drawTransparentMaterial = [&](uint32_t indexCount, uint32_t indexOffset, size_t materialIndex)
+		{
+			const VkDescriptorSet descriptorSet = (*selectedDescriptorSets)[materialIndex];
+			const uint64_t cameraOffset = UpdateCameraBuffer(entityId, camera, materialIndex, false);
+			if (cameraOffset == InvalidCameraConstantOffset())
+			{
+				return;
+			}
+			const uint32_t dynamicOffset = static_cast<uint32_t>(cameraOffset);
+			vkCmdBindDescriptorSets(
+				commandBuffer,
+				VK_PIPELINE_BIND_POINT_GRAPHICS,
+				m_StaticMeshRenderer.Vulkan.PipelineLayout,
+				0,
+				1,
+				&descriptorSet,
+				1,
+				&dynamicOffset);
+			RecordIndexedDraw(Rendering::DrawSubmissionKind::Transparent, indexCount, 1);
+			m_Graphics.CommandList->DrawIndexedInstanced(indexCount, 1, indexOffset, 0, 0);
+		};
+
+		if (meshAsset->Submeshes.empty())
+		{
+			if (IsMaterialTransparent(entityId, 0))
+			{
+				drawTransparentMaterial(static_cast<uint32_t>(meshAsset->Indices.size()), 0, 0);
+			}
+			continue;
+		}
+		for (const auto& submesh : meshAsset->Submeshes)
+		{
+			if (IsMaterialTransparent(entityId, submesh.MaterialIndex))
+			{
+				const size_t materialIndex = submesh.MaterialIndex < selectedDescriptorSets->size() ? submesh.MaterialIndex : 0;
+				drawTransparentMaterial(submesh.IndexCount, submesh.IndexOffset, materialIndex);
+			}
+		}
+	}
 }
 
 void Engine::DrawVulkanTriangle(const Camera& camera)
@@ -5130,13 +9926,13 @@ void Engine::DrawVulkanTriangle(const Camera& camera)
 		return;
 	}
 
-	const bool drawTransparentInSecondPass = (m_RenderMode == RenderMode::Forward || m_RenderMode == RenderMode::ForwardPlus) && m_StaticMeshRenderer.Vulkan.TransparentPipeline != VK_NULL_HANDLE;
+	const bool drawTransparentInSecondPass = m_StaticMeshRenderer.Vulkan.TransparentPipeline != VK_NULL_HANDLE;
 	const bool drawOpaquePass = true;
 
 	// Vulkan은 현재 열린 render pass 안에서 그래픽 파이프라인을 바인딩하고 draw를 기록합니다.
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_StaticMeshRenderer.Vulkan.Pipeline);
 
-	for (EntityId entityId : m_RenderState.RenderEntities)
+	for (EntityId entityId : m_ViewportVisibleRenderEntities)
 	{
 		if (!m_Scene.IsMeshEnabled(entityId))
 		{
@@ -5185,6 +9981,16 @@ void Engine::DrawVulkanTriangle(const Camera& camera)
 
 			// Vulkan fallback 경로에서는 첫 번째 material descriptor set을 사용해 전체 메시를 그립니다.
 			const VkDescriptorSet descriptorSet = selectedDescriptorSets->front();
+			uint32_t selectedCameraDynamicOffset = cameraDynamicOffset;
+			if (entityIsTransparent)
+			{
+				const uint64_t transparentCameraOffset = UpdateCameraBuffer(entityId, camera, 0, false);
+				if (transparentCameraOffset == InvalidCameraConstantOffset())
+				{
+					continue;
+				}
+				selectedCameraDynamicOffset = static_cast<uint32_t>(transparentCameraOffset);
+			}
 			vkCmdBindDescriptorSets(
 				commandBuffer,
 				VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -5193,15 +9999,22 @@ void Engine::DrawVulkanTriangle(const Camera& camera)
 				1,
 				&descriptorSet,
 				1,
-				&cameraDynamicOffset);
+				&selectedCameraDynamicOffset);
+			RecordIndexedDraw(entityIsTransparent ? Rendering::DrawSubmissionKind::Transparent : Rendering::DrawSubmissionKind::Opaque, static_cast<uint32_t>(meshAsset->Indices.size()), 1);
 			m_Graphics.CommandList->DrawIndexedInstanced(static_cast<uint32_t>(meshAsset->Indices.size()), 1, 0, 0, 0);
 			continue;
 		}
 
-		auto drawSubmesh = [&](const Asset::StaticMeshSubmesh& submesh)
+		auto drawSubmesh = [&](const Asset::StaticMeshSubmesh& submesh, bool useDeferredLighting)
 		{
 			const size_t materialIndex = submesh.MaterialIndex < selectedDescriptorSets->size() ? submesh.MaterialIndex : 0;
 			const VkDescriptorSet descriptorSet = (*selectedDescriptorSets)[materialIndex];
+			const uint64_t materialCameraOffset = UpdateCameraBuffer(entityId, camera, materialIndex, useDeferredLighting);
+			if (materialCameraOffset == InvalidCameraConstantOffset())
+			{
+				return;
+			}
+			const uint32_t materialCameraDynamicOffset = static_cast<uint32_t>(materialCameraOffset);
 
 			// Vulkan 경로는 submesh.MaterialIndex에 대응하는 descriptor set을 바인딩해 material별 texture를 선택합니다.
 			// 그런 다음 해당 submesh의 index 범위만 DrawIndexedInstanced로 기록해 멀티 머티리얼 메시를 올바르게 렌더링합니다.
@@ -5213,7 +10026,8 @@ void Engine::DrawVulkanTriangle(const Camera& camera)
 				1,
 				&descriptorSet,
 				1,
-				&cameraDynamicOffset);
+				&materialCameraDynamicOffset);
+			RecordIndexedDraw(IsMaterialTransparent(entityId, materialIndex) ? Rendering::DrawSubmissionKind::Transparent : Rendering::DrawSubmissionKind::Opaque, submesh.IndexCount, 1);
 			m_Graphics.CommandList->DrawIndexedInstanced(submesh.IndexCount, 1, submesh.IndexOffset, 0, 0);
 		};
 
@@ -5221,12 +10035,12 @@ void Engine::DrawVulkanTriangle(const Camera& camera)
 		{
 			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_StaticMeshRenderer.Vulkan.Pipeline);
 			// Vulkan의 불투명 패스는 forward/deferred/forward+ 공통으로 먼저 실행합니다.
-			// deferred와 forward+에서는 이 구간이 G-Buffer geometry pass에 해당하는 역할입니다.
+			// deferred 모드에서는 같은 geometry draw를 사용하되, fragment shader가 별도 unlimited light buffer를 순회합니다.
 			for (const auto& submesh : meshAsset->Submeshes)
 			{
 				if (!IsMaterialTransparent(entityId, submesh.MaterialIndex))
 				{
-					drawSubmesh(submesh);
+					drawSubmesh(submesh, m_RenderMode == RenderMode::Deferred);
 				}
 			}
 		}
@@ -5235,13 +10049,13 @@ void Engine::DrawVulkanTriangle(const Camera& camera)
 		{
 			// Vulkan 투명 패스는 alpha blend가 켜진 전용 파이프라인으로 그려야 유리 오브젝트가 반투명하게 합성됩니다.
 			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_StaticMeshRenderer.Vulkan.TransparentPipeline);
-			// Vulkan의 투명 패스는 forward와 forward+에서만 실행합니다.
-			// deferred 모드에서는 투명 물체를 생략해 전통적인 deferred 제한을 따릅니다.
+			// Deferred 모드의 투명 물체는 G-Buffer가 아니라 forward fallback으로 그립니다.
+			// 따라서 투명 패스의 camera constants는 항상 8-light forward 배열만 사용합니다.
 			for (const auto& submesh : meshAsset->Submeshes)
 			{
 				if (IsMaterialTransparent(entityId, submesh.MaterialIndex))
 				{
-					drawSubmesh(submesh);
+					drawSubmesh(submesh, false);
 				}
 			}
 		}

@@ -12,7 +12,8 @@
 
     <ItemGroup Condition="'$(VcpkgRuntimeBinDir)' != ''">
       <!-- Assimp는 poly2tri, pugixml, zlib 등 추가 런타임 DLL을 끌고 올 수 있으므로 bin 폴더의 DLL을 함께 배포합니다. -->
-      <VcpkgRuntimeDlls Include="$(VcpkgRuntimeBinDir)\*.dll" />
+      <!-- Vulkan loader는 시스템 런타임(System32\vulkan-1.dll)을 사용합니다. vcpkg loader를 앱 폴더에 배포하면 종료 시 loader 충돌이 날 수 있습니다. -->
+      <VcpkgRuntimeDlls Include="$(VcpkgRuntimeBinDir)\*.dll" Exclude="$(VcpkgRuntimeBinDir)\vulkan-1.dll" />
     </ItemGroup>
 
     <Copy SourceFiles="@(VcpkgRuntimeDlls)"

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Jobs/JobSystem.h"
 #include "Math/Camera.h"
 #include "Samples/Benchmark/BenchmarkTypes.h"
 #include "Samples/Benchmark/EcsObjectStore.h"
@@ -16,7 +17,7 @@ namespace Samples::Benchmark
 
 		void Configure(const BenchmarkConfig& config);
 		void SetSpawnView(const Camera& camera);
-		void Update(float deltaTime);
+		void Update(float deltaTime, Jobs::JobSystem* jobSystem = nullptr);
 		void DrawImGui();
 		void DrawViewportOverlay(const Camera& camera, float viewportLeft, float viewportTop, float viewportWidth, float viewportHeight) const;
 		void RunSweep();

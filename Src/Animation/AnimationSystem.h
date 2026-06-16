@@ -117,20 +117,25 @@ namespace AnimationSystem
 		}
 	}
 
-	inline void UpdateAnimatedMesh(Scene& scene, EntityId entityId, float deltaTime, AnimatorComponent& animator)
+	inline bool AdvanceAnimator(
+		const Asset::StaticMeshAsset& meshAsset,
+		float deltaTime,
+		AnimatorComponent& animator,
+		uint32_t& clipIndex,
+		double& animationTimeTicks)
 	{
-		Asset::StaticMeshAsset* meshAsset = scene.GetMeshAsset(entityId);
-		if (!meshAsset || !meshAsset->IsAnimated || meshAsset->Animations.empty() || meshAsset->Bones.empty())
+		if (!meshAsset.IsAnimated || meshAsset.Animations.empty() || meshAsset.Bones.empty())
 		{
-			return;
+			return false;
 		}
 
-		const uint32_t lastClipIndex = static_cast<uint32_t>(meshAsset->Animations.size() - 1);
+		const uint32_t lastClipIndex = static_cast<uint32_t>(meshAsset.Animations.size() - 1);
 		animator.CurrentClipIndex = (std::min)(animator.CurrentClipIndex, lastClipIndex);
-		const Asset::AnimationClip& clip = meshAsset->Animations[animator.CurrentClipIndex];
+		clipIndex = animator.CurrentClipIndex;
+		const Asset::AnimationClip& clip = meshAsset.Animations[clipIndex];
 		if (clip.DurationTicks <= 0.0)
 		{
-			return;
+			return false;
 		}
 
 		const double ticksPerSecond = clip.TicksPerSecond > 0.0 ? clip.TicksPerSecond : 25.0;
@@ -156,34 +161,52 @@ namespace AnimationSystem
 			}
 		}
 
-		const double animationTimeTicks = (std::min)(static_cast<double>(animator.TimeSeconds) * ticksPerSecond, clip.DurationTicks);
+		animationTimeTicks = (std::min)(static_cast<double>(animator.TimeSeconds) * ticksPerSecond, clip.DurationTicks);
+		return true;
+	}
 
-		Memory::Vector<Math::Transform, Memory::MemoryTag::Frame> localTransforms;
-		localTransforms.reserve(meshAsset->Nodes.size());
-		for (const auto& node : meshAsset->Nodes)
+	inline bool BuildSkinnedVertices(
+		const Asset::StaticMeshAsset& meshAsset,
+		uint32_t clipIndex,
+		double animationTimeTicks,
+		std::vector<Asset::StaticMeshVertex>& outVertices)
+	{
+		if (!meshAsset.IsAnimated
+			|| meshAsset.Animations.empty()
+			|| meshAsset.Bones.empty()
+			|| meshAsset.BindPoseVertices.empty()
+			|| clipIndex >= meshAsset.Animations.size())
+		{
+			return false;
+		}
+
+		const Asset::AnimationClip& clip = meshAsset.Animations[clipIndex];
+		std::vector<Math::Transform> localTransforms;
+		localTransforms.reserve(meshAsset.Nodes.size());
+		for (const auto& node : meshAsset.Nodes)
 		{
 			localTransforms.push_back(BuildAnimatedLocalTransform(node, clip, animationTimeTicks));
 		}
 
-		Memory::Vector<Math::Transform, Memory::MemoryTag::Frame> globalTransforms(meshAsset->Nodes.size(), Math::Transform::Identity());
-		if (!meshAsset->Nodes.empty())
+		std::vector<Math::Transform> globalTransforms(meshAsset.Nodes.size(), Math::Transform::Identity());
+		if (!meshAsset.Nodes.empty())
 		{
-			ComputeGlobalNodeTransforms(*meshAsset, localTransforms, 0, Math::Transform::Identity(), globalTransforms);
+			ComputeGlobalNodeTransforms(meshAsset, localTransforms, 0, Math::Transform::Identity(), globalTransforms);
 		}
 
-		Memory::Vector<DirectX::XMMATRIX, Memory::MemoryTag::Frame> boneMatrices(meshAsset->Bones.size(), DirectX::XMMatrixIdentity());
-		const DirectX::XMMATRIX rootInverseTransform = LoadMatrix(meshAsset->RootInverseTransform);
-		for (size_t boneIndex = 0; boneIndex < meshAsset->Bones.size(); ++boneIndex)
+		std::vector<DirectX::XMMATRIX> boneMatrices(meshAsset.Bones.size(), DirectX::XMMatrixIdentity());
+		const DirectX::XMMATRIX rootInverseTransform = LoadMatrix(meshAsset.RootInverseTransform);
+		for (size_t boneIndex = 0; boneIndex < meshAsset.Bones.size(); ++boneIndex)
 		{
-			const auto& bone = meshAsset->Bones[boneIndex];
+			const auto& bone = meshAsset.Bones[boneIndex];
 			boneMatrices[boneIndex] = LoadMatrix(bone.OffsetMatrix) * globalTransforms[bone.NodeIndex].ToXmMatrix() * rootInverseTransform;
 		}
 
-		meshAsset->Vertices = meshAsset->BindPoseVertices;
-		for (size_t vertexIndex = 0; vertexIndex < meshAsset->Vertices.size(); ++vertexIndex)
+		outVertices.assign(meshAsset.BindPoseVertices.begin(), meshAsset.BindPoseVertices.end());
+		for (size_t vertexIndex = 0; vertexIndex < outVertices.size(); ++vertexIndex)
 		{
-			const auto& bindVertex = meshAsset->BindPoseVertices[vertexIndex];
-			auto& animatedVertex = meshAsset->Vertices[vertexIndex];
+			const auto& bindVertex = meshAsset.BindPoseVertices[vertexIndex];
+			auto& animatedVertex = outVertices[vertexIndex];
 
 			const DirectX::XMVECTOR bindPosition = DirectX::XMLoadFloat3(&bindVertex.Position);
 			const DirectX::XMVECTOR bindNormal = DirectX::XMLoadFloat3(&bindVertex.Normal);
@@ -212,6 +235,30 @@ namespace AnimationSystem
 				const DirectX::XMVECTOR normalizedNormal = DirectX::XMVector3Normalize(skinnedNormal);
 				DirectX::XMStoreFloat3(&animatedVertex.Normal, normalizedNormal);
 			}
+		}
+
+		return true;
+	}
+
+	inline void UpdateAnimatedMesh(Scene& scene, EntityId entityId, float deltaTime, AnimatorComponent& animator)
+	{
+		Asset::StaticMeshAsset* meshAsset = scene.GetMeshAsset(entityId);
+		if (!meshAsset)
+		{
+			return;
+		}
+
+		uint32_t clipIndex = 0;
+		double animationTimeTicks = 0.0;
+		if (!AdvanceAnimator(*meshAsset, deltaTime, animator, clipIndex, animationTimeTicks))
+		{
+			return;
+		}
+
+		std::vector<Asset::StaticMeshVertex> skinnedVertices;
+		if (BuildSkinnedVertices(*meshAsset, clipIndex, animationTimeTicks, skinnedVertices))
+		{
+			meshAsset->Vertices.assign(skinnedVertices.begin(), skinnedVertices.end());
 		}
 	}
 }

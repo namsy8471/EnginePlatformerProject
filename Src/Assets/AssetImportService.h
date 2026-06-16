@@ -33,6 +33,7 @@ namespace Asset
 		std::string EntityName;
 		Math::Transform LocalTransform = Math::Transform::Identity();
 		bool MeshEnabled = true;
+		std::vector<StaticMeshMaterial> MaterialOverrides;
 		bool HasAnimator = false;
 		bool AnimatorEnabled = true;
 		AnimatorComponent Animator;
@@ -73,6 +74,7 @@ namespace Asset
 		AssetImportService();
 		~AssetImportService();
 
+		void Shutdown();
 		void Queue(AssetImportRequest request);
 		[[nodiscard]] bool TryPopCompleted(AssetImportResult& result);
 		[[nodiscard]] bool HasPendingWork() const noexcept;

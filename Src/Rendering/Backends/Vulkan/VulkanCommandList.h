@@ -25,6 +25,8 @@ public:
 	void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
 	void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t startIndex, uint32_t baseVertex, uint32_t startInstance) override;
 	void ResourceBarrier(IGpuResource* resource, ResourceState before, ResourceState after) override;
+	void EndRenderPassForExternalCommands();
+	void BeginSwapchainRenderPassForExternalCommands();
 
 private:
 	void BeginRenderPassIfNeeded();
@@ -43,6 +45,7 @@ private:
 	bool m_renderPassBegun = false;
 	bool m_hasClearColor = false;
 	bool m_hasClearDepth = false;
+	bool m_swapchainRenderPassOpenedThisFrame = false;
 
 	// 현재 프레임의 clear color / clear depth-stencil 값을 보관합니다.
 	VkClearValue m_clearValues[2] = {};

@@ -17,7 +17,8 @@ VulkanBuffer::VulkanBuffer(VulkanDevice* device, const BufferDesc& desc)
 		VK_BUFFER_USAGE_TRANSFER_DST_BIT |
 		VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
 		VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-		VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+		VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 	bufferCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
 	if (vkCreateBuffer(m_device->m_device, &bufferCreateInfo, nullptr, &m_buffer) != VK_SUCCESS)

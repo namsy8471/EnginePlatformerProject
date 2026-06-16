@@ -115,9 +115,6 @@
       <AdditionalLibraryDirectories>$(SolutionDir)\External\PhysX\physx\bin\bin\win.x86_64.vc143.md\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>PhysX_64.lib;PhysXCommon_64.lib;PhysXFoundation_64.lib;PhysXExtensions_static_64.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
-    <PostBuildEvent>
-      <Command>xcopy /Y /D "$(SolutionDir)External\PhysX\physx\bin\bin\win.x86_64.vc143.md\$(Configuration)\PhysX*.dll" "$(OutDir)"</Command>
-    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -136,9 +133,6 @@
       <AdditionalLibraryDirectories>$(SolutionDir)\External\PhysX\physx\bin\bin\win.x86_64.vc143.md\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>PhysX_64.lib;PhysXCommon_64.lib;PhysXFoundation_64.lib;PhysXExtensions_static_64.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
-    <PostBuildEvent>
-      <Command>xcopy /Y /D "$(SolutionDir)External\PhysX\physx\bin\bin\win.x86_64.vc143.md\$(Configuration)\PhysX*.dll" "$(OutDir)"</Command>
-    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="Src\Assets\AssetFileSystem.h" />
@@ -167,6 +161,12 @@
     <ClInclude Include="Src\Scene\SceneTypes.h" />
     <ClInclude Include="Src\Scene\TransformComponent.h" />
     <ClInclude Include="Src\Input\InputSystem.h" />
+    <ClInclude Include="Src\Jobs\FramePhaseScheduler.h" />
+    <ClInclude Include="Src\Jobs\JobSystem.h" />
+    <ClInclude Include="Src\Jobs\SceneCommandBuffer.h" />
+    <ClInclude Include="Src\Jobs\SystemInterfaces.h" />
+    <ClInclude Include="Src\Materials\MaterialResource.h" />
+    <ClInclude Include="Src\Materials\ShaderVariant.h" />
     <ClInclude Include="Src\Math\Camera.h" />
     <ClInclude Include="Src\Math\MathHelpers.h" />
     <ClInclude Include="Src\Math\Transform.h" />
@@ -181,6 +181,11 @@
     <ClInclude Include="Src\Physics\PhysicsWorld.h" />
     <ClInclude Include="Src\Physics\PhysXBackend.h" />
     <ClInclude Include="Src\Projects\ProjectService.h" />
+    <ClInclude Include="Src\Rendering\Graph\RenderGraph.h" />
+    <ClInclude Include="Src\Rendering\Lighting\ShadowSystem.h" />
+    <ClInclude Include="Src\Rendering\Post\PostProcessSystem.h" />
+    <ClInclude Include="Src\Resources\ResourceManager.h" />
+    <ClInclude Include="Src\Resources\ResourceTypes.h" />
     <ClInclude Include="Src\Rendering\Backends\DirectX12\DX12Buffer.h" />
     <ClInclude Include="Src\Rendering\Backends\DirectX12\DX12CommandList.h" />
     <ClInclude Include="Src\App\Win32\GameApp.h" />
@@ -224,6 +229,11 @@
     <ClCompile Include="Src\Assets\RuntimeAssetRegistry.cpp" />
     <ClCompile Include="Src\Core\Engine\Engine.cpp" />
     <ClCompile Include="Src\Input\InputSystem.cpp" />
+    <ClCompile Include="Src\Jobs\FramePhaseScheduler.cpp" />
+    <ClCompile Include="Src\Jobs\JobSystem.cpp" />
+    <ClCompile Include="Src\Jobs\SceneCommandBuffer.cpp" />
+    <ClCompile Include="Src\Materials\MaterialResource.cpp" />
+    <ClCompile Include="Src\Materials\ShaderVariant.cpp" />
     <ClCompile Include="Src\Math\Camera.cpp" />
     <ClCompile Include="Src\Memory\FixedBlockPoolAllocator.cpp" />
     <ClCompile Include="Src\Memory\LinearFrameAllocator.cpp" />
@@ -232,6 +242,10 @@
     <ClCompile Include="Src\Physics\PhysicsWorld.cpp" />
     <ClCompile Include="Src\Physics\PhysXBackend.cpp" />
     <ClCompile Include="Src\Projects\ProjectService.cpp" />
+    <ClCompile Include="Src\Rendering\Graph\RenderGraph.cpp" />
+    <ClCompile Include="Src\Rendering\Lighting\ShadowSystem.cpp" />
+    <ClCompile Include="Src\Rendering\Post\PostProcessSystem.cpp" />
+    <ClCompile Include="Src\Resources\ResourceManager.cpp" />
     <ClCompile Include="Src\Scene\ScenePersistenceService.cpp" />
     <ClCompile Include="Src\Rendering\Backends\DirectX12\DX12Buffer.cpp" />
     <ClCompile Include="Src\Rendering\Backends\DirectX12\DX12CommandList.cpp" />
@@ -261,13 +275,30 @@
     <None Include=".github\copilot-instructions.md" />
     <None Include="Directory.Build.props" />
     <None Include="Directory.Build.targets" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\DeferredGeometry.frag" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\DeferredGeometry.vert" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\DeferredLighting.frag" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\DeferredLighting.vert" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\ShadowDepth.vert" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\ToneMap.frag" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\ToneMap.vert" />
     <None Include="Src\Rendering\Backends\Vulkan\Shaders\Triangle.frag" />
     <None Include="Src\Rendering\Backends\Vulkan\Shaders\Triangle.vert" />
     <None Include="vcpkg.json" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="Src\Rendering\Backends\DirectX12\Shaders\DeferredGeometry.hlsl" />
+    <None Include="Src\Rendering\Backends\DirectX12\Shaders\DeferredLighting.hlsl" />
+    <None Include="Src\Rendering\Backends\DirectX12\Shaders\ShadowDepth.hlsl" />
+    <None Include="Src\Rendering\Backends\DirectX12\Shaders\ToneMap.hlsl" />
     <None Include="Src\Rendering\Backends\DirectX12\Shaders\Triangle.hlsl" />
   </ItemGroup>
+  <ItemGroup Condition="'$(Platform)'=='x64'">
+    <PhysXRuntimeDll Include="$(SolutionDir)External\PhysX\physx\bin\bin\win.x86_64.vc143.md\$(Configuration)\PhysX*.dll" />
+  </ItemGroup>
+  <Target Name="CopyPhysXRuntimeDlls" AfterTargets="Build" Condition="'$(Platform)'=='x64' and '@(PhysXRuntimeDll)' != ''">
+    <Copy SourceFiles="@(PhysXRuntimeDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>

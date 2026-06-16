@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Jobs/JobSystem.h"
 #include "Memory/StdAllocator.h"
 #include "Samples/Benchmark/BenchmarkComponents.h"
 
@@ -13,10 +14,12 @@ namespace Samples::Benchmark
 	public:
 		void Build(std::span<const BenchmarkSpawnData> spawnData, BenchmarkObjectType objectType);
 		void UpdateSimulation(float deltaTime);
+		void UpdateSimulation(float deltaTime, Jobs::JobSystem* jobSystem);
 		void UpdateMovement(float deltaTime);
 		void UpdateSpin(float deltaTime);
 		void UpdateBounds();
 		uint32_t CollectRenderInstances(std::vector<BenchmarkRenderInstance>& instances);
+		uint32_t CollectRenderInstances(std::vector<BenchmarkRenderInstance>& instances, Jobs::JobSystem* jobSystem) const;
 		void Clear();
 
 		[[nodiscard]] size_t Size() const noexcept;

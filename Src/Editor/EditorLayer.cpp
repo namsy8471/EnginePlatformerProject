@@ -152,6 +152,91 @@ namespace Editor
 			}
 		}
 
+		[[nodiscard]] constexpr const char* MaterialDebugViewName(MaterialDebugView view) noexcept
+		{
+			switch (view)
+			{
+			case MaterialDebugView::BaseColor:
+				return "BaseColor";
+			case MaterialDebugView::Normal:
+				return "Normal";
+			case MaterialDebugView::Metallic:
+				return "Metallic";
+			case MaterialDebugView::Roughness:
+				return "Roughness";
+			case MaterialDebugView::AO:
+				return "AO";
+			case MaterialDebugView::Emissive:
+				return "Emissive";
+			case MaterialDebugView::LightingOnly:
+				return "LightingOnly";
+			case MaterialDebugView::VertexColor:
+				return "VertexColor";
+			case MaterialDebugView::Shadow:
+				return "Shadow";
+			case MaterialDebugView::DeferredTileLights:
+				return "TileLights";
+			case MaterialDebugView::Lit:
+			default:
+				return "Lit";
+			}
+		}
+
+		enum class RoadmapHealthState : uint8_t
+		{
+			Active,
+			Ready,
+			Idle,
+			Warning
+		};
+
+		[[nodiscard]] constexpr const char* RoadmapHealthStateName(RoadmapHealthState state) noexcept
+		{
+			switch (state)
+			{
+			case RoadmapHealthState::Active:
+				return "Active";
+			case RoadmapHealthState::Ready:
+				return "Ready";
+			case RoadmapHealthState::Idle:
+				return "Idle";
+			case RoadmapHealthState::Warning:
+				return "Warning";
+			default:
+				return "Unknown";
+			}
+		}
+
+		[[nodiscard]] constexpr ImVec4 RoadmapHealthStateColor(RoadmapHealthState state) noexcept
+		{
+			switch (state)
+			{
+			case RoadmapHealthState::Active:
+				return ImVec4(0.35f, 0.88f, 0.48f, 1.0f);
+			case RoadmapHealthState::Ready:
+				return ImVec4(0.42f, 0.70f, 1.0f, 1.0f);
+			case RoadmapHealthState::Idle:
+				return ImVec4(0.72f, 0.72f, 0.72f, 1.0f);
+			case RoadmapHealthState::Warning:
+				return ImVec4(1.0f, 0.72f, 0.22f, 1.0f);
+			default:
+				return ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+			}
+		}
+
+		void DrawRoadmapHealthRow(uint32_t index, const char* item, RoadmapHealthState state, std::string_view evidence)
+		{
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::Text("%u", index);
+			ImGui::TableSetColumnIndex(1);
+			ImGui::TextUnformatted(item);
+			ImGui::TableSetColumnIndex(2);
+			ImGui::TextColored(RoadmapHealthStateColor(state), "%s", RoadmapHealthStateName(state));
+			ImGui::TableSetColumnIndex(3);
+			ImGui::TextWrapped("%.*s", static_cast<int>(evidence.size()), evidence.data());
+		}
+
 		[[nodiscard]] constexpr const char* ComponentKindName(SceneComponentKind kind) noexcept
 		{
 			switch (kind)
@@ -250,6 +335,87 @@ namespace Editor
 			{
 				ImGui::SetTooltip("%s", disabledReason);
 			}
+		}
+
+		[[nodiscard]] bool ShouldShowMaterialSlot(Asset::MaterialShadingModel model, Asset::MaterialTextureSlot slot) noexcept
+		{
+			switch (slot)
+			{
+			case Asset::MaterialTextureSlot::BaseColor:
+			case Asset::MaterialTextureSlot::Normal:
+			case Asset::MaterialTextureSlot::Emissive:
+			case Asset::MaterialTextureSlot::Opacity:
+				return true;
+			case Asset::MaterialTextureSlot::Metallic:
+			case Asset::MaterialTextureSlot::Roughness:
+			case Asset::MaterialTextureSlot::MetallicRoughness:
+			case Asset::MaterialTextureSlot::AO:
+				return model == Asset::MaterialShadingModel::PBR;
+			case Asset::MaterialTextureSlot::Specular:
+			case Asset::MaterialTextureSlot::Shininess:
+				return model == Asset::MaterialShadingModel::Phong;
+			case Asset::MaterialTextureSlot::Count:
+			default:
+				return false;
+			}
+		}
+
+		[[nodiscard]] bool IsImageAssetPath(const std::filesystem::path& path)
+		{
+			return Asset::ClassifyAssetPath(path) == Asset::AssetFileKind::Image;
+		}
+
+		void DrawMaterialTextureSlotRow(
+			EditorContext& context,
+			EntityId entityId,
+			size_t materialIndex,
+			const Asset::StaticMeshMaterial& material,
+			Asset::MaterialTextureSlot slot)
+		{
+			const std::filesystem::path path = Asset::GetMaterialTexturePath(material, slot);
+			const Asset::MaterialTextureBinding& binding = Asset::GetMaterialTextureBinding(material, slot);
+			const std::string id = std::format("{}##mat{}_slot{}", Asset::MaterialTextureSlotName(slot), materialIndex, Asset::MaterialTextureSlotIndex(slot));
+
+			ImGui::PushID(id.c_str());
+			ImGui::Text("%s", std::string(Asset::MaterialTextureSlotName(slot)).c_str());
+			ImGui::SameLine(130.0f);
+			ImGui::TextWrapped("%s", path.empty() ? (binding.Embedded.IsValid() ? "<embedded>" : "<fallback>") : path.filename().string().c_str());
+			if (!path.empty() && ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("%s", path.string().c_str());
+			}
+
+			ImGui::SameLine();
+			if (ImGui::SmallButton("Browse") && context.OnMaterialTextureBrowseRequested)
+			{
+				context.OnMaterialTextureBrowseRequested(entityId, materialIndex, slot);
+			}
+			ImGui::SameLine();
+			const bool hasSource = !path.empty() || binding.Embedded.IsValid();
+			ImGui::BeginDisabled(!hasSource);
+			if (ImGui::SmallButton("Clear") && context.OnMaterialTextureCleared)
+			{
+				context.OnMaterialTextureCleared(entityId, materialIndex, slot);
+			}
+			ImGui::EndDisabled();
+
+			if (ImGui::BeginDragDropTarget())
+			{
+				if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kAssetPathPayload))
+				{
+					if (payload->Data && payload->DataSize > 0 && context.OnMaterialTextureAssigned)
+					{
+						const char* pathText = static_cast<const char*>(payload->Data);
+						const std::filesystem::path droppedPath(pathText);
+						if (IsImageAssetPath(droppedPath))
+						{
+							context.OnMaterialTextureAssigned(entityId, materialIndex, slot, droppedPath);
+						}
+					}
+				}
+				ImGui::EndDragDropTarget();
+			}
+			ImGui::PopID();
 		}
 	}
 
@@ -475,6 +641,38 @@ namespace Editor
 		if (ImGui::IsItemHovered())
 		{
 			ImGui::SetTooltip("Show Scene View camera gizmos");
+		}
+		ImGui::SameLine();
+		bool viewFrustumCulling = context.ViewFrustumCullingEnabled;
+		if (ImGui::Checkbox("Frustum Culling", &viewFrustumCulling) && context.OnViewFrustumCullingChanged)
+		{
+			context.OnViewFrustumCullingChanged(viewFrustumCulling);
+		}
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Cull Scene/Game View meshes outside each camera frustum");
+		}
+		ImGui::SameLine();
+		int debugViewIndex = std::to_underlying(context.DebugView);
+		ImGui::SetNextItemWidth(130.0f);
+		if (ImGui::Combo("##MaterialDebugView", &debugViewIndex, "Lit\0BaseColor\0Normal\0Metallic\0Roughness\0AO\0Emissive\0LightingOnly\0VertexColor\0Shadow\0TileLights\0"))
+		{
+			debugViewIndex = std::clamp(debugViewIndex, 0, static_cast<int>(std::to_underlying(MaterialDebugView::DeferredTileLights)));
+			if (context.OnMaterialDebugViewChanged)
+			{
+				context.OnMaterialDebugViewChanged(static_cast<MaterialDebugView>(debugViewIndex));
+			}
+		}
+		if (ImGui::IsItemHovered())
+		{
+			if (context.DebugView == MaterialDebugView::Shadow || context.DebugView == MaterialDebugView::DeferredTileLights)
+			{
+				ImGui::SetTooltip("Material Debug View: %s (Deferred only)", MaterialDebugViewName(context.DebugView));
+			}
+			else
+			{
+				ImGui::SetTooltip("Material Debug View: %s", MaterialDebugViewName(context.DebugView));
+			}
 		}
 		ImGui::SameLine();
 		if (!context.CanEditProjectScene)
@@ -1133,6 +1331,73 @@ namespace Editor
 		SetInitialWindowRect("Inspector", width - 360.0f, 32.0f, 352.0f, 560.0f);
 		ImGui::Begin("Inspector");
 
+		if (ImGui::CollapsingHeader("Lighting", ImGuiTreeNodeFlags_DefaultOpen))
+		{
+			DirectX::XMFLOAT3 ambientColor = context.AmbientColor;
+			if (ImGui::ColorEdit3("Ambient Color", &ambientColor.x) && context.OnAmbientColorChanged)
+			{
+				ambientColor.x = std::clamp(ambientColor.x, 0.0f, 4.0f);
+				ambientColor.y = std::clamp(ambientColor.y, 0.0f, 4.0f);
+				ambientColor.z = std::clamp(ambientColor.z, 0.0f, 4.0f);
+				context.OnAmbientColorChanged(ambientColor);
+			}
+
+			float ambientIntensity = context.AmbientIntensity;
+			if (ImGui::DragFloat("Ambient Intensity", &ambientIntensity, 0.01f, 0.0f, 2.0f, "%.2f") && context.OnAmbientIntensityChanged)
+			{
+				context.OnAmbientIntensityChanged(ambientIntensity);
+			}
+
+			float exposure = context.Exposure;
+			if (ImGui::DragFloat("Exposure", &exposure, 0.01f, 0.05f, 8.0f, "%.2f") && context.OnExposureChanged)
+			{
+				context.OnExposureChanged(exposure);
+			}
+
+			float keyLightIntensity = context.KeyLightIntensity;
+			if (ImGui::DragFloat("Key Light Intensity", &keyLightIntensity, 0.05f, 0.0f, 100.0f, "%.2f") && context.OnKeyLightIntensityChanged)
+			{
+				context.OnKeyLightIntensityChanged(keyLightIntensity);
+			}
+
+			Rendering::ShadowSettings shadowSettings = context.ShadowSettings;
+			bool shadowSettingsChanged = false;
+			shadowSettingsChanged |= ImGui::Checkbox("Shadows", &shadowSettings.Enabled);
+			int shadowMapSize = shadowSettings.MapSize <= 512
+				? 0
+				: shadowSettings.MapSize <= 1024 ? 1 : shadowSettings.MapSize >= 4096 ? 3 : 2;
+			if (ImGui::Combo("Shadow Map", &shadowMapSize, "512\0" "1024\0" "2048\0" "4096\0"))
+			{
+				switch (shadowMapSize)
+				{
+				case 0:
+					shadowSettings.MapSize = 512;
+					break;
+				case 1:
+					shadowSettings.MapSize = 1024;
+					break;
+				case 3:
+					shadowSettings.MapSize = 4096;
+					break;
+				case 2:
+				default:
+					shadowSettings.MapSize = 2048;
+					break;
+				}
+				shadowSettingsChanged = true;
+			}
+			shadowSettingsChanged |= ImGui::DragFloat("Shadow Distance", &shadowSettings.Distance, 1.0f, 1.0f, 10000.0f, "%.1f");
+			shadowSettingsChanged |= ImGui::DragFloat("Shadow Ortho Size", &shadowSettings.OrthographicSize, 1.0f, 1.0f, 10000.0f, "%.1f");
+			if (shadowSettingsChanged && context.OnShadowSettingsChanged)
+			{
+				context.OnShadowSettingsChanged(shadowSettings);
+			}
+			ImGui::Text(
+				"Shadow Source: %s",
+				context.ShadowStats.HasDirectionalCaster ? "Directional Light" : "None");
+		}
+		ImGui::Separator();
+
 		const EntityId selectedEntity = context.ActiveScene.GetSelectedEntity();
 		if (selectedEntity == InvalidEntityId)
 		{
@@ -1252,6 +1517,10 @@ namespace Editor
 				lightChanged |= ImGui::ColorEdit3("Color", &light->Color.x);
 				lightChanged |= ImGui::DragFloat("Intensity", &light->Intensity, 0.05f, 0.0f, 100.0f);
 				lightChanged |= ImGui::DragFloat("Range", &light->Range, 1.0f, 0.0f, 10000.0f);
+				lightChanged |= ImGui::Checkbox("Cast Shadows", &light->CastShadows);
+				lightChanged |= ImGui::DragFloat("Shadow Bias", &light->ShadowBias, 0.0001f, 0.0f, 0.1f, "%.5f");
+				lightChanged |= ImGui::DragFloat("Shadow Normal Bias", &light->ShadowNormalBias, 0.001f, 0.0f, 1.0f, "%.4f");
+				lightChanged |= ImGui::DragFloat("Shadow Strength", &light->ShadowStrength, 0.01f, 0.0f, 1.0f, "%.2f");
 
 				float spotAngleDegrees = DirectX::XMConvertToDegrees(light->SpotAngle);
 				if (ImGui::DragFloat("Spot Angle", &spotAngleDegrees, 0.25f, 1.0f, 179.0f, "%.1f deg"))
@@ -1519,21 +1788,72 @@ namespace Editor
 			}
 		}
 
-		if (const Asset::StaticMeshAsset* mesh = context.ActiveScene.GetMeshAsset(selectedEntity))
+		if (Asset::StaticMeshAsset* mesh = context.ActiveScene.GetMeshAsset(selectedEntity))
 		{
 			if (ImGui::CollapsingHeader("Materials"))
 			{
 				for (size_t materialIndex = 0; materialIndex < mesh->Materials.size(); ++materialIndex)
 				{
-					const auto& material = mesh->Materials[materialIndex];
+					auto& material = mesh->Materials[materialIndex];
 					std::string materialLabel = material.Name.empty() ? "Material" : material.Name;
 					materialLabel.append("##");
 					materialLabel.append(std::to_string(materialIndex));
 					if (ImGui::TreeNode(materialLabel.c_str()))
 					{
-						ImGui::Text("Diffuse: %s", material.DiffuseTexturePath.empty() ? "<embedded/fallback>" : material.DiffuseTexturePath.string().c_str());
-						ImGui::Text("Normal: %s", material.NormalTexturePath.empty() ? "<none>" : material.NormalTexturePath.string().c_str());
-						ImGui::Text("Metallic/Roughness: %s", material.MetallicRoughnessTexturePath.empty() ? "<none>" : material.MetallicRoughnessTexturePath.string().c_str());
+						int shadingModelIndex = material.ShadingModel == Asset::MaterialShadingModel::PBR
+							? 1
+							: material.ShadingModel == Asset::MaterialShadingModel::Unlit ? 2 : 0;
+						if (ImGui::Combo("Shading Model", &shadingModelIndex, "Phong\0PBR\0Unlit\0"))
+						{
+							const auto model = shadingModelIndex == 1
+								? Asset::MaterialShadingModel::PBR
+								: shadingModelIndex == 2 ? Asset::MaterialShadingModel::Unlit : Asset::MaterialShadingModel::Phong;
+							material.ShadingModel = model;
+							if (context.OnMaterialShadingModelChanged)
+							{
+								context.OnMaterialShadingModelChanged(selectedEntity, materialIndex, model);
+							}
+						}
+
+						bool materialChanged = false;
+						materialChanged |= ImGui::ColorEdit4("Base Color", &material.DiffuseColor.x);
+						materialChanged |= ImGui::Checkbox("Use Vertex Color", &material.UseVertexColor);
+						materialChanged |= ImGui::Checkbox("Normal Y Flip", &material.NormalYFlip);
+						materialChanged |= ImGui::ColorEdit3("Emissive", &material.EmissiveColor.x);
+						materialChanged |= ImGui::DragFloat("Opacity", &material.Opacity, 0.01f, 0.0f, 1.0f);
+						if (material.ShadingModel == Asset::MaterialShadingModel::PBR)
+						{
+							materialChanged |= ImGui::DragFloat("Metallic", &material.MetallicFactor, 0.01f, 0.0f, 1.0f);
+							materialChanged |= ImGui::DragFloat("Roughness", &material.RoughnessFactor, 0.01f, 0.02f, 1.0f);
+						}
+						else if (material.ShadingModel == Asset::MaterialShadingModel::Phong)
+						{
+							materialChanged |= ImGui::ColorEdit3("Specular", &material.SpecularColor.x);
+							materialChanged |= ImGui::DragFloat("Shininess", &material.Shininess, 1.0f, 1.0f, 1024.0f);
+						}
+						if (materialChanged && context.OnMaterialEdited)
+						{
+							material.DiffuseColor.x = std::clamp(material.DiffuseColor.x, 0.0f, 1.0f);
+							material.DiffuseColor.y = std::clamp(material.DiffuseColor.y, 0.0f, 1.0f);
+							material.DiffuseColor.z = std::clamp(material.DiffuseColor.z, 0.0f, 1.0f);
+							material.DiffuseColor.w = std::clamp(material.DiffuseColor.w, 0.0f, 1.0f);
+							material.Opacity = std::clamp(material.Opacity, 0.0f, 1.0f);
+							material.MetallicFactor = std::clamp(material.MetallicFactor, 0.0f, 1.0f);
+							material.RoughnessFactor = std::clamp(material.RoughnessFactor, 0.02f, 1.0f);
+							material.Shininess = std::clamp(material.Shininess, 1.0f, 1024.0f);
+							context.OnMaterialEdited(selectedEntity, materialIndex);
+						}
+
+						ImGui::Separator();
+						ImGui::TextUnformatted("Texture Slots");
+						for (size_t slotIndex = 0; slotIndex < Asset::kMaterialTextureSlotCount; ++slotIndex)
+						{
+							const auto slot = static_cast<Asset::MaterialTextureSlot>(slotIndex);
+							if (ShouldShowMaterialSlot(material.ShadingModel, slot))
+							{
+								DrawMaterialTextureSlotRow(context, selectedEntity, materialIndex, material, slot);
+							}
+						}
 						ImGui::TreePop();
 					}
 				}
@@ -1627,6 +1947,109 @@ namespace Editor
 		{
 			ImGui::Text("Selected Asset: %s", m_SelectedAssetPath.filename().string().c_str());
 		}
+		if (ImGui::CollapsingHeader("Renderer Roadmap Health", ImGuiTreeNodeFlags_DefaultOpen))
+		{
+			if (ImGui::BeginTable("RendererRoadmapHealthTable", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+			{
+				ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 32.0f);
+				ImGui::TableSetupColumn("Item");
+				ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+				ImGui::TableSetupColumn("Evidence");
+				ImGui::TableHeadersRow();
+
+				DrawRoadmapHealthRow(
+					1,
+					"Resource system",
+					context.ResourceStats.GroupCount > 0 ? RoadmapHealthState::Active : RoadmapHealthState::Warning,
+					std::format("{} group(s), {} declared, {} loaded, {} failed",
+						context.ResourceStats.GroupCount,
+						context.ResourceStats.ResourceCount,
+						context.ResourceStats.LoadedCount,
+						context.ResourceStats.FailedCount));
+				DrawRoadmapHealthRow(
+					2,
+					"Material and shader variants",
+					context.ShaderVariantStats.RequestCount > 0 ? RoadmapHealthState::Active : RoadmapHealthState::Ready,
+					std::format("{} material(s), {} variant(s), {} request(s)",
+						context.MaterialStats.MaterialCount,
+						context.ShaderVariantStats.VariantCount,
+						context.ShaderVariantStats.RequestCount));
+				DrawRoadmapHealthRow(
+					3,
+					"RenderGraph frame graph",
+					context.RenderGraphStats.PassCount > 0 ? RoadmapHealthState::Active : RoadmapHealthState::Warning,
+					std::format("{} / {} pass(es) enabled for {}",
+						context.RenderGraphStats.EnabledPassCount,
+						context.RenderGraphStats.PassCount,
+						RenderModeToString(context.CurrentRenderMode)));
+				DrawRoadmapHealthRow(
+					4,
+					"Shadow pass",
+					context.ShadowStats.Enabled ? (context.ShadowStats.HasDirectionalCaster ? RoadmapHealthState::Active : RoadmapHealthState::Ready) : RoadmapHealthState::Idle,
+					std::format("{} shadow map, caster {}, {} draw call(s)",
+						context.ShadowStats.Enabled ? std::to_string(context.ShadowStats.MapSize) : std::string("disabled"),
+						context.ShadowStats.HasDirectionalCaster ? "yes" : "no",
+						context.RenderFrameStats.ShadowDrawCallCount));
+				DrawRoadmapHealthRow(
+					5,
+					"HDR and tone mapping",
+					(context.RenderGraphStats.UsesHdr && context.PostProcessStats.UsesHdrTarget && context.PostProcessStats.ToneMappingEnabled)
+						? RoadmapHealthState::Active
+						: RoadmapHealthState::Warning,
+					std::format("HDR {}, tone map {}, exposure {:.2f}",
+						context.PostProcessStats.UsesHdrTarget ? "yes" : "no",
+						context.PostProcessStats.ToneMappingEnabled ? context.PostProcessStats.ToneMapper : std::string_view("off"),
+						context.PostProcessStats.Exposure));
+				DrawRoadmapHealthRow(
+					6,
+					"Forward 8 lights / Deferred unlimited",
+					(context.ForwardLightLimit == 8 && context.DeferredLightBufferCapacity >= context.DeferredLightCount)
+						? RoadmapHealthState::Ready
+						: RoadmapHealthState::Warning,
+					std::format("Forward uses {} / {}, Deferred active {} with {} slot buffer",
+						context.ForwardLightUsedCount,
+						context.ForwardLightLimit,
+						context.DeferredLightCount,
+						context.DeferredLightBufferCapacity));
+				DrawRoadmapHealthRow(
+					7,
+					"Deferred tiled light culling",
+					context.CurrentRenderMode == RenderMode::Deferred
+						? (context.DeferredTileViewportCount > 0 ? RoadmapHealthState::Active : RoadmapHealthState::Ready)
+						: RoadmapHealthState::Idle,
+					std::format("{} viewport pass(es), {} tile(s), {} light reference(s)",
+						context.DeferredTileViewportCount,
+						context.DeferredTileCountTotal,
+						context.DeferredTileLightReferenceCount));
+				DrawRoadmapHealthRow(
+					8,
+					"Per-pass CPU timings",
+					context.RenderGraphStats.TimedPassCount > 0 ? RoadmapHealthState::Active : RoadmapHealthState::Ready,
+					std::format("{} timed pass(es), {:.3f} ms exclusive sum",
+						context.RenderGraphStats.TimedPassCount,
+						context.RenderGraphStats.TotalCpuMs));
+				DrawRoadmapHealthRow(
+					9,
+					"Render frame counters",
+					context.RenderFrameStats.FrameIndex > 0 ? RoadmapHealthState::Active : RoadmapHealthState::Ready,
+					std::format("{} draw call(s), {} triangle(s), {} instance(s)",
+						context.RenderFrameStats.DrawCallCount,
+						context.RenderFrameStats.SubmittedTriangleCount,
+						context.RenderFrameStats.SubmittedInstanceCount));
+				DrawRoadmapHealthRow(
+					10,
+					"Viewport frustum culling",
+					context.ViewFrustumCullingEnabled
+						? (context.RenderFrameStats.ViewCullingRequestCount > 0 ? RoadmapHealthState::Active : RoadmapHealthState::Ready)
+						: RoadmapHealthState::Idle,
+					std::format("{} request(s), {} test(s), {} culled result(s)",
+						context.RenderFrameStats.ViewCullingRequestCount,
+						context.RenderFrameStats.ViewCullingTestCount,
+						context.RenderFrameStats.ViewCulledEntityCount));
+
+				ImGui::EndTable();
+			}
+		}
 		if (ImGui::CollapsingHeader("Memory"))
 		{
 			const auto& memoryStats = context.MemoryStats;
@@ -1695,6 +2118,208 @@ namespace Editor
 				ImGui::TreePop();
 			}
 		}
+		if (ImGui::CollapsingHeader("Jobs"))
+		{
+			const auto& jobStats = context.JobStats;
+			ImGui::Text("Workers: %u", jobStats.WorkerCount);
+			ImGui::Text("Frame Index: %llu", static_cast<unsigned long long>(jobStats.FrameIndex));
+			ImGui::Text(
+				"ParallelFor: %s | Sequential <= %zu items | Target jobs/worker %zu",
+				jobStats.AdaptiveParallelForEnabled ? "Adaptive" : "Fixed",
+				jobStats.ParallelForSequentialThreshold,
+				jobStats.TargetJobsPerWorker);
+			if (jobStats.SelectedBenchmarkChunkSize > 0)
+			{
+				ImGui::Text("Selected benchmark chunk: %zu", jobStats.SelectedBenchmarkChunkSize);
+			}
+			if (jobStats.BenchmarkRowCount > 0 && ImGui::BeginTable("JobBenchmarkTable", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+			{
+				ImGui::TableSetupColumn("Case");
+				ImGui::TableSetupColumn("Items");
+				ImGui::TableSetupColumn("Chunk");
+				ImGui::TableSetupColumn("ms");
+				ImGui::TableSetupColumn("Speedup");
+				ImGui::TableHeadersRow();
+				for (size_t rowIndex = 0; rowIndex < jobStats.BenchmarkRowCount; ++rowIndex)
+				{
+					const Jobs::JobBenchmarkRow& row = jobStats.BenchmarkRows[rowIndex];
+					ImGui::TableNextRow();
+					ImGui::TableSetColumnIndex(0);
+					ImGui::TextUnformatted(row.Name);
+					ImGui::TableSetColumnIndex(1);
+					ImGui::Text("%zu", row.WorkItemCount);
+					ImGui::TableSetColumnIndex(2);
+					ImGui::Text("%zu", row.ChunkSize);
+					ImGui::TableSetColumnIndex(3);
+					ImGui::Text("%.4f", row.Milliseconds);
+					ImGui::TableSetColumnIndex(4);
+					ImGui::Text("%.2fx", row.SpeedupVsSequential);
+				}
+				ImGui::EndTable();
+			}
+		}
+		if (ImGui::CollapsingHeader("Resources"))
+		{
+			const Resources::ResourceManagerStats& resourceStats = context.ResourceStats;
+			ImGui::Text("Groups: %zu", resourceStats.GroupCount);
+			ImGui::Text("Resources: %zu", resourceStats.ResourceCount);
+			ImGui::Text("Declared: %zu", resourceStats.DeclaredCount);
+			ImGui::Text("Prepared: %zu", resourceStats.PreparedCount);
+			ImGui::Text("Loaded: %zu", resourceStats.LoadedCount);
+			ImGui::Text("Failed: %zu", resourceStats.FailedCount);
+			ImGui::Text("Indexed Size: %.2f MB", static_cast<double>(resourceStats.DeclaredBytes) / (1024.0 * 1024.0));
+			ImGui::Text("Loaded Size: %.2f MB", static_cast<double>(resourceStats.LoadedBytes) / (1024.0 * 1024.0));
+		}
+		if (ImGui::CollapsingHeader("Materials / Shader Variants"))
+		{
+			const Materials::MaterialResourceStats& materialStats = context.MaterialStats;
+			ImGui::Text("Materials: %zu", materialStats.MaterialCount);
+			ImGui::Text(
+				"Models: Phong %zu | PBR %zu | Unlit %zu",
+				materialStats.PhongCount,
+				materialStats.PbrCount,
+				materialStats.UnlitCount);
+			ImGui::Text(
+				"Texture Slots: %zu | Overrides %zu | Embedded %zu",
+				materialStats.TextureSlotCount,
+				materialStats.OverrideSlotCount,
+				materialStats.EmbeddedSlotCount);
+
+			const Materials::ShaderVariantCacheStats& variantStats = context.ShaderVariantStats;
+			ImGui::SeparatorText("Shader Variant Cache");
+			ImGui::Text("Variants: %zu", variantStats.VariantCount);
+			ImGui::Text("Requests: %llu", static_cast<unsigned long long>(variantStats.RequestCount));
+			ImGui::Text(
+				"Models: Phong %zu | PBR %zu | Unlit %zu",
+				variantStats.PhongVariantCount,
+				variantStats.PbrVariantCount,
+				variantStats.UnlitVariantCount);
+			ImGui::Text("Deferred variants: %zu", variantStats.DeferredVariantCount);
+			ImGui::Text("Transparent variants: %zu", variantStats.TransparentVariantCount);
+		}
+		if (ImGui::CollapsingHeader("Lighting"))
+		{
+			ImGui::Text("Scene enabled lights: %u%s", context.SceneLightCount, context.UsesFallbackLight ? " (fallback directional active)" : "");
+			ImGui::Text("Forward realtime lights: %u / %u used", context.ForwardLightUsedCount, context.ForwardLightLimit);
+			if (context.ForwardLightTruncatedCount > 0)
+			{
+				ImGui::TextColored(
+					ImVec4(1.0f, 0.72f, 0.22f, 1.0f),
+					"Forward light cap: %u light(s) ignored in Forward/Forward+.",
+					context.ForwardLightTruncatedCount);
+			}
+			ImGui::Text("Forward+ realtime lights: max %u (shared Forward path)", context.ForwardLightLimit);
+			ImGui::Text("Deferred realtime lights: unlimited (%u active)", context.DeferredLightCount);
+			ImGui::Text("Deferred light buffer: %u slots, grows as needed", context.DeferredLightBufferCapacity);
+			ImGui::Text(
+				"Deferred tile passes: %u viewport(s), %u total tiles",
+				context.DeferredTileViewportCount,
+				context.DeferredTileCountTotal);
+			ImGui::Text("Deferred tile references: %u", context.DeferredTileLightReferenceCount);
+			const double averageTileLightCount = context.DeferredTileCountTotal > 0
+				? static_cast<double>(context.DeferredTileLightReferenceCount) / static_cast<double>(context.DeferredTileCountTotal)
+				: 0.0;
+			ImGui::Text("Deferred tile lights: avg %.2f, max %u", averageTileLightCount, context.DeferredMaxTileLightCount);
+			ImGui::Text("Deferred full-tile lights: %u", context.DeferredFullTileLightCount);
+			ImGui::TextUnformatted("Deferred mode has no fixed scene-side light cap in v1.");
+		}
+		if (ImGui::CollapsingHeader("Render Graph"))
+		{
+			const Rendering::RenderGraphStats& graphStats = context.RenderGraphStats;
+			ImGui::Text("Frame: %llu", static_cast<unsigned long long>(graphStats.FrameIndex));
+			ImGui::Text("Passes: %zu / %zu enabled", graphStats.EnabledPassCount, graphStats.PassCount);
+			ImGui::Text("World: %zu", graphStats.WorldPassCount);
+			ImGui::Text("Shadow: %zu", graphStats.ShadowPassCount);
+			ImGui::Text("Geometry: %zu", graphStats.GeometryPassCount);
+			ImGui::Text("Lighting: %zu", graphStats.LightingPassCount);
+			ImGui::Text("Post Process: %zu", graphStats.PostProcessPassCount);
+			ImGui::Text("Editor: %zu", graphStats.EditorPassCount);
+			ImGui::Text("Deferred: %s", graphStats.UsesDeferred ? "Yes" : "No");
+			ImGui::Text("HDR path: %s", graphStats.UsesHdr ? "Yes" : "No");
+			ImGui::SeparatorText("CPU Timing");
+			ImGui::Text("Timed Passes: %zu", graphStats.TimedPassCount);
+			ImGui::Text("Exclusive Sum: %.3f ms", graphStats.TotalCpuMs);
+			ImGui::Text("Setup: %.3f  Clear: %.3f  Shadow: %.3f", graphStats.SetupCpuMs, graphStats.ClearCpuMs, graphStats.ShadowCpuMs);
+			ImGui::Text("Geometry: %.3f  Lighting: %.3f  Post: %.3f", graphStats.GeometryCpuMs, graphStats.LightingCpuMs, graphStats.PostProcessCpuMs);
+			ImGui::Text("Editor: %.3f  Present: %.3f  Debug: %.3f", graphStats.EditorCpuMs, graphStats.PresentCpuMs, graphStats.DebugCpuMs);
+			if (context.RenderGraphPasses && ImGui::TreeNode("Timed Pass Details"))
+			{
+				for (const Rendering::RenderGraphPass& pass : *context.RenderGraphPasses)
+				{
+					if (!pass.Enabled || !pass.HasCpuTiming)
+					{
+						continue;
+					}
+					ImGui::Text("%7.3f ms  [%s]%s %s",
+						pass.CpuMilliseconds,
+						Rendering::ToString(pass.Kind),
+						pass.IncludeCpuInStats ? "" : " inclusive",
+						pass.Name.c_str());
+				}
+				ImGui::TreePop();
+			}
+		}
+		if (ImGui::CollapsingHeader("Render Stats"))
+		{
+			const Rendering::RenderFrameStats& renderStats = context.RenderFrameStats;
+			ImGui::Text("Frame: %llu", static_cast<unsigned long long>(renderStats.FrameIndex));
+			ImGui::Text("Render Entities: %u", renderStats.RenderEntityCount);
+			ImGui::Text("Enabled Mesh Entities: %u", renderStats.EnabledMeshEntityCount);
+			ImGui::Text("Transparent Entities: %u", renderStats.TransparentEntityCount);
+			ImGui::Text("Frustum Culling: %s", context.ViewFrustumCullingEnabled ? "On" : "Off");
+			ImGui::Text("Culling: %u requests, %u tests, %u visible results, %u culled results",
+				renderStats.ViewCullingRequestCount,
+				renderStats.ViewCullingTestCount,
+				renderStats.ViewVisibleEntityCount,
+				renderStats.ViewCulledEntityCount);
+			ImGui::Text("Culling Cache: %u hits, %u misses",
+				renderStats.ViewCullingCacheHitCount,
+				renderStats.ViewCullingCacheMissCount);
+			ImGui::Text("Visible List Entries: %u", renderStats.ViewVisibleListEntityCount);
+			ImGui::Text("Scene View: %u requests, %u visible list, %u culled",
+				renderStats.SceneViewCullingRequestCount,
+				renderStats.SceneViewVisibleListEntityCount,
+				renderStats.SceneViewCulledEntityCount);
+			ImGui::Text("Game View: %u requests, %u visible list, %u culled",
+				renderStats.GameViewCullingRequestCount,
+				renderStats.GameViewVisibleListEntityCount,
+				renderStats.GameViewCulledEntityCount);
+			ImGui::SeparatorText("Draw Calls");
+			ImGui::Text("Total: %u", renderStats.DrawCallCount);
+			ImGui::Text("Indexed: %u  Fullscreen: %u  Instanced: %u",
+				renderStats.IndexedDrawCallCount,
+				renderStats.FullscreenDrawCallCount,
+				renderStats.InstancedDrawCallCount);
+			ImGui::Text("Opaque: %u  Transparent: %u", renderStats.OpaqueDrawCallCount, renderStats.TransparentDrawCallCount);
+			ImGui::Text("Shadow: %u  Deferred Geometry: %u", renderStats.ShadowDrawCallCount, renderStats.DeferredGeometryDrawCallCount);
+			ImGui::Text("Benchmark: %u", renderStats.BenchmarkDrawCallCount);
+			ImGui::SeparatorText("Submitted Work");
+			ImGui::Text("Indices: %llu", static_cast<unsigned long long>(renderStats.SubmittedIndexCount));
+			ImGui::Text("Triangles: %llu", static_cast<unsigned long long>(renderStats.SubmittedTriangleCount));
+			ImGui::Text("Instances: %llu", static_cast<unsigned long long>(renderStats.SubmittedInstanceCount));
+		}
+		if (ImGui::CollapsingHeader("Post Process"))
+		{
+			const Rendering::PostProcessStats& postStats = context.PostProcessStats;
+			ImGui::Text("Backend: %s", postStats.Backend.data());
+			ImGui::Text("HDR Target: %s", postStats.UsesHdrTarget ? "Yes" : "No");
+			ImGui::Text("Tone Mapping: %s", postStats.ToneMappingEnabled ? postStats.ToneMapper.data() : "Off");
+			ImGui::Text("Tone Map Pass: %s", postStats.ToneMapPassScheduled ? "Scheduled" : "Inline/Skipped");
+			ImGui::Text("Exposure: %.2f", postStats.Exposure);
+		}
+		if (ImGui::CollapsingHeader("Shadows"))
+		{
+			const Rendering::ShadowStats& shadowStats = context.ShadowStats;
+			ImGui::Text("Enabled: %s", shadowStats.Enabled ? "Yes" : "No");
+			ImGui::Text("Directional caster: %s", shadowStats.HasDirectionalCaster ? "Yes" : "No");
+			ImGui::Text("Light Entity: %u", shadowStats.LightEntity);
+			ImGui::Text("Map Size: %u", shadowStats.MapSize);
+			ImGui::Text("Distance: %.1f", shadowStats.Distance);
+			ImGui::Text("Ortho Size: %.1f", shadowStats.OrthographicSize);
+			ImGui::Text("Bias: %.5f", shadowStats.Bias);
+			ImGui::Text("Normal Bias: %.4f", shadowStats.NormalBias);
+			ImGui::Text("Strength: %.2f", shadowStats.Strength);
+		}
 		if (context.AssetLogLines && !context.AssetLogLines->empty())
 		{
 			ImGui::Separator();
@@ -1749,11 +2374,12 @@ namespace Editor
 		{
 			context.OnAssetOpen(entryPath);
 		}
-		if (entry.Kind == Asset::AssetFileKind::Model && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+		if ((entry.Kind == Asset::AssetFileKind::Model || entry.Kind == Asset::AssetFileKind::Image)
+			&& ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
 		{
 			const std::string payloadPath = entryPath.string();
 			ImGui::SetDragDropPayload(kAssetPathPayload, payloadPath.c_str(), payloadPath.size() + 1);
-			ImGui::Text("Load %s", entry.Name.c_str());
+			ImGui::Text("%s %s", entry.Kind == Asset::AssetFileKind::Model ? "Load" : "Use", entry.Name.c_str());
 			ImGui::EndDragDropSource();
 		}
 	}

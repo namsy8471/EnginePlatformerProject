@@ -1,31 +1,49 @@
 #version 450
 
-// Vulkan static mesh vertex shader
-// Assimp로 읽은 정점 버퍼의 위치/노멀/UV를 입력으로 받아 카메라 행렬을 적용합니다.
-// 이번 단계에서는 diffuse texture를 GPU sampled image로 바꿔 샘플링하므로
-// Vulkan 셰이더는 UV와 COLOR attribute를 fragment shader로 넘겨줍니다.
+#define MAX_FORWARD_LIGHTS 8
 
-// Vulkan 경로는 카메라 행렬을 uniform buffer로 받아 정점 위치를 ViewProjection으로 변환합니다.
 layout(set = 0, binding = 0) uniform CameraConstants
 {
 	mat4 WorldViewProjection;
 	mat4 ViewProjection;
 	mat4 World;
+	mat4 WorldInverseTranspose;
 	vec4 CameraPosition;
-	vec4 BenchmarkParams; // x: instance count, y: local scale, z: fovY, w: aspect
-	vec4 LightDirection; // xyz: normalized vector from surface to directional light, w: enabled
-	vec4 LightColorIntensity; // rgb: light color, w: intensity
-	vec4 AmbientSpecular; // x: ambient, y: specular strength, z: shininess, w: lighting enabled
+	vec4 BenchmarkParams;
+	vec4 LightDirection;
+	vec4 LightColorIntensity;
+	vec4 AmbientSpecular;
+	vec4 MaterialBaseColor;
+	vec4 MaterialSpecularShininess;
+	vec4 MaterialEmissiveMetallic;
+	vec4 MaterialRoughnessFlags;
+	vec4 MaterialTextureFlags;
+	vec4 MaterialTextureFlags2;
+	vec4 AmbientColorIntensity;
+	vec4 ExposureDebug;
+	vec4 LightCountParams;
+	vec4 LightPositionType[MAX_FORWARD_LIGHTS];
+	vec4 LightDirectionRange[MAX_FORWARD_LIGHTS];
+	vec4 LightColorIntensityData[MAX_FORWARD_LIGHTS];
+	vec4 LightSpotAnglesEnabled[MAX_FORWARD_LIGHTS];
+	mat4 ShadowViewProjection;
+	vec4 ShadowParams;
+	vec4 ShadowDirection;
 } cameraConstants;
 
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inNormal;
 layout(location = 2) in vec2 inTexCoord;
 layout(location = 3) in vec4 inColor;
+layout(location = 4) in vec3 inTangent;
+layout(location = 5) in float inTangentSign;
+
 layout(location = 0) out vec2 outTexCoord;
 layout(location = 1) out vec4 outColor;
 layout(location = 2) out vec3 outWorldPosition;
 layout(location = 3) out vec3 outNormalWorld;
+layout(location = 4) out vec3 outTangentWorld;
+layout(location = 5) out float outTangentSign;
 
 float hash01(uint value)
 {
@@ -72,6 +90,7 @@ vec4 makeBenchmarkTint(uint instanceId)
 
 void main()
 {
+	outTangentSign = inTangentSign == 0.0 ? 1.0 : inTangentSign;
 	if (cameraConstants.BenchmarkParams.x > 0.5)
 	{
 		const vec3 center = makeBenchmarkCenter(gl_InstanceIndex);
@@ -81,15 +100,15 @@ void main()
 		outColor = inColor * makeBenchmarkTint(gl_InstanceIndex);
 		outWorldPosition = center + localPosition;
 		outNormalWorld = normalize(inNormal);
+		outTangentWorld = normalize(inTangent);
 		return;
 	}
 
-	// Vulkan 경로는 엔진 오브젝트의 월드 변환까지 포함된 WorldViewProjection 행렬을 사용해
-	// 로컬 메시 정점을 바로 화면 공간으로 변환합니다.
 	const vec4 worldPosition = cameraConstants.World * vec4(inPosition, 1.0);
 	gl_Position = cameraConstants.WorldViewProjection * vec4(inPosition, 1.0);
 	outTexCoord = inTexCoord;
 	outColor = inColor;
 	outWorldPosition = worldPosition.xyz;
-	outNormalWorld = normalize((cameraConstants.World * vec4(inNormal, 0.0)).xyz);
+	outNormalWorld = normalize((cameraConstants.WorldInverseTranspose * vec4(inNormal, 0.0)).xyz);
+	outTangentWorld = normalize((cameraConstants.WorldInverseTranspose * vec4(inTangent, 0.0)).xyz);
 }

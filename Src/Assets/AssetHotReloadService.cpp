@@ -23,7 +23,20 @@ namespace Asset
 			});
 	}
 
-	AssetHotReloadService::~AssetHotReloadService() = default;
+	AssetHotReloadService::~AssetHotReloadService()
+	{
+		Shutdown();
+	}
+
+	void AssetHotReloadService::Shutdown()
+	{
+		if (m_Worker.joinable())
+		{
+			m_Worker.request_stop();
+			m_Worker.join();
+		}
+		Clear();
+	}
 
 	void AssetHotReloadService::WatchLoadedAsset(const std::filesystem::path& sourcePath, std::vector<std::filesystem::path> dependentPaths)
 	{

@@ -19,6 +19,7 @@ namespace ScenePersistence
 		bool MeshEnabled = true;
 		std::filesystem::path MeshAssetPath;
 		Asset::PrimitiveMeshKind PrimitiveKind = Asset::PrimitiveMeshKind::None;
+		std::vector<Asset::StaticMeshMaterial> MaterialOverrides;
 		bool HasCamera = false;
 		bool CameraEnabled = true;
 		CameraComponent Camera;
@@ -44,6 +45,9 @@ namespace ScenePersistence
 		bool Success = false;
 		std::string ErrorMessage;
 		std::string Name;
+		DirectX::XMFLOAT3 AmbientColor = { 0.62f, 0.68f, 0.78f };
+		float AmbientIntensity = 0.35f;
+		float Exposure = 1.0f;
 		std::vector<LoadedSceneEntity> Entities;
 	};
 
@@ -55,6 +59,9 @@ namespace ScenePersistence
 			const SceneRenderState& renderState,
 			const Projects::ProjectDescriptor& project,
 			const std::filesystem::path& scenePath,
+			const DirectX::XMFLOAT3& ambientColor,
+			float ambientIntensity,
+			float exposure,
 			std::string& errorMessage);
 
 		[[nodiscard]] static LoadSceneResult LoadScene(

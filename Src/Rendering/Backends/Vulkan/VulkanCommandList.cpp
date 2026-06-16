@@ -48,6 +48,7 @@ void VulkanCommandList::Reset()
 	m_renderPassBegun = false;
 	m_hasClearColor = false;
 	m_hasClearDepth = false;
+	m_swapchainRenderPassOpenedThisFrame = false;
 	m_clearValues[0] = {};
 	m_clearValues[1] = {};
 }
@@ -214,6 +215,20 @@ void VulkanCommandList::ResourceBarrier(IGpuResource* resource, ResourceState be
 	m_device->m_swapchainImageLayouts[m_device->m_currentBackBufferIndex] = newLayout;
 }
 
+void VulkanCommandList::EndRenderPassForExternalCommands()
+{
+	if (m_renderPassBegun)
+	{
+		vkCmdEndRenderPass(m_commandBuffer);
+		m_renderPassBegun = false;
+	}
+}
+
+void VulkanCommandList::BeginSwapchainRenderPassForExternalCommands()
+{
+	BeginRenderPassIfNeeded();
+}
+
 void VulkanCommandList::BeginRenderPassIfNeeded()
 {
 	// RenderPass는 framebuffer와 clear 값이 모두 준비된 뒤 한 번만 시작해야 합니다.
@@ -224,8 +239,11 @@ void VulkanCommandList::BeginRenderPassIfNeeded()
 
 	VkRenderPassBeginInfo renderPassBeginInfo = {};
 	renderPassBeginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-	renderPassBeginInfo.renderPass = m_device->m_renderPass;
-	renderPassBeginInfo.framebuffer = m_device->m_framebuffers[m_device->m_currentBackBufferIndex];
+	const bool useLoadRenderPass = m_swapchainRenderPassOpenedThisFrame && m_device->m_loadRenderPass != VK_NULL_HANDLE;
+	renderPassBeginInfo.renderPass = useLoadRenderPass ? m_device->m_loadRenderPass : m_device->m_renderPass;
+	renderPassBeginInfo.framebuffer = useLoadRenderPass
+		? m_device->m_loadFramebuffers[m_device->m_currentBackBufferIndex]
+		: m_device->m_framebuffers[m_device->m_currentBackBufferIndex];
 	renderPassBeginInfo.renderArea.offset = { 0, 0 };
 	renderPassBeginInfo.renderArea.extent = m_device->m_swapchainExtent;
 	renderPassBeginInfo.clearValueCount = 2;
@@ -233,6 +251,7 @@ void VulkanCommandList::BeginRenderPassIfNeeded()
 
 	vkCmdBeginRenderPass(m_commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 	m_renderPassBegun = true;
+	m_swapchainRenderPassOpenedThisFrame = true;
 }
 
 VkImageLayout VulkanCommandList::TranslateResourceState(ResourceState state) const

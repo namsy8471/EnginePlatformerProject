@@ -101,6 +101,39 @@ namespace Samples::Benchmark
 		}
 	}
 
+	void EcsObjectStore::UpdateSimulation(float deltaTime, Jobs::JobSystem* jobSystem)
+	{
+		if (!jobSystem || m_Chunks.size() < 2 || m_Size < 2048)
+		{
+			UpdateSimulation(deltaTime);
+			return;
+		}
+
+		jobSystem->RunParallelFor(
+			m_Chunks.size(),
+			1,
+			"ECS Benchmark UpdateSimulation",
+			[this, deltaTime](size_t begin, size_t end, Jobs::JobContext&)
+			{
+				for (size_t chunkIndex = begin; chunkIndex < end; ++chunkIndex)
+				{
+					Chunk& chunk = m_Chunks[chunkIndex];
+					const size_t count = chunk.Size();
+					EcsTransformComponent* transforms = chunk.Transforms.data();
+					const VelocityComponent* velocities = chunk.Velocities.data();
+					BoundsComponent* bounds = chunk.Bounds.data();
+					SpinComponent* spins = chunk.Spins.data();
+
+					for (size_t i = 0; i < count; ++i)
+					{
+						ApplyMovement(transforms[i], velocities[i], deltaTime);
+						ApplySpin(transforms[i], spins[i], deltaTime);
+						UpdateWorldBounds(transforms[i], bounds[i]);
+					}
+				}
+			});
+	}
+
 	void EcsObjectStore::UpdateMovement(float deltaTime)
 	{
 		for (Chunk& chunk : m_Chunks)
@@ -163,6 +196,59 @@ namespace Samples::Benchmark
 			}
 		}
 
+		return static_cast<uint32_t>(instances.size());
+	}
+
+	uint32_t EcsObjectStore::CollectRenderInstances(std::vector<BenchmarkRenderInstance>& instances, Jobs::JobSystem* jobSystem) const
+	{
+		if (!jobSystem || m_Chunks.size() < 2 || m_Size < 2048)
+		{
+			instances.clear();
+			instances.reserve(m_Size);
+			for (const Chunk& chunk : m_Chunks)
+			{
+				const size_t count = chunk.Size();
+				const EcsTransformComponent* transforms = chunk.Transforms.data();
+				const RenderableComponent* renderables = chunk.Renderables.data();
+
+				for (size_t i = 0; i < count; ++i)
+				{
+					instances.push_back(MakeRenderInstance(transforms[i], renderables[i]));
+				}
+			}
+			return static_cast<uint32_t>(instances.size());
+		}
+
+		std::vector<size_t> chunkOffsets(m_Chunks.size(), 0);
+		size_t runningOffset = 0;
+		for (size_t chunkIndex = 0; chunkIndex < m_Chunks.size(); ++chunkIndex)
+		{
+			chunkOffsets[chunkIndex] = runningOffset;
+			runningOffset += m_Chunks[chunkIndex].Size();
+		}
+
+		instances.clear();
+		instances.resize(runningOffset);
+		jobSystem->RunParallelFor(
+			m_Chunks.size(),
+			1,
+			"ECS Benchmark CollectRenderInstances",
+			[this, &instances, &chunkOffsets](size_t begin, size_t end, Jobs::JobContext&)
+			{
+				for (size_t chunkIndex = begin; chunkIndex < end; ++chunkIndex)
+				{
+					const Chunk& chunk = m_Chunks[chunkIndex];
+					const size_t count = chunk.Size();
+					const size_t outputOffset = chunkOffsets[chunkIndex];
+					const EcsTransformComponent* transforms = chunk.Transforms.data();
+					const RenderableComponent* renderables = chunk.Renderables.data();
+
+					for (size_t i = 0; i < count; ++i)
+					{
+						instances[outputOffset + i] = MakeRenderInstance(transforms[i], renderables[i]);
+					}
+				}
+			});
 		return static_cast<uint32_t>(instances.size());
 	}
 

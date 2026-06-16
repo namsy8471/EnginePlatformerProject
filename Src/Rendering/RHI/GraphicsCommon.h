@@ -56,3 +56,18 @@ enum class ResourceState : std::uint8_t
 	Present,                // 화면 출력용 (Swapchain Present)
 	GenericRead             // 일반적인 읽기
 };
+
+enum class MaterialDebugView : std::uint8_t
+{
+	Lit,
+	BaseColor,
+	Normal,
+	Metallic,
+	Roughness,
+	AO,
+	Emissive,
+	LightingOnly,
+	VertexColor,
+	Shadow,
+	DeferredTileLights
+};

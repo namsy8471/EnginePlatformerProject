@@ -24,6 +24,7 @@ namespace Asset
 		AssetHotReloadService();
 		~AssetHotReloadService();
 
+		void Shutdown();
 		void WatchLoadedAsset(const std::filesystem::path& sourcePath, std::vector<std::filesystem::path> dependentPaths);
 		void UnwatchLoadedAsset(const std::filesystem::path& sourcePath);
 		void Clear();

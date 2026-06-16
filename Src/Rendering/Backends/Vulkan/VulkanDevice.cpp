@@ -130,6 +130,7 @@ void VulkanDevice::Shutdown()
 	{
 		vkDeviceWaitIdle(m_device);
 	}
+	ReleaseAcquiredImageForShutdown();
 
 	// framebuffer는 swapchain image view와 depth view를 참조하므로 가장 먼저 정리합니다.
 	DestroyFramebuffers();
@@ -139,6 +140,11 @@ void VulkanDevice::Shutdown()
 	{
 		vkDestroyRenderPass(m_device, m_renderPass, nullptr);
 		m_renderPass = VK_NULL_HANDLE;
+	}
+	if (m_loadRenderPass != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE)
+	{
+		vkDestroyRenderPass(m_device, m_loadRenderPass, nullptr);
+		m_loadRenderPass = VK_NULL_HANDLE;
 	}
 
 	if (m_commandPool != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE)
@@ -300,6 +306,11 @@ void VulkanDevice::Resize(int width, int height)
 	{
 		vkDestroyRenderPass(m_device, m_renderPass, nullptr);
 		m_renderPass = VK_NULL_HANDLE;
+	}
+	if (m_loadRenderPass != VK_NULL_HANDLE)
+	{
+		vkDestroyRenderPass(m_device, m_loadRenderPass, nullptr);
+		m_loadRenderPass = VK_NULL_HANDLE;
 	}
 
 	DestroySwapchain();
@@ -824,6 +835,38 @@ void VulkanDevice::AcquireNextImage()
 	m_hasAcquiredSwapchainImage = true;
 }
 
+void VulkanDevice::ReleaseAcquiredImageForShutdown()
+{
+	if (!m_hasAcquiredSwapchainImage ||
+		m_swapchain == VK_NULL_HANDLE ||
+		m_presentQueue == VK_NULL_HANDLE)
+	{
+		return;
+	}
+
+	VkPresentInfoKHR presentInfo = {};
+	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+	presentInfo.waitSemaphoreCount = 0;
+	presentInfo.pWaitSemaphores = nullptr;
+	presentInfo.swapchainCount = 1;
+	presentInfo.pSwapchains = &m_swapchain;
+	presentInfo.pImageIndices = &m_currentBackBufferIndex;
+
+	const VkResult presentResult = vkQueuePresentKHR(m_presentQueue, &presentInfo);
+	m_hasAcquiredSwapchainImage = false;
+	if (presentResult != VK_SUCCESS &&
+		presentResult != VK_ERROR_OUT_OF_DATE_KHR &&
+		presentResult != VK_SUBOPTIMAL_KHR)
+	{
+		LogVulkanWarning("Failed to release acquired swapchain image during shutdown.");
+	}
+
+	if (m_device != VK_NULL_HANDLE)
+	{
+		vkDeviceWaitIdle(m_device);
+	}
+}
+
 void VulkanDevice::ResetImageAvailableSemaphore()
 {
 	if (m_device == VK_NULL_HANDLE)
@@ -850,54 +893,60 @@ void VulkanDevice::ResetImageAvailableSemaphore()
 
 void VulkanDevice::CreateRenderPass()
 {
-	// RenderPass는 컬러 attachment와 깊이 attachment를 어떤 방식으로 사용하고 끝낼지 정의합니다.
-	VkAttachmentDescription colorAttachment = {};
-	colorAttachment.format = m_swapchainImageFormat;
-	colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-	colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-	colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-	colorAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-	VkAttachmentDescription depthAttachment = {};
-	depthAttachment.format = m_depthFormat;
-	depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-	depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-	VkAttachmentReference colorAttachmentRef = {};
-	colorAttachmentRef.attachment = 0;
-	colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-	VkAttachmentReference depthAttachmentRef = {};
-	depthAttachmentRef.attachment = 1;
-	depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-	VkSubpassDescription subpass = {};
-	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-	subpass.colorAttachmentCount = 1;
-	subpass.pColorAttachments = &colorAttachmentRef;
-	subpass.pDepthStencilAttachment = &depthAttachmentRef;
-
-	const VkAttachmentDescription attachments[] = { colorAttachment, depthAttachment };
-
-	VkRenderPassCreateInfo renderPassCreateInfo = {};
-	renderPassCreateInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-	renderPassCreateInfo.attachmentCount = 2;
-	renderPassCreateInfo.pAttachments = attachments;
-	renderPassCreateInfo.subpassCount = 1;
-	renderPassCreateInfo.pSubpasses = &subpass;
-
-	if (vkCreateRenderPass(m_device, &renderPassCreateInfo, nullptr, &m_renderPass) != VK_SUCCESS)
+	auto createSwapchainRenderPass = [&](VkAttachmentLoadOp colorLoadOp, VkAttachmentLoadOp depthLoadOp, VkRenderPass& renderPass)
 	{
-		throw std::runtime_error("Failed to create Vulkan render pass.");
-	}
+		VkAttachmentDescription colorAttachment = {};
+		colorAttachment.format = m_swapchainImageFormat;
+		colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+		colorAttachment.loadOp = colorLoadOp;
+		colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		colorAttachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		colorAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+		VkAttachmentDescription depthAttachment = {};
+		depthAttachment.format = m_depthFormat;
+		depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+		depthAttachment.loadOp = depthLoadOp;
+		depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		depthAttachment.initialLayout = depthLoadOp == VK_ATTACHMENT_LOAD_OP_LOAD
+			? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+			: VK_IMAGE_LAYOUT_UNDEFINED;
+		depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+		VkAttachmentReference colorAttachmentRef = {};
+		colorAttachmentRef.attachment = 0;
+		colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+		VkAttachmentReference depthAttachmentRef = {};
+		depthAttachmentRef.attachment = 1;
+		depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+		VkSubpassDescription subpass = {};
+		subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		subpass.colorAttachmentCount = 1;
+		subpass.pColorAttachments = &colorAttachmentRef;
+		subpass.pDepthStencilAttachment = &depthAttachmentRef;
+
+		const VkAttachmentDescription attachments[] = { colorAttachment, depthAttachment };
+		VkRenderPassCreateInfo renderPassCreateInfo = {};
+		renderPassCreateInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+		renderPassCreateInfo.attachmentCount = 2;
+		renderPassCreateInfo.pAttachments = attachments;
+		renderPassCreateInfo.subpassCount = 1;
+		renderPassCreateInfo.pSubpasses = &subpass;
+
+		if (vkCreateRenderPass(m_device, &renderPassCreateInfo, nullptr, &renderPass) != VK_SUCCESS)
+		{
+			throw std::runtime_error("Failed to create Vulkan render pass.");
+		}
+	};
+
+	createSwapchainRenderPass(VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_LOAD_OP_CLEAR, m_renderPass);
+	createSwapchainRenderPass(VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_LOAD_OP_LOAD, m_loadRenderPass);
 }
 
 void VulkanDevice::CreateDepthResources()
@@ -959,7 +1008,9 @@ void VulkanDevice::CreateFramebuffers()
 {
 	// 각 스왑체인 이미지마다 컬러 뷰 + 공용 depth 뷰를 묶은 framebuffer를 생성합니다.
 	m_framebuffers.clear();
+	m_loadFramebuffers.clear();
 	m_framebuffers.reserve(m_swapchainImageViews.size());
+	m_loadFramebuffers.reserve(m_swapchainImageViews.size());
 
 	for (VkImageView colorImageView : m_swapchainImageViews)
 	{
@@ -981,6 +1032,15 @@ void VulkanDevice::CreateFramebuffers()
 		}
 
 		m_framebuffers.push_back(framebuffer);
+
+		framebufferCreateInfo.renderPass = m_loadRenderPass;
+		VkFramebuffer loadFramebuffer = VK_NULL_HANDLE;
+		if (vkCreateFramebuffer(m_device, &framebufferCreateInfo, nullptr, &loadFramebuffer) != VK_SUCCESS)
+		{
+			throw std::runtime_error("Failed to create Vulkan load framebuffer.");
+		}
+
+		m_loadFramebuffers.push_back(loadFramebuffer);
 	}
 }
 
@@ -1037,6 +1097,15 @@ void VulkanDevice::EndFrameCommandRecording()
 
 void VulkanDevice::DestroyFramebuffers()
 {
+	for (VkFramebuffer framebuffer : m_loadFramebuffers)
+	{
+		if (framebuffer != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE)
+		{
+			vkDestroyFramebuffer(m_device, framebuffer, nullptr);
+		}
+	}
+	m_loadFramebuffers.clear();
+
 	for (VkFramebuffer framebuffer : m_framebuffers)
 	{
 		if (framebuffer != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE)

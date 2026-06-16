@@ -9,7 +9,9 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace Asset
@@ -23,6 +25,174 @@ namespace Asset
 		Plane
 	};
 
+	enum class MaterialShadingModel : uint32_t
+	{
+		Phong,
+		PBR,
+		Unlit
+	};
+
+	enum class MaterialTextureSlot : uint32_t
+	{
+		BaseColor,
+		Normal,
+		Metallic,
+		Roughness,
+		MetallicRoughness,
+		AO,
+		Emissive,
+		Opacity,
+		Specular,
+		Shininess,
+		Count
+	};
+
+	inline constexpr size_t kMaterialTextureSlotCount = static_cast<size_t>(MaterialTextureSlot::Count);
+
+	[[nodiscard]] constexpr size_t MaterialTextureSlotIndex(MaterialTextureSlot slot) noexcept
+	{
+		return static_cast<size_t>(slot);
+	}
+
+	[[nodiscard]] constexpr std::string_view MaterialShadingModelName(MaterialShadingModel model) noexcept
+	{
+		switch (model)
+		{
+		case MaterialShadingModel::PBR:
+			return "PBR";
+		case MaterialShadingModel::Unlit:
+			return "Unlit";
+		case MaterialShadingModel::Phong:
+		default:
+			return "Phong";
+		}
+	}
+
+	[[nodiscard]] constexpr MaterialShadingModel MaterialShadingModelFromName(std::string_view text) noexcept
+	{
+		if (text == "PBR")
+		{
+			return MaterialShadingModel::PBR;
+		}
+		if (text == "Unlit")
+		{
+			return MaterialShadingModel::Unlit;
+		}
+		return MaterialShadingModel::Phong;
+	}
+
+	[[nodiscard]] constexpr std::string_view MaterialTextureSlotName(MaterialTextureSlot slot) noexcept
+	{
+		switch (slot)
+		{
+		case MaterialTextureSlot::BaseColor:
+			return "Base Color";
+		case MaterialTextureSlot::Normal:
+			return "Normal";
+		case MaterialTextureSlot::Metallic:
+			return "Metallic";
+		case MaterialTextureSlot::Roughness:
+			return "Roughness";
+		case MaterialTextureSlot::MetallicRoughness:
+			return "Metallic/Roughness";
+		case MaterialTextureSlot::AO:
+			return "AO";
+		case MaterialTextureSlot::Emissive:
+			return "Emissive";
+		case MaterialTextureSlot::Opacity:
+			return "Opacity";
+		case MaterialTextureSlot::Specular:
+			return "Specular";
+		case MaterialTextureSlot::Shininess:
+			return "Shininess";
+		case MaterialTextureSlot::Count:
+		default:
+			return "Unknown";
+		}
+	}
+
+	[[nodiscard]] constexpr std::string_view MaterialTextureSlotKey(MaterialTextureSlot slot) noexcept
+	{
+		switch (slot)
+		{
+		case MaterialTextureSlot::BaseColor:
+			return "baseColor";
+		case MaterialTextureSlot::Normal:
+			return "normal";
+		case MaterialTextureSlot::Metallic:
+			return "metallic";
+		case MaterialTextureSlot::Roughness:
+			return "roughness";
+		case MaterialTextureSlot::MetallicRoughness:
+			return "metallicRoughness";
+		case MaterialTextureSlot::AO:
+			return "ao";
+		case MaterialTextureSlot::Emissive:
+			return "emissive";
+		case MaterialTextureSlot::Opacity:
+			return "opacity";
+		case MaterialTextureSlot::Specular:
+			return "specular";
+		case MaterialTextureSlot::Shininess:
+			return "shininess";
+		case MaterialTextureSlot::Count:
+		default:
+			return "unknown";
+		}
+	}
+
+	[[nodiscard]] constexpr MaterialTextureSlot MaterialTextureSlotFromKey(std::string_view key) noexcept
+	{
+		if (key == "baseColor")
+		{
+			return MaterialTextureSlot::BaseColor;
+		}
+		if (key == "normal")
+		{
+			return MaterialTextureSlot::Normal;
+		}
+		if (key == "metallic")
+		{
+			return MaterialTextureSlot::Metallic;
+		}
+		if (key == "roughness")
+		{
+			return MaterialTextureSlot::Roughness;
+		}
+		if (key == "metallicRoughness")
+		{
+			return MaterialTextureSlot::MetallicRoughness;
+		}
+		if (key == "ao")
+		{
+			return MaterialTextureSlot::AO;
+		}
+		if (key == "emissive")
+		{
+			return MaterialTextureSlot::Emissive;
+		}
+		if (key == "opacity")
+		{
+			return MaterialTextureSlot::Opacity;
+		}
+		if (key == "specular")
+		{
+			return MaterialTextureSlot::Specular;
+		}
+		if (key == "shininess")
+		{
+			return MaterialTextureSlot::Shininess;
+		}
+		return MaterialTextureSlot::Count;
+	}
+
+	[[nodiscard]] constexpr bool IsMaterialTextureSlotSrgb(MaterialTextureSlot slot) noexcept
+	{
+		return slot == MaterialTextureSlot::BaseColor
+			|| slot == MaterialTextureSlot::Emissive
+			|| slot == MaterialTextureSlot::Specular;
+	}
+
 	struct StaticMeshVertex
 	{
 		DirectX::XMFLOAT3 Position = { 0.0f, 0.0f, 0.0f };
@@ -30,6 +200,7 @@ namespace Asset
 		DirectX::XMFLOAT2 TexCoord = { 0.0f, 0.0f };
 		DirectX::XMFLOAT4 Color = { 1.0f, 1.0f, 1.0f, 1.0f };
 		DirectX::XMFLOAT3 Tangent = { 1.0f, 0.0f, 0.0f };
+		float TangentSign = 1.0f;
 		std::array<uint32_t, 4> BoneIndices = { 0, 0, 0, 0 };
 		std::array<float, 4> BoneWeights = { 0.0f, 0.0f, 0.0f, 0.0f };
 	};
@@ -45,10 +216,45 @@ namespace Asset
 		std::string Name;
 	};
 
+	struct EmbeddedMaterialTexture
+	{
+		Memory::Vector<unsigned char, Memory::MemoryTag::Asset> Pixels;
+		int Width = 0;
+		int Height = 0;
+
+		[[nodiscard]] bool IsValid() const noexcept
+		{
+			return Width > 0 && Height > 0 && !Pixels.empty();
+		}
+	};
+
+	struct MaterialTextureBinding
+	{
+		std::filesystem::path Path;
+		EmbeddedMaterialTexture Embedded;
+		bool IsOverride = false;
+
+		[[nodiscard]] bool HasSource() const noexcept
+		{
+			return !Path.empty() || Embedded.IsValid();
+		}
+	};
+
 	struct StaticMeshMaterial
 	{
 		std::string Name;
+		MaterialShadingModel ShadingModel = MaterialShadingModel::Phong;
 		DirectX::XMFLOAT4 DiffuseColor = { 1.0f, 1.0f, 1.0f, 1.0f };
+		DirectX::XMFLOAT4 ImportedDiffuseTint = { 1.0f, 1.0f, 1.0f, 1.0f };
+		DirectX::XMFLOAT3 SpecularColor = { 1.0f, 1.0f, 1.0f };
+		DirectX::XMFLOAT3 EmissiveColor = { 0.0f, 0.0f, 0.0f };
+		float MetallicFactor = 0.0f;
+		float RoughnessFactor = 0.5f;
+		float Shininess = 32.0f;
+		float Opacity = 1.0f;
+		bool UseVertexColor = false;
+		bool NormalYFlip = false;
+		std::array<MaterialTextureBinding, kMaterialTextureSlotCount> TextureBindings = {};
 		std::filesystem::path DiffuseTexturePath;
 		Memory::Vector<unsigned char, Memory::MemoryTag::Asset> EmbeddedDiffuseTexturePixels;
 		int EmbeddedDiffuseTextureWidth = 0;
@@ -56,6 +262,79 @@ namespace Asset
 		std::filesystem::path NormalTexturePath;
 		std::filesystem::path MetallicRoughnessTexturePath;
 	};
+
+	[[nodiscard]] inline const MaterialTextureBinding& GetMaterialTextureBinding(const StaticMeshMaterial& material, MaterialTextureSlot slot) noexcept
+	{
+		return material.TextureBindings[MaterialTextureSlotIndex(slot)];
+	}
+
+	[[nodiscard]] inline MaterialTextureBinding& GetMaterialTextureBinding(StaticMeshMaterial& material, MaterialTextureSlot slot) noexcept
+	{
+		return material.TextureBindings[MaterialTextureSlotIndex(slot)];
+	}
+
+	inline void SetMaterialTexturePath(StaticMeshMaterial& material, MaterialTextureSlot slot, const std::filesystem::path& path, bool isOverride = false)
+	{
+		MaterialTextureBinding& binding = GetMaterialTextureBinding(material, slot);
+		binding.Path = path;
+		binding.Embedded = {};
+		binding.IsOverride = isOverride;
+
+		switch (slot)
+		{
+		case MaterialTextureSlot::BaseColor:
+			material.DiffuseTexturePath = path;
+			material.EmbeddedDiffuseTexturePixels.clear();
+			material.EmbeddedDiffuseTextureWidth = 0;
+			material.EmbeddedDiffuseTextureHeight = 0;
+			break;
+		case MaterialTextureSlot::Normal:
+			material.NormalTexturePath = path;
+			break;
+		case MaterialTextureSlot::MetallicRoughness:
+			material.MetallicRoughnessTexturePath = path;
+			break;
+		default:
+			break;
+		}
+	}
+
+	inline void SetMaterialEmbeddedTexture(StaticMeshMaterial& material, MaterialTextureSlot slot, EmbeddedMaterialTexture&& embedded)
+	{
+		MaterialTextureBinding& binding = GetMaterialTextureBinding(material, slot);
+		binding.Path.clear();
+		binding.Embedded = std::move(embedded);
+		binding.IsOverride = false;
+
+		if (slot == MaterialTextureSlot::BaseColor)
+		{
+			material.DiffuseTexturePath.clear();
+			material.EmbeddedDiffuseTexturePixels.assign(binding.Embedded.Pixels.begin(), binding.Embedded.Pixels.end());
+			material.EmbeddedDiffuseTextureWidth = binding.Embedded.Width;
+			material.EmbeddedDiffuseTextureHeight = binding.Embedded.Height;
+		}
+	}
+
+	[[nodiscard]] inline std::filesystem::path GetMaterialTexturePath(const StaticMeshMaterial& material, MaterialTextureSlot slot)
+	{
+		const MaterialTextureBinding& binding = GetMaterialTextureBinding(material, slot);
+		if (!binding.Path.empty())
+		{
+			return binding.Path;
+		}
+
+		switch (slot)
+		{
+		case MaterialTextureSlot::BaseColor:
+			return material.DiffuseTexturePath;
+		case MaterialTextureSlot::Normal:
+			return material.NormalTexturePath;
+		case MaterialTextureSlot::MetallicRoughness:
+			return material.MetallicRoughnessTexturePath;
+		default:
+			return {};
+		}
+	}
 
 	struct AnimationVectorKey
 	{

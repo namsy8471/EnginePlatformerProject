@@ -145,6 +145,57 @@ namespace ScenePersistence
 			writer.EndObject();
 		}
 
+		template <typename Writer>
+		void WriteMaterial(Writer& writer, const Asset::StaticMeshMaterial& material, const Projects::ProjectDescriptor& project)
+		{
+			writer.StartObject();
+			writer.Key("name");
+			writer.String(material.Name.c_str());
+			writer.Key("shadingModel");
+			const std::string shadingModelName(Asset::MaterialShadingModelName(material.ShadingModel));
+			writer.String(shadingModelName.c_str());
+			WriteFloat4(writer, "baseColor", material.DiffuseColor);
+			WriteFloat4(writer, "importedDiffuseTint", material.ImportedDiffuseTint);
+			WriteFloat3(writer, "specularColor", material.SpecularColor);
+			WriteFloat3(writer, "emissiveColor", material.EmissiveColor);
+			writer.Key("metallic");
+			writer.Double(material.MetallicFactor);
+			writer.Key("roughness");
+			writer.Double(material.RoughnessFactor);
+			writer.Key("shininess");
+			writer.Double(material.Shininess);
+			writer.Key("opacity");
+			writer.Double(material.Opacity);
+			writer.Key("useVertexColor");
+			writer.Bool(material.UseVertexColor);
+			writer.Key("normalYFlip");
+			writer.Bool(material.NormalYFlip);
+
+			writer.Key("textures");
+			writer.StartObject();
+			for (size_t slotIndex = 0; slotIndex < Asset::kMaterialTextureSlotCount; ++slotIndex)
+			{
+				const auto slot = static_cast<Asset::MaterialTextureSlot>(slotIndex);
+				const std::filesystem::path texturePath = Asset::GetMaterialTexturePath(material, slot);
+				if (texturePath.empty())
+				{
+					continue;
+				}
+
+				const std::string storedPath = ToStoredAssetPath(texturePath, project);
+				if (storedPath.empty())
+				{
+					continue;
+				}
+
+				const std::string slotKey(Asset::MaterialTextureSlotKey(slot));
+				writer.Key(slotKey.c_str());
+				writer.String(storedPath.c_str());
+			}
+			writer.EndObject();
+			writer.EndObject();
+		}
+
 		[[nodiscard]] bool ReadFloat3(const rapidjson::Value& object, const char* key, DirectX::XMFLOAT3& value)
 		{
 			if (!object.HasMember(key) || !object[key].IsArray() || object[key].Size() != 3)
@@ -203,6 +254,51 @@ namespace ScenePersistence
 			return true;
 		}
 
+		[[nodiscard]] std::string StringMemberOrDefault(const rapidjson::Value& object, const char* key, std::string_view fallback);
+		[[nodiscard]] float FloatMemberOrDefault(const rapidjson::Value& object, const char* key, float fallback);
+		[[nodiscard]] bool BoolMemberOrDefault(const rapidjson::Value& object, const char* key, bool fallback);
+
+		[[nodiscard]] Asset::StaticMeshMaterial ReadMaterial(const rapidjson::Value& materialObject, const Projects::ProjectDescriptor& project)
+		{
+			Asset::StaticMeshMaterial material;
+			material.Name = StringMemberOrDefault(materialObject, "name", "");
+			material.ShadingModel = Asset::MaterialShadingModelFromName(StringMemberOrDefault(materialObject, "shadingModel", "Phong"));
+			static_cast<void>(ReadFloat4(materialObject, "baseColor", material.DiffuseColor));
+			material.ImportedDiffuseTint = material.DiffuseColor;
+			static_cast<void>(ReadFloat4(materialObject, "importedDiffuseTint", material.ImportedDiffuseTint));
+			static_cast<void>(ReadFloat3(materialObject, "specularColor", material.SpecularColor));
+			static_cast<void>(ReadFloat3(materialObject, "emissiveColor", material.EmissiveColor));
+			material.MetallicFactor = FloatMemberOrDefault(materialObject, "metallic", material.MetallicFactor);
+			material.RoughnessFactor = FloatMemberOrDefault(materialObject, "roughness", material.RoughnessFactor);
+			material.Shininess = FloatMemberOrDefault(materialObject, "shininess", material.Shininess);
+			material.Opacity = FloatMemberOrDefault(materialObject, "opacity", material.Opacity);
+			material.UseVertexColor = BoolMemberOrDefault(materialObject, "useVertexColor", material.UseVertexColor);
+			material.NormalYFlip = BoolMemberOrDefault(materialObject, "normalYFlip", material.NormalYFlip);
+
+			if (materialObject.HasMember("textures") && materialObject["textures"].IsObject())
+			{
+				const auto& texturesObject = materialObject["textures"];
+				for (auto textureIt = texturesObject.MemberBegin(); textureIt != texturesObject.MemberEnd(); ++textureIt)
+				{
+					if (!textureIt->name.IsString() || !textureIt->value.IsString())
+					{
+						continue;
+					}
+
+					const Asset::MaterialTextureSlot slot = Asset::MaterialTextureSlotFromKey(textureIt->name.GetString());
+					if (slot == Asset::MaterialTextureSlot::Count)
+					{
+						continue;
+					}
+
+					const std::filesystem::path resolvedPath = ResolveStoredAssetPath(textureIt->value.GetString(), project);
+					Asset::SetMaterialTexturePath(material, slot, resolvedPath, true);
+				}
+			}
+
+			return material;
+		}
+
 		[[nodiscard]] std::string StringMemberOrDefault(const rapidjson::Value& object, const char* key, std::string_view fallback)
 		{
 			if (!object.HasMember(key) || !object[key].IsString())
@@ -242,10 +338,13 @@ namespace ScenePersistence
 
 	bool ScenePersistenceService::SaveScene(
 		const Scene& scene,
-		const SceneRenderState& renderState,
-		const Projects::ProjectDescriptor& project,
-		const std::filesystem::path& scenePath,
-		std::string& errorMessage)
+			const SceneRenderState& renderState,
+			const Projects::ProjectDescriptor& project,
+			const std::filesystem::path& scenePath,
+			const DirectX::XMFLOAT3& ambientColor,
+			float ambientIntensity,
+			float exposure,
+			std::string& errorMessage)
 	{
 		(void)renderState;
 
@@ -257,6 +356,14 @@ namespace ScenePersistence
 		writer.Uint(kSceneFileVersion);
 		writer.Key("name");
 		writer.String(scenePath.stem().string().c_str());
+		writer.Key("lighting");
+		writer.StartObject();
+		WriteFloat3(writer, "ambientColor", ambientColor);
+		writer.Key("ambientIntensity");
+		writer.Double(std::clamp(ambientIntensity, 0.0f, 2.0f));
+		writer.Key("exposure");
+		writer.Double(std::clamp(exposure, 0.05f, 8.0f));
+		writer.EndObject();
 		writer.Key("entities");
 		writer.StartArray();
 
@@ -292,6 +399,16 @@ namespace ScenePersistence
 					const std::string primitiveName(Asset::PrimitiveMeshKindToString(mesh->Asset->PrimitiveKind));
 					writer.Key("primitive");
 					writer.String(primitiveName.c_str());
+				}
+				if (mesh->Asset && !mesh->Asset->Materials.empty())
+				{
+					writer.Key("materials");
+					writer.StartArray();
+					for (const Asset::StaticMeshMaterial& material : mesh->Asset->Materials)
+					{
+						WriteMaterial(writer, material, project);
+					}
+					writer.EndArray();
 				}
 				writer.EndObject();
 			}
@@ -330,6 +447,14 @@ namespace ScenePersistence
 				writer.Double(light->SpotAngle);
 				writer.Key("emitsLight");
 				writer.Bool(light->Enabled);
+				writer.Key("castShadows");
+				writer.Bool(light->CastShadows);
+				writer.Key("shadowBias");
+				writer.Double(light->ShadowBias);
+				writer.Key("shadowNormalBias");
+				writer.Double(light->ShadowNormalBias);
+				writer.Key("shadowStrength");
+				writer.Double(light->ShadowStrength);
 				writer.EndObject();
 			}
 
@@ -439,6 +564,22 @@ namespace ScenePersistence
 		}
 
 		result.Name = StringMemberOrDefault(document, "name", scenePath.stem().string());
+		if (document.HasMember("lighting") && document["lighting"].IsObject())
+		{
+			const auto& lightingObject = document["lighting"];
+			static_cast<void>(ReadFloat3(lightingObject, "ambientColor", result.AmbientColor));
+			result.AmbientColor.x = std::clamp(result.AmbientColor.x, 0.0f, 4.0f);
+			result.AmbientColor.y = std::clamp(result.AmbientColor.y, 0.0f, 4.0f);
+			result.AmbientColor.z = std::clamp(result.AmbientColor.z, 0.0f, 4.0f);
+			result.AmbientIntensity = std::clamp(
+				FloatMemberOrDefault(lightingObject, "ambientIntensity", result.AmbientIntensity),
+				0.0f,
+				2.0f);
+			result.Exposure = std::clamp(
+				FloatMemberOrDefault(lightingObject, "exposure", result.Exposure),
+				0.05f,
+				8.0f);
+		}
 		if (!document.HasMember("entities") || !document["entities"].IsArray())
 		{
 			result.Success = true;
@@ -469,6 +610,17 @@ namespace ScenePersistence
 				{
 					entity.MeshAssetPath = ResolveStoredAssetPath(std::filesystem::path(assetPath), project);
 				}
+
+				if (meshObject.HasMember("materials") && meshObject["materials"].IsArray())
+				{
+					for (const auto& materialObject : meshObject["materials"].GetArray())
+					{
+						if (materialObject.IsObject())
+						{
+							entity.MaterialOverrides.push_back(ReadMaterial(materialObject, project));
+						}
+					}
+				}
 			}
 
 			if (entityObject.HasMember("camera") && entityObject["camera"].IsObject())
@@ -496,6 +648,10 @@ namespace ScenePersistence
 					lightObject,
 					"emitsLight",
 					BoolMemberOrDefault(lightObject, "enabled", entity.Light.Enabled));
+				entity.Light.CastShadows = BoolMemberOrDefault(lightObject, "castShadows", entity.Light.CastShadows);
+				entity.Light.ShadowBias = FloatMemberOrDefault(lightObject, "shadowBias", entity.Light.ShadowBias);
+				entity.Light.ShadowNormalBias = FloatMemberOrDefault(lightObject, "shadowNormalBias", entity.Light.ShadowNormalBias);
+				entity.Light.ShadowStrength = FloatMemberOrDefault(lightObject, "shadowStrength", entity.Light.ShadowStrength);
 			}
 
 			if (entityObject.HasMember("animator") && entityObject["animator"].IsObject())

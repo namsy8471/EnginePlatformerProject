@@ -80,6 +80,27 @@ namespace Samples::Benchmark
 			return stats;
 		}
 
+		[[nodiscard]] BenchmarkStats TickEcsStore(EcsObjectStore& store, std::vector<BenchmarkRenderInstance>& renderInstances, float deltaTime, Jobs::JobSystem* jobSystem)
+		{
+			const auto frameBegin = Clock::now();
+
+			const auto updateBegin = frameBegin;
+			store.UpdateSimulation(deltaTime, jobSystem);
+			const auto updateEnd = Clock::now();
+
+			const auto renderBegin = updateEnd;
+			const uint32_t visibleCount = store.CollectRenderInstances(renderInstances, jobSystem);
+			const auto renderEnd = Clock::now();
+
+			BenchmarkStats stats;
+			stats.UpdateMs = ToMilliseconds(updateBegin, updateEnd);
+			stats.RenderSubmitMs = ToMilliseconds(renderBegin, renderEnd);
+			stats.FrameMs = ToMilliseconds(frameBegin, renderEnd);
+			stats.Fps = stats.FrameMs > 0.0 ? 1000.0 / stats.FrameMs : 0.0;
+			stats.VisibleObjectCount = visibleCount;
+			return stats;
+		}
+
 		void Accumulate(BenchmarkStats& target, const BenchmarkStats& source) noexcept
 		{
 			target.UpdateMs += source.UpdateMs;
@@ -248,7 +269,7 @@ namespace Samples::Benchmark
 		RebuildStores();
 	}
 
-	void BenchmarkRunner::Update(float deltaTime)
+	void BenchmarkRunner::Update(float deltaTime, Jobs::JobSystem* jobSystem)
 	{
 		if (!m_IsConfigured)
 		{
@@ -261,7 +282,7 @@ namespace Samples::Benchmark
 		}
 		else
 		{
-			m_LastStats = TickStore(m_EcsStore, m_RenderInstances, deltaTime);
+			m_LastStats = TickEcsStore(m_EcsStore, m_RenderInstances, deltaTime, jobSystem);
 		}
 	}
 
