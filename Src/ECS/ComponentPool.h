@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ECS/Entity.h"
+#include "Memory/StdAllocator.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -132,17 +133,17 @@ namespace ECS
 			return m_Components.size();
 		}
 
-		[[nodiscard]] const std::vector<Entity>& Entities() const noexcept
+		[[nodiscard]] const Memory::Vector<Entity, Memory::MemoryTag::ECS>& Entities() const noexcept
 		{
 			return m_Entities;
 		}
 
-		[[nodiscard]] std::vector<ComponentType>& Components() noexcept
+		[[nodiscard]] Memory::Vector<ComponentType, Memory::MemoryTag::ECS>& Components() noexcept
 		{
 			return m_Components;
 		}
 
-		[[nodiscard]] const std::vector<ComponentType>& Components() const noexcept
+		[[nodiscard]] const Memory::Vector<ComponentType, Memory::MemoryTag::ECS>& Components() const noexcept
 		{
 			return m_Components;
 		}
@@ -158,8 +159,8 @@ namespace ECS
 			}
 		}
 
-		std::vector<ComponentType> m_Components;
-		std::vector<Entity> m_Entities;
-		std::vector<size_t> m_Sparse;
+		Memory::Vector<ComponentType, Memory::MemoryTag::ECS> m_Components;
+		Memory::Vector<Entity, Memory::MemoryTag::ECS> m_Entities;
+		Memory::Vector<size_t, Memory::MemoryTag::ECS> m_Sparse;
 	};
 }

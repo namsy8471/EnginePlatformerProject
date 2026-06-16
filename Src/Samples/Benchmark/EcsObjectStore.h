@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Memory/StdAllocator.h"
 #include "Samples/Benchmark/BenchmarkComponents.h"
 
 #include <span>
@@ -25,11 +26,11 @@ namespace Samples::Benchmark
 
 		struct Chunk
 		{
-			std::vector<EcsTransformComponent> Transforms;
-			std::vector<VelocityComponent> Velocities;
-			std::vector<BoundsComponent> Bounds;
-			std::vector<RenderableComponent> Renderables;
-			std::vector<SpinComponent> Spins;
+			Memory::Vector<EcsTransformComponent, Memory::MemoryTag::ECS> Transforms;
+			Memory::Vector<VelocityComponent, Memory::MemoryTag::ECS> Velocities;
+			Memory::Vector<BoundsComponent, Memory::MemoryTag::ECS> Bounds;
+			Memory::Vector<RenderableComponent, Memory::MemoryTag::ECS> Renderables;
+			Memory::Vector<SpinComponent, Memory::MemoryTag::ECS> Spins;
 
 			void Reserve(size_t capacity);
 			void Push(
@@ -45,7 +46,7 @@ namespace Samples::Benchmark
 
 		[[nodiscard]] Chunk& AddChunk();
 
-		std::vector<Chunk> m_Chunks;
+		Memory::Vector<Chunk, Memory::MemoryTag::ECS> m_Chunks;
 		size_t m_Size = 0;
 	};
 }

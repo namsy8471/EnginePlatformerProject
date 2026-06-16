@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Memory/StdAllocator.h"
 #include "Scene/SceneTypes.h"
 
 #include <memory>
@@ -13,7 +14,7 @@ class SceneComponentStore
 {
 public:
 	template <typename Component>
-	using ComponentMap = std::unordered_map<EntityId, Component>;
+	using ComponentMap = Memory::UnorderedMap<EntityId, Component, Memory::MemoryTag::Scene>;
 
 	template <typename Component>
 	[[nodiscard]] Component& AddComponent(EntityId entityId, Component component)
@@ -140,7 +141,7 @@ private:
 	struct ComponentPool final : IComponentPool
 	{
 		ComponentMap<Component> Components;
-		std::unordered_set<EntityId> DisabledEntities;
+		Memory::UnorderedSet<EntityId, Memory::MemoryTag::Scene> DisabledEntities;
 
 		bool Remove(EntityId entityId) override
 		{
@@ -201,5 +202,5 @@ private:
 			: nullptr;
 	}
 
-	std::unordered_map<std::type_index, std::unique_ptr<IComponentPool>> m_Pools;
+	Memory::UnorderedMap<std::type_index, std::unique_ptr<IComponentPool>, Memory::MemoryTag::Scene> m_Pools;
 };

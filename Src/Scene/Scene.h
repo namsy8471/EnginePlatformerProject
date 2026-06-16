@@ -635,17 +635,17 @@ public:
 		m_SelectedEntity = entityId;
 	}
 
-	[[nodiscard]] std::unordered_map<EntityId, TransformComponent>& GetTransforms()
+	[[nodiscard]] SceneComponentStore::ComponentMap<TransformComponent>& GetTransforms()
 	{
 		return m_Components.GetComponents<TransformComponent>();
 	}
 
-	[[nodiscard]] std::unordered_map<EntityId, BoundsComponent>& GetBounds()
+	[[nodiscard]] SceneComponentStore::ComponentMap<BoundsComponent>& GetBounds()
 	{
 		return m_Components.GetComponents<BoundsComponent>();
 	}
 
-	[[nodiscard]] const std::unordered_map<EntityId, BoundsComponent>& GetBounds() const noexcept
+	[[nodiscard]] const SceneComponentStore::ComponentMap<BoundsComponent>& GetBounds() const noexcept
 	{
 		return m_Components.GetComponents<BoundsComponent>();
 	}

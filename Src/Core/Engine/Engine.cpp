@@ -2,6 +2,7 @@
 #include "Animation/AnimationSystem.h"
 #include "Assets/PrimitiveMeshFactory.h"
 #include "Input/InputSystem.h"
+#include "Memory/MemorySystem.h"
 #include "Scene/PickingSystem.h"
 #include "App/Win32/Resource.h"
 #include "Rendering/Resources/MaterialTextureSystem.h"
@@ -2057,6 +2058,7 @@ LRESULT Engine::MsgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 void Engine::Update(float deltaTime)
 {
+	Memory::BeginFrame();
 	m_LastDeltaTime = deltaTime;
 	ProcessPendingGraphicsApiSwitch();
 
@@ -2146,6 +2148,7 @@ void Engine::Render()
 	m_Graphics.Device->MoveToNextFrame();
 
 	UpdateWindowTitleWithFps();
+	Memory::EndFrame();
 }
 
 void Engine::OnResize()
@@ -3647,6 +3650,7 @@ void Engine::BeginEditorFrame()
 		.CurrentScenePath = m_CurrentScenePath,
 		.ProjectSnapshot = m_AssetFileSystem.GetSnapshot(),
 		.AssetLogLines = &m_AssetLogLines,
+		.MemoryStats = Memory::GetStats(),
 		.ProjectRefreshInProgress = m_AssetFileSystem.IsRefreshInProgress(),
 		.IsSceneDirty = m_SceneDirty,
 		.CanEditProjectScene = m_Project.has_value() && m_SampleMode == Samples::Benchmark::SampleMode::ProjectScene,

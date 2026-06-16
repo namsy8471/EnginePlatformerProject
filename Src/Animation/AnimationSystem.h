@@ -1,11 +1,13 @@
 #pragma once
 
+#include "Memory/StdAllocator.h"
 #include "Scene/Scene.h"
 
 #include <DirectXMath.h>
 
 #include <algorithm>
 #include <cmath>
+#include <span>
 #include <vector>
 
 namespace AnimationSystem
@@ -15,7 +17,7 @@ namespace AnimationSystem
 		return DirectX::XMLoadFloat4x4(&matrix);
 	}
 
-	[[nodiscard]] inline DirectX::XMVECTOR InterpolateVectorKey(const std::vector<Asset::AnimationVectorKey>& keys, double timeTicks)
+	[[nodiscard]] inline DirectX::XMVECTOR InterpolateVectorKey(std::span<const Asset::AnimationVectorKey> keys, double timeTicks)
 	{
 		if (keys.empty())
 		{
@@ -43,7 +45,7 @@ namespace AnimationSystem
 		return DirectX::XMLoadFloat3(&keys.back().Value);
 	}
 
-	[[nodiscard]] inline DirectX::XMVECTOR InterpolateQuaternionKey(const std::vector<Asset::AnimationQuaternionKey>& keys, double timeTicks)
+	[[nodiscard]] inline DirectX::XMVECTOR InterpolateQuaternionKey(std::span<const Asset::AnimationQuaternionKey> keys, double timeTicks)
 	{
 		if (keys.empty())
 		{
@@ -101,7 +103,12 @@ namespace AnimationSystem
 		return InterpolateChannelTransform(channel, node.LocalBindPose, timeTicks);
 	}
 
-	inline void ComputeGlobalNodeTransforms(const Asset::StaticMeshAsset& meshAsset, const std::vector<Math::Transform>& localTransforms, uint32_t nodeIndex, const Math::Transform& parentTransform, std::vector<Math::Transform>& globalTransforms)
+	inline void ComputeGlobalNodeTransforms(
+		const Asset::StaticMeshAsset& meshAsset,
+		std::span<const Math::Transform> localTransforms,
+		uint32_t nodeIndex,
+		const Math::Transform& parentTransform,
+		std::span<Math::Transform> globalTransforms)
 	{
 		globalTransforms[nodeIndex] = localTransforms[nodeIndex] * parentTransform;
 		for (uint32_t childIndex : meshAsset.Nodes[nodeIndex].Children)
@@ -151,20 +158,20 @@ namespace AnimationSystem
 
 		const double animationTimeTicks = (std::min)(static_cast<double>(animator.TimeSeconds) * ticksPerSecond, clip.DurationTicks);
 
-		std::vector<Math::Transform> localTransforms;
+		Memory::Vector<Math::Transform, Memory::MemoryTag::Frame> localTransforms;
 		localTransforms.reserve(meshAsset->Nodes.size());
 		for (const auto& node : meshAsset->Nodes)
 		{
 			localTransforms.push_back(BuildAnimatedLocalTransform(node, clip, animationTimeTicks));
 		}
 
-		std::vector<Math::Transform> globalTransforms(meshAsset->Nodes.size(), Math::Transform::Identity());
+		Memory::Vector<Math::Transform, Memory::MemoryTag::Frame> globalTransforms(meshAsset->Nodes.size(), Math::Transform::Identity());
 		if (!meshAsset->Nodes.empty())
 		{
 			ComputeGlobalNodeTransforms(*meshAsset, localTransforms, 0, Math::Transform::Identity(), globalTransforms);
 		}
 
-		std::vector<DirectX::XMMATRIX> boneMatrices(meshAsset->Bones.size(), DirectX::XMMatrixIdentity());
+		Memory::Vector<DirectX::XMMATRIX, Memory::MemoryTag::Frame> boneMatrices(meshAsset->Bones.size(), DirectX::XMMatrixIdentity());
 		const DirectX::XMMATRIX rootInverseTransform = LoadMatrix(meshAsset->RootInverseTransform);
 		for (size_t boneIndex = 0; boneIndex < meshAsset->Bones.size(); ++boneIndex)
 		{

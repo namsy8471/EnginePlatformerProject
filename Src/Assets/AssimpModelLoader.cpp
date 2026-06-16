@@ -366,7 +366,7 @@ namespace Asset
 
 		void StoreEmbeddedDiffuseTexture(StaticMeshMaterial& material, LoadedTextureImage&& image)
 		{
-			material.EmbeddedDiffuseTexturePixels = std::move(image.Pixels);
+			material.EmbeddedDiffuseTexturePixels.assign(image.Pixels.begin(), image.Pixels.end());
 			material.EmbeddedDiffuseTextureWidth = image.Width;
 			material.EmbeddedDiffuseTextureHeight = image.Height;
 		}

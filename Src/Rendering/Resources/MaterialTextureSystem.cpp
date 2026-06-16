@@ -170,7 +170,7 @@ namespace Rendering
 			{
 				materialTexture.Width = material.EmbeddedDiffuseTextureWidth;
 				materialTexture.Height = material.EmbeddedDiffuseTextureHeight;
-				materialTexture.Pixels = material.EmbeddedDiffuseTexturePixels;
+				materialTexture.Pixels.assign(material.EmbeddedDiffuseTexturePixels.begin(), material.EmbeddedDiffuseTexturePixels.end());
 				if (materialTransparency && materialIndex < materialTransparency->size())
 				{
 					(*materialTransparency)[materialIndex] = HasTransparency(materialTexture);

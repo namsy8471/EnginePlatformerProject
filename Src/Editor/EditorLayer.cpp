@@ -1627,6 +1627,74 @@ namespace Editor
 		{
 			ImGui::Text("Selected Asset: %s", m_SelectedAssetPath.filename().string().c_str());
 		}
+		if (ImGui::CollapsingHeader("Memory"))
+		{
+			const auto& memoryStats = context.MemoryStats;
+			ImGui::Text(
+				"Frame Arena: %.2f / %.2f MB (Peak %.2f MB)",
+				static_cast<double>(memoryStats.FrameArenaCurrent) / (1024.0 * 1024.0),
+				static_cast<double>(memoryStats.FrameArenaCapacity) / (1024.0 * 1024.0),
+				static_cast<double>(memoryStats.FrameArenaPeak) / (1024.0 * 1024.0));
+			ImGui::Text(
+				"Small Pool: %s <= %zu B, %.2f KB live (Peak %.2f KB)",
+				memoryStats.SmallPoolRoutingEnabled ? "On" : "Off",
+				memoryStats.SmallPoolMaxBlockSize,
+				static_cast<double>(memoryStats.SmallPoolCurrentBytes) / 1024.0,
+				static_cast<double>(memoryStats.SmallPoolPeakBytes) / 1024.0);
+			ImGui::Text("Live tracked allocations: %zu", memoryStats.LiveAllocationCount);
+			if (ImGui::BeginTable("MemoryStatsTable", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+			{
+				ImGui::TableSetupColumn("Tag");
+				ImGui::TableSetupColumn("Current");
+				ImGui::TableSetupColumn("Peak");
+				ImGui::TableSetupColumn("Allocs");
+				ImGui::TableSetupColumn("Frees");
+				ImGui::TableHeadersRow();
+				for (size_t tagIndex = 0; tagIndex < Memory::kMemoryTagCount; ++tagIndex)
+				{
+					const auto tag = static_cast<Memory::MemoryTag>(tagIndex);
+					const Memory::MemoryStats& stats = memoryStats.Tags[tagIndex];
+					ImGui::TableNextRow();
+					ImGui::TableSetColumnIndex(0);
+					ImGui::TextUnformatted(Memory::ToString(tag).data());
+					ImGui::TableSetColumnIndex(1);
+					ImGui::Text("%.2f MB", static_cast<double>(stats.CurrentBytes) / (1024.0 * 1024.0));
+					ImGui::TableSetColumnIndex(2);
+					ImGui::Text("%.2f MB", static_cast<double>(stats.PeakBytes) / (1024.0 * 1024.0));
+					ImGui::TableSetColumnIndex(3);
+					ImGui::Text("%zu", stats.AllocationCount);
+					ImGui::TableSetColumnIndex(4);
+					ImGui::Text("%zu", stats.FreeCount);
+				}
+				ImGui::EndTable();
+			}
+			if (memoryStats.BenchmarkRowCount > 0 && ImGui::TreeNode("Startup Allocator Benchmark"))
+			{
+				if (ImGui::BeginTable("MemoryBenchmarkTable", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+				{
+					ImGui::TableSetupColumn("Case");
+					ImGui::TableSetupColumn("ns/op");
+					ImGui::TableSetupColumn("Speedup");
+					ImGui::TableSetupColumn("Iterations");
+					ImGui::TableHeadersRow();
+					for (size_t rowIndex = 0; rowIndex < memoryStats.BenchmarkRowCount; ++rowIndex)
+					{
+						const Memory::MemoryBenchmarkRow& row = memoryStats.BenchmarkRows[rowIndex];
+						ImGui::TableNextRow();
+						ImGui::TableSetColumnIndex(0);
+						ImGui::TextUnformatted(row.Name.data());
+						ImGui::TableSetColumnIndex(1);
+						ImGui::Text("%.2f", row.NanosecondsPerOperation);
+						ImGui::TableSetColumnIndex(2);
+						ImGui::Text("%.2fx", row.SpeedupVsBaseline);
+						ImGui::TableSetColumnIndex(3);
+						ImGui::Text("%zu", row.Iterations);
+					}
+					ImGui::EndTable();
+				}
+				ImGui::TreePop();
+			}
+		}
 		if (context.AssetLogLines && !context.AssetLogLines->empty())
 		{
 			ImGui::Separator();

@@ -1,6 +1,7 @@
 // main.cpp : 애플리케이션에 대한 진입점을 정의합니다.
 
 #include "Core/Engine/Engine.h"
+#include "Memory/MemorySystem.h"
 
 #include <shellapi.h>
 
@@ -59,14 +60,24 @@ int APIENTRY wWinMain(
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 #endif
 
-	Engine engine(hInstance, ParseStartupOptions());
+	Memory::Initialize();
 
-	if (!engine.Init())
+	int result = 0;
 	{
-		return 0;
+		Engine engine(hInstance, ParseStartupOptions());
+
+		if (!engine.Init())
+		{
+			result = 0;
+		}
+		else
+		{
+			result = engine.Run();
+		}
 	}
 
-	return engine.Run();
+	Memory::Shutdown();
+	return result;
 }
 
 

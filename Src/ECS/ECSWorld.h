@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ECS/ComponentPool.h"
+#include "Memory/StdAllocator.h"
 
 #include <cstdint>
 #include <memory>
@@ -143,7 +144,7 @@ namespace ECS
 			}
 
 			auto* firstPool = std::get<0>(componentPools);
-			const std::vector<Entity>& entities = firstPool->Entities();
+			const auto& entities = firstPool->Entities();
 			for (Entity entity : entities)
 			{
 				if (!IsAlive(entity))
@@ -214,9 +215,9 @@ namespace ECS
 			return *static_cast<ComponentPool<ComponentType>*>(poolIt->second.get());
 		}
 
-		std::vector<uint32_t> m_Generations;
-		std::vector<bool> m_Alive;
-		std::vector<uint32_t> m_FreeList;
-		std::unordered_map<std::type_index, std::unique_ptr<IComponentPool>> m_Pools;
+		Memory::Vector<uint32_t, Memory::MemoryTag::ECS> m_Generations;
+		Memory::Vector<bool, Memory::MemoryTag::ECS> m_Alive;
+		Memory::Vector<uint32_t, Memory::MemoryTag::ECS> m_FreeList;
+		Memory::UnorderedMap<std::type_index, std::unique_ptr<IComponentPool>, Memory::MemoryTag::ECS> m_Pools;
 	};
 }

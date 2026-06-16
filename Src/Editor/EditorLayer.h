@@ -2,6 +2,7 @@
 
 #include "Assets/AssetFileSystem.h"
 #include "Math/Camera.h"
+#include "Memory/MemoryTypes.h"
 #include "Rendering/RHI/GraphicsCommon.h"
 #include "Rendering/RenderMode.h"
 #include "Samples/Benchmark/BenchmarkRunner.h"
@@ -72,6 +73,7 @@ namespace Editor
 		std::filesystem::path CurrentScenePath;
 		std::shared_ptr<const Asset::AssetFileSnapshot> ProjectSnapshot;
 		const std::vector<std::string>* AssetLogLines = nullptr;
+		Memory::MemorySystemStats MemoryStats;
 		bool ProjectRefreshInProgress = false;
 		bool IsSceneDirty = false;
 		bool CanEditProjectScene = false;

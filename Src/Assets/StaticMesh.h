@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Math/Transform.h"
+#include "Memory/StdAllocator.h"
 
 #include <DirectXMath.h>
 
@@ -49,7 +50,7 @@ namespace Asset
 		std::string Name;
 		DirectX::XMFLOAT4 DiffuseColor = { 1.0f, 1.0f, 1.0f, 1.0f };
 		std::filesystem::path DiffuseTexturePath;
-		std::vector<unsigned char> EmbeddedDiffuseTexturePixels;
+		Memory::Vector<unsigned char, Memory::MemoryTag::Asset> EmbeddedDiffuseTexturePixels;
 		int EmbeddedDiffuseTextureWidth = 0;
 		int EmbeddedDiffuseTextureHeight = 0;
 		std::filesystem::path NormalTexturePath;
@@ -71,9 +72,9 @@ namespace Asset
 	struct AnimationChannel
 	{
 		std::string NodeName;
-		std::vector<AnimationVectorKey> PositionKeys;
-		std::vector<AnimationQuaternionKey> RotationKeys;
-		std::vector<AnimationVectorKey> ScalingKeys;
+		Memory::Vector<AnimationVectorKey, Memory::MemoryTag::Asset> PositionKeys;
+		Memory::Vector<AnimationQuaternionKey, Memory::MemoryTag::Asset> RotationKeys;
+		Memory::Vector<AnimationVectorKey, Memory::MemoryTag::Asset> ScalingKeys;
 	};
 
 	struct AnimationClip
@@ -81,8 +82,8 @@ namespace Asset
 		std::string Name;
 		double DurationTicks = 0.0;
 		double TicksPerSecond = 25.0;
-		std::vector<AnimationChannel> Channels;
-		std::unordered_map<std::string, uint32_t> ChannelIndices;
+		Memory::Vector<AnimationChannel, Memory::MemoryTag::Asset> Channels;
+		Memory::UnorderedMap<std::string, uint32_t, Memory::MemoryTag::Asset> ChannelIndices;
 	};
 
 	struct SkeletonNode
@@ -95,7 +96,7 @@ namespace Asset
 			0.0f, 1.0f, 0.0f, 0.0f,
 			0.0f, 0.0f, 1.0f, 0.0f,
 			0.0f, 0.0f, 0.0f, 1.0f };
-		std::vector<uint32_t> Children;
+		Memory::Vector<uint32_t, Memory::MemoryTag::Asset> Children;
 	};
 
 	struct SkeletonBone
@@ -121,15 +122,15 @@ namespace Asset
 			0.0f, 1.0f, 0.0f, 0.0f,
 			0.0f, 0.0f, 1.0f, 0.0f,
 			0.0f, 0.0f, 0.0f, 1.0f };
-		std::vector<StaticMeshVertex> Vertices;
-		std::vector<StaticMeshVertex> BindPoseVertices;
-		std::vector<uint32_t> Indices;
-		std::vector<StaticMeshSubmesh> Submeshes;
-		std::vector<StaticMeshMaterial> Materials;
-		std::vector<SkeletonNode> Nodes;
-		std::vector<SkeletonBone> Bones;
-		std::vector<AnimationClip> Animations;
-		std::unordered_map<std::string, uint32_t> NodeIndices;
-		std::unordered_map<std::string, uint32_t> BoneIndices;
+		Memory::Vector<StaticMeshVertex, Memory::MemoryTag::Asset> Vertices;
+		Memory::Vector<StaticMeshVertex, Memory::MemoryTag::Asset> BindPoseVertices;
+		Memory::Vector<uint32_t, Memory::MemoryTag::Asset> Indices;
+		Memory::Vector<StaticMeshSubmesh, Memory::MemoryTag::Asset> Submeshes;
+		Memory::Vector<StaticMeshMaterial, Memory::MemoryTag::Asset> Materials;
+		Memory::Vector<SkeletonNode, Memory::MemoryTag::Asset> Nodes;
+		Memory::Vector<SkeletonBone, Memory::MemoryTag::Asset> Bones;
+		Memory::Vector<AnimationClip, Memory::MemoryTag::Asset> Animations;
+		Memory::UnorderedMap<std::string, uint32_t, Memory::MemoryTag::Asset> NodeIndices;
+		Memory::UnorderedMap<std::string, uint32_t, Memory::MemoryTag::Asset> BoneIndices;
 	};
 }
