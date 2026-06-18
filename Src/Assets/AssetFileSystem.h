@@ -28,6 +28,7 @@ namespace Asset
 		std::string Extension;
 		AssetFileKind Kind = AssetFileKind::Other;
 		uintmax_t SizeBytes = 0;
+		uint64_t LastWriteTimeTicks = 0;
 		std::vector<AssetFileEntry> Children;
 	};
 
@@ -64,4 +65,5 @@ namespace Asset
 
 	[[nodiscard]] AssetFileKind ClassifyAssetPath(const std::filesystem::path& path);
 	[[nodiscard]] bool IsModelAssetPath(const std::filesystem::path& path);
+	[[nodiscard]] bool IsSkyboxAssetPath(const std::filesystem::path& path);
 }

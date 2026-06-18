@@ -12,6 +12,7 @@
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -65,6 +66,18 @@ public:
 		if (m_Entities.size() == oldEntityCount)
 		{
 			return false;
+		}
+
+		for (auto& [otherEntityId, hierarchy] : m_Components.GetComponents<SceneHierarchyComponent>())
+		{
+			if (otherEntityId != entityId && hierarchy.Parent == entityId)
+			{
+				if (TransformComponent* transform = GetTransformComponent(otherEntityId))
+				{
+					transform->LocalTransform = transform->WorldTransform;
+				}
+				hierarchy.Parent = InvalidEntityId;
+			}
 		}
 
 		m_Components.RemoveEntity(entityId);
@@ -149,6 +162,176 @@ public:
 		return MoveEntityToIndex(movedEntityId, static_cast<size_t>(std::distance(m_Entities.begin(), targetIt)) + 1);
 	}
 
+	[[nodiscard]] size_t GetEntityIndex(EntityId entityId) const
+	{
+		const auto it = std::ranges::find_if(m_Entities, [entityId](const SceneEntity& entity)
+			{
+				return entity.Id == entityId;
+			});
+		return it == m_Entities.end()
+			? static_cast<size_t>(-1)
+			: static_cast<size_t>(std::distance(m_Entities.begin(), it));
+	}
+
+	[[nodiscard]] EntityId GetParentEntity(EntityId entityId) const
+	{
+		const SceneHierarchyComponent* hierarchy = GetHierarchyComponent(entityId);
+		return hierarchy ? hierarchy->Parent : InvalidEntityId;
+	}
+
+	[[nodiscard]] bool IsDescendantOf(EntityId entityId, EntityId possibleAncestor) const
+	{
+		if (entityId == InvalidEntityId || possibleAncestor == InvalidEntityId)
+		{
+			return false;
+		}
+
+		std::unordered_set<EntityId> visited;
+		EntityId current = GetParentEntity(entityId);
+		while (current != InvalidEntityId)
+		{
+			if (current == possibleAncestor)
+			{
+				return true;
+			}
+			if (!visited.insert(current).second)
+			{
+				return false;
+			}
+			current = GetParentEntity(current);
+		}
+		return false;
+	}
+
+	[[nodiscard]] bool SetParentEntity(EntityId childEntityId, EntityId parentEntityId, bool preserveWorldTransform = true)
+	{
+		if (!ContainsEntity(childEntityId) || childEntityId == parentEntityId)
+		{
+			return false;
+		}
+		if (parentEntityId != InvalidEntityId && !ContainsEntity(parentEntityId))
+		{
+			return false;
+		}
+		if (parentEntityId != InvalidEntityId && IsDescendantOf(parentEntityId, childEntityId))
+		{
+			return false;
+		}
+
+		const EntityId previousParent = GetParentEntity(childEntityId);
+		if (previousParent == parentEntityId)
+		{
+			return false;
+		}
+
+		DirectX::XMMATRIX oldWorldMatrix = DirectX::XMMatrixIdentity();
+		if (const TransformComponent* childTransform = GetTransformComponent(childEntityId))
+		{
+			oldWorldMatrix = childTransform->WorldTransform.ToXmMatrix();
+		}
+
+		SceneHierarchyComponent& hierarchy = EnsureHierarchyComponent(childEntityId);
+		hierarchy.Parent = parentEntityId;
+
+		if (preserveWorldTransform)
+		{
+			if (TransformComponent* childTransform = GetTransformComponent(childEntityId))
+			{
+				DirectX::XMMATRIX parentWorldMatrix = DirectX::XMMatrixIdentity();
+				if (parentEntityId != InvalidEntityId)
+				{
+					if (const TransformComponent* parentTransform = GetTransformComponent(parentEntityId))
+					{
+						parentWorldMatrix = parentTransform->WorldTransform.ToXmMatrix();
+					}
+				}
+				const DirectX::XMMATRIX localMatrix = oldWorldMatrix * DirectX::XMMatrixInverse(nullptr, parentWorldMatrix);
+				childTransform->LocalTransform = Math::Transform::FromMatrix(Math::ToFloat4x4(localMatrix));
+				childTransform->LocalTransform.Rotation = Math::NormalizeQuaternionOrIdentity(childTransform->LocalTransform.Rotation);
+			}
+		}
+
+		UpdateWorldTransforms();
+		return true;
+	}
+
+	[[nodiscard]] std::vector<EntityId> GetChildEntities(EntityId parentEntityId) const
+	{
+		std::vector<EntityId> children;
+		for (const SceneEntity& entity : m_Entities)
+		{
+			if (GetParentEntity(entity.Id) == parentEntityId)
+			{
+				children.push_back(entity.Id);
+			}
+		}
+		return children;
+	}
+
+	[[nodiscard]] std::vector<EntityId> GetRootEntities() const
+	{
+		std::vector<EntityId> roots;
+		for (const SceneEntity& entity : m_Entities)
+		{
+			const EntityId parentEntity = GetParentEntity(entity.Id);
+			if (parentEntity == InvalidEntityId || !ContainsEntity(parentEntity))
+			{
+				roots.push_back(entity.Id);
+			}
+		}
+		return roots;
+	}
+
+	void UpdateWorldTransforms()
+	{
+		std::unordered_set<EntityId> visited;
+		std::unordered_set<EntityId> visiting;
+
+		const auto updateEntity = [this, &visited, &visiting](auto&& self, EntityId entityId, const Math::Transform& parentTransform) -> void
+			{
+				if (!ContainsEntity(entityId) || visited.contains(entityId))
+				{
+					return;
+				}
+				if (!visiting.insert(entityId).second)
+				{
+					if (SceneHierarchyComponent* hierarchy = GetHierarchyComponent(entityId))
+					{
+						hierarchy->Parent = InvalidEntityId;
+					}
+					return;
+				}
+
+				Math::Transform worldTransform = parentTransform;
+				if (TransformComponent* transform = GetTransformComponent(entityId))
+				{
+					transform->UpdateWorld(parentTransform);
+					worldTransform = transform->WorldTransform;
+				}
+
+				for (EntityId childEntityId : GetChildEntities(entityId))
+				{
+					self(self, childEntityId, worldTransform);
+				}
+
+				visiting.erase(entityId);
+				visited.insert(entityId);
+			};
+
+		for (EntityId rootEntityId : GetRootEntities())
+		{
+			updateEntity(updateEntity, rootEntityId, Math::Transform::Identity());
+		}
+
+		for (const SceneEntity& entity : m_Entities)
+		{
+			if (!visited.contains(entity.Id))
+			{
+				updateEntity(updateEntity, entity.Id, Math::Transform::Identity());
+			}
+		}
+	}
+
 	[[nodiscard]] EntityId DuplicateEntity(EntityId sourceEntityId, std::string_view newName, const DirectX::XMFLOAT3& transformOffset)
 	{
 		if (!ContainsEntity(sourceEntityId) || newName.empty())
@@ -165,6 +348,15 @@ public:
 			duplicateTransform.LocalTransform.Translation.y += transformOffset.y;
 			duplicateTransform.LocalTransform.Translation.z += transformOffset.z;
 			duplicateTransform.UpdateWorld();
+		}
+
+		if (const EditorStateComponent* sourceEditorState = GetEditorStateComponent(sourceEntityId))
+		{
+			EnsureEditorStateComponent(duplicateEntityId) = *sourceEditorState;
+		}
+		if (const SceneHierarchyComponent* sourceHierarchy = GetHierarchyComponent(sourceEntityId))
+		{
+			EnsureHierarchyComponent(duplicateEntityId) = *sourceHierarchy;
 		}
 
 		if (const MeshComponent* sourceMesh = GetMeshComponent(sourceEntityId))
@@ -220,6 +412,55 @@ public:
 			SetComponentEnabled<PhysicsMaterialComponent>(duplicateEntityId, IsComponentEnabled<PhysicsMaterialComponent>(sourceEntityId));
 		}
 
+		if (const PrefabInstanceComponent* sourcePrefab = GetPrefabInstanceComponent(sourceEntityId))
+		{
+			EnsurePrefabInstanceComponent(duplicateEntityId) = *sourcePrefab;
+			SetComponentEnabled<PrefabInstanceComponent>(duplicateEntityId, IsComponentEnabled<PrefabInstanceComponent>(sourceEntityId));
+		}
+
+		if (const SceneReferenceComponent* sourceSceneReference = GetSceneReferenceComponent(sourceEntityId))
+		{
+			EnsureSceneReferenceComponent(duplicateEntityId) = *sourceSceneReference;
+			SetComponentEnabled<SceneReferenceComponent>(duplicateEntityId, IsComponentEnabled<SceneReferenceComponent>(sourceEntityId));
+		}
+
+		if (const ScriptComponent* sourceScript = GetScriptComponent(sourceEntityId))
+		{
+			EnsureScriptComponent(duplicateEntityId) = *sourceScript;
+			SetComponentEnabled<ScriptComponent>(duplicateEntityId, IsComponentEnabled<ScriptComponent>(sourceEntityId));
+		}
+
+		if (const Sprite2DComponent* sourceSprite = GetSprite2DComponent(sourceEntityId))
+		{
+			EnsureSprite2DComponent(duplicateEntityId) = *sourceSprite;
+			SetComponentEnabled<Sprite2DComponent>(duplicateEntityId, IsComponentEnabled<Sprite2DComponent>(sourceEntityId));
+		}
+
+		if (const UiElementComponent* sourceUi = GetUiElementComponent(sourceEntityId))
+		{
+			EnsureUiElementComponent(duplicateEntityId) = *sourceUi;
+			SetComponentEnabled<UiElementComponent>(duplicateEntityId, IsComponentEnabled<UiElementComponent>(sourceEntityId));
+		}
+
+		if (const AudioSourceComponent* sourceAudio = GetAudioSourceComponent(sourceEntityId))
+		{
+			EnsureAudioSourceComponent(duplicateEntityId) = *sourceAudio;
+			SetComponentEnabled<AudioSourceComponent>(duplicateEntityId, IsComponentEnabled<AudioSourceComponent>(sourceEntityId));
+		}
+
+		if (const NavigationAgentComponent* sourceNavigation = GetNavigationAgentComponent(sourceEntityId))
+		{
+			EnsureNavigationAgentComponent(duplicateEntityId) = *sourceNavigation;
+			SetComponentEnabled<NavigationAgentComponent>(duplicateEntityId, IsComponentEnabled<NavigationAgentComponent>(sourceEntityId));
+		}
+
+		if (const NetworkIdentityComponent* sourceNetwork = GetNetworkIdentityComponent(sourceEntityId))
+		{
+			EnsureNetworkIdentityComponent(duplicateEntityId) = *sourceNetwork;
+			SetComponentEnabled<NetworkIdentityComponent>(duplicateEntityId, IsComponentEnabled<NetworkIdentityComponent>(sourceEntityId));
+		}
+
+		UpdateWorldTransforms();
 		return duplicateEntityId;
 	}
 
@@ -350,6 +591,78 @@ public:
 		return GetComponent<MeshComponent>(entityId);
 	}
 
+	[[nodiscard]] EditorStateComponent& EnsureEditorStateComponent(EntityId entityId)
+	{
+		return EnsureComponent<EditorStateComponent>(entityId);
+	}
+
+	[[nodiscard]] EditorStateComponent* GetEditorStateComponent(EntityId entityId)
+	{
+		return GetComponent<EditorStateComponent>(entityId);
+	}
+
+	[[nodiscard]] const EditorStateComponent* GetEditorStateComponent(EntityId entityId) const
+	{
+		return GetComponent<EditorStateComponent>(entityId);
+	}
+
+	[[nodiscard]] SceneHierarchyComponent& EnsureHierarchyComponent(EntityId entityId)
+	{
+		return EnsureComponent<SceneHierarchyComponent>(entityId);
+	}
+
+	[[nodiscard]] SceneHierarchyComponent* GetHierarchyComponent(EntityId entityId)
+	{
+		return GetComponent<SceneHierarchyComponent>(entityId);
+	}
+
+	[[nodiscard]] const SceneHierarchyComponent* GetHierarchyComponent(EntityId entityId) const
+	{
+		return GetComponent<SceneHierarchyComponent>(entityId);
+	}
+
+	[[nodiscard]] bool IsEntityVisibleInScene(EntityId entityId) const
+	{
+		const EditorStateComponent* editorState = GetEditorStateComponent(entityId);
+		return !editorState || editorState->VisibleInScene;
+	}
+
+	[[nodiscard]] bool IsEntityPickableInScene(EntityId entityId) const
+	{
+		const EditorStateComponent* editorState = GetEditorStateComponent(entityId);
+		return !editorState || editorState->PickableInScene;
+	}
+
+	bool SetEntityVisibleInScene(EntityId entityId, bool visible)
+	{
+		if (!ContainsEntity(entityId))
+		{
+			return false;
+		}
+		EditorStateComponent& editorState = EnsureEditorStateComponent(entityId);
+		if (editorState.VisibleInScene == visible)
+		{
+			return false;
+		}
+		editorState.VisibleInScene = visible;
+		return true;
+	}
+
+	bool SetEntityPickableInScene(EntityId entityId, bool pickable)
+	{
+		if (!ContainsEntity(entityId))
+		{
+			return false;
+		}
+		EditorStateComponent& editorState = EnsureEditorStateComponent(entityId);
+		if (editorState.PickableInScene == pickable)
+		{
+			return false;
+		}
+		editorState.PickableInScene = pickable;
+		return true;
+	}
+
 	[[nodiscard]] TransformComponent& EnsureTransformComponent(EntityId entityId)
 	{
 		return EnsureComponent<TransformComponent>(entityId);
@@ -393,6 +706,46 @@ public:
 	[[nodiscard]] PhysicsMaterialComponent& EnsurePhysicsMaterialComponent(EntityId entityId)
 	{
 		return EnsureComponent<PhysicsMaterialComponent>(entityId);
+	}
+
+	[[nodiscard]] PrefabInstanceComponent& EnsurePrefabInstanceComponent(EntityId entityId)
+	{
+		return EnsureComponent<PrefabInstanceComponent>(entityId);
+	}
+
+	[[nodiscard]] SceneReferenceComponent& EnsureSceneReferenceComponent(EntityId entityId)
+	{
+		return EnsureComponent<SceneReferenceComponent>(entityId);
+	}
+
+	[[nodiscard]] ScriptComponent& EnsureScriptComponent(EntityId entityId)
+	{
+		return EnsureComponent<ScriptComponent>(entityId);
+	}
+
+	[[nodiscard]] Sprite2DComponent& EnsureSprite2DComponent(EntityId entityId)
+	{
+		return EnsureComponent<Sprite2DComponent>(entityId);
+	}
+
+	[[nodiscard]] UiElementComponent& EnsureUiElementComponent(EntityId entityId)
+	{
+		return EnsureComponent<UiElementComponent>(entityId);
+	}
+
+	[[nodiscard]] AudioSourceComponent& EnsureAudioSourceComponent(EntityId entityId)
+	{
+		return EnsureComponent<AudioSourceComponent>(entityId);
+	}
+
+	[[nodiscard]] NavigationAgentComponent& EnsureNavigationAgentComponent(EntityId entityId)
+	{
+		return EnsureComponent<NavigationAgentComponent>(entityId);
+	}
+
+	[[nodiscard]] NetworkIdentityComponent& EnsureNetworkIdentityComponent(EntityId entityId)
+	{
+		return EnsureComponent<NetworkIdentityComponent>(entityId);
 	}
 
 	[[nodiscard]] const MeshComponent* GetMeshComponent(EntityId entityId) const
@@ -494,6 +847,86 @@ public:
 		return GetComponent<PhysicsMaterialComponent>(entityId);
 	}
 
+	[[nodiscard]] PrefabInstanceComponent* GetPrefabInstanceComponent(EntityId entityId)
+	{
+		return GetComponent<PrefabInstanceComponent>(entityId);
+	}
+
+	[[nodiscard]] const PrefabInstanceComponent* GetPrefabInstanceComponent(EntityId entityId) const
+	{
+		return GetComponent<PrefabInstanceComponent>(entityId);
+	}
+
+	[[nodiscard]] SceneReferenceComponent* GetSceneReferenceComponent(EntityId entityId)
+	{
+		return GetComponent<SceneReferenceComponent>(entityId);
+	}
+
+	[[nodiscard]] const SceneReferenceComponent* GetSceneReferenceComponent(EntityId entityId) const
+	{
+		return GetComponent<SceneReferenceComponent>(entityId);
+	}
+
+	[[nodiscard]] ScriptComponent* GetScriptComponent(EntityId entityId)
+	{
+		return GetComponent<ScriptComponent>(entityId);
+	}
+
+	[[nodiscard]] const ScriptComponent* GetScriptComponent(EntityId entityId) const
+	{
+		return GetComponent<ScriptComponent>(entityId);
+	}
+
+	[[nodiscard]] Sprite2DComponent* GetSprite2DComponent(EntityId entityId)
+	{
+		return GetComponent<Sprite2DComponent>(entityId);
+	}
+
+	[[nodiscard]] const Sprite2DComponent* GetSprite2DComponent(EntityId entityId) const
+	{
+		return GetComponent<Sprite2DComponent>(entityId);
+	}
+
+	[[nodiscard]] UiElementComponent* GetUiElementComponent(EntityId entityId)
+	{
+		return GetComponent<UiElementComponent>(entityId);
+	}
+
+	[[nodiscard]] const UiElementComponent* GetUiElementComponent(EntityId entityId) const
+	{
+		return GetComponent<UiElementComponent>(entityId);
+	}
+
+	[[nodiscard]] AudioSourceComponent* GetAudioSourceComponent(EntityId entityId)
+	{
+		return GetComponent<AudioSourceComponent>(entityId);
+	}
+
+	[[nodiscard]] const AudioSourceComponent* GetAudioSourceComponent(EntityId entityId) const
+	{
+		return GetComponent<AudioSourceComponent>(entityId);
+	}
+
+	[[nodiscard]] NavigationAgentComponent* GetNavigationAgentComponent(EntityId entityId)
+	{
+		return GetComponent<NavigationAgentComponent>(entityId);
+	}
+
+	[[nodiscard]] const NavigationAgentComponent* GetNavigationAgentComponent(EntityId entityId) const
+	{
+		return GetComponent<NavigationAgentComponent>(entityId);
+	}
+
+	[[nodiscard]] NetworkIdentityComponent* GetNetworkIdentityComponent(EntityId entityId)
+	{
+		return GetComponent<NetworkIdentityComponent>(entityId);
+	}
+
+	[[nodiscard]] const NetworkIdentityComponent* GetNetworkIdentityComponent(EntityId entityId) const
+	{
+		return GetComponent<NetworkIdentityComponent>(entityId);
+	}
+
 	bool RemoveRigidBodyComponent(EntityId entityId)
 	{
 		return RemoveComponent<RigidBodyComponent>(entityId);
@@ -527,6 +960,46 @@ public:
 	bool RemovePhysicsMaterialComponent(EntityId entityId)
 	{
 		return RemoveComponent<PhysicsMaterialComponent>(entityId);
+	}
+
+	bool RemovePrefabInstanceComponent(EntityId entityId)
+	{
+		return RemoveComponent<PrefabInstanceComponent>(entityId);
+	}
+
+	bool RemoveSceneReferenceComponent(EntityId entityId)
+	{
+		return RemoveComponent<SceneReferenceComponent>(entityId);
+	}
+
+	bool RemoveScriptComponent(EntityId entityId)
+	{
+		return RemoveComponent<ScriptComponent>(entityId);
+	}
+
+	bool RemoveSprite2DComponent(EntityId entityId)
+	{
+		return RemoveComponent<Sprite2DComponent>(entityId);
+	}
+
+	bool RemoveUiElementComponent(EntityId entityId)
+	{
+		return RemoveComponent<UiElementComponent>(entityId);
+	}
+
+	bool RemoveAudioSourceComponent(EntityId entityId)
+	{
+		return RemoveComponent<AudioSourceComponent>(entityId);
+	}
+
+	bool RemoveNavigationAgentComponent(EntityId entityId)
+	{
+		return RemoveComponent<NavigationAgentComponent>(entityId);
+	}
+
+	bool RemoveNetworkIdentityComponent(EntityId entityId)
+	{
+		return RemoveComponent<NetworkIdentityComponent>(entityId);
 	}
 
 	[[nodiscard]] bool IsMeshEnabled(EntityId entityId) const

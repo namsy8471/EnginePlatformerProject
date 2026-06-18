@@ -79,6 +79,7 @@
       <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -94,6 +95,7 @@
       <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -108,6 +110,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <AdditionalIncludeDirectories>$(SolutionDir)\Src;$(SolutionDir)\Src\App\Win32;$(SolutionDir)\External\PhysX\physx\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -126,6 +129,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <AdditionalIncludeDirectories>$(SolutionDir)\Src;$(SolutionDir)\Src\App\Win32;$(SolutionDir)\External\PhysX\physx\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -135,16 +139,20 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="Src\Assets\AssetDatabase.h" />
     <ClInclude Include="Src\Assets\AssetFileSystem.h" />
     <ClInclude Include="Src\Assets\AssetHotReloadService.h" />
     <ClInclude Include="Src\Assets\AssetImportService.h" />
+    <ClInclude Include="Src\Assets\AssetImportSettings.h" />
     <ClInclude Include="Src\Assets\AssimpModelLoader.h" />
     <ClInclude Include="Src\Assets\PrimitiveMeshFactory.h" />
     <ClInclude Include="Src\Assets\RuntimeAssetRegistry.h" />
     <ClInclude Include="Src\Assets\StaticMesh.h" />
+    <ClInclude Include="Src\Assets\TextureMatching.h" />
     <ClInclude Include="Src\Animation\AnimationSystem.h" />
     <ClInclude Include="Src\Core\Engine\EngineStartupOptions.h" />
     <ClInclude Include="Src\Core\Engine\Engine.h" />
+    <ClInclude Include="Src\Editor\EditorCommandStack.h" />
     <ClInclude Include="Src\ECS\ComponentPool.h" />
     <ClInclude Include="Src\ECS\ECS.h" />
     <ClInclude Include="Src\ECS\ECSWorld.h" />
@@ -156,10 +164,12 @@
     <ClInclude Include="Src\Scene\SceneComponentStore.h" />
     <ClInclude Include="Src\Scene\Scene.h" />
     <ClInclude Include="Src\Scene\SceneLoader.h" />
+    <ClInclude Include="Src\Scene\PrefabService.h" />
     <ClInclude Include="Src\Scene\ScenePersistenceService.h" />
     <ClInclude Include="Src\Scene\SceneRenderState.h" />
     <ClInclude Include="Src\Scene\SceneTypes.h" />
     <ClInclude Include="Src\Scene\TransformComponent.h" />
+    <ClInclude Include="Src\Scripting\ScriptRuntime.h" />
     <ClInclude Include="Src\Input\InputSystem.h" />
     <ClInclude Include="Src\Jobs\FramePhaseScheduler.h" />
     <ClInclude Include="Src\Jobs\JobSystem.h" />
@@ -180,7 +190,9 @@
     <ClInclude Include="Src\Physics\PhysicsComponents.h" />
     <ClInclude Include="Src\Physics\PhysicsWorld.h" />
     <ClInclude Include="Src\Physics\PhysXBackend.h" />
+    <ClInclude Include="Src\Projects\ProjectBuildService.h" />
     <ClInclude Include="Src\Projects\ProjectService.h" />
+    <ClInclude Include="Src\Reflection\SceneComponentReflection.h" />
     <ClInclude Include="Src\Rendering\Graph\RenderGraph.h" />
     <ClInclude Include="Src\Rendering\Lighting\ShadowSystem.h" />
     <ClInclude Include="Src\Rendering\Post\PostProcessSystem.h" />
@@ -204,6 +216,8 @@
     <ClInclude Include="Src\Rendering\RHI\IGraphicsDevice.h" />
     <ClInclude Include="Src\Rendering\GraphicsRuntime.h" />
     <ClInclude Include="Src\Rendering\RenderMode.h" />
+    <ClInclude Include="Src\Rendering\Sky\SkyboxAsset.h" />
+    <ClInclude Include="Src\Rendering\Sky\SkyboxSettings.h" />
     <ClInclude Include="Src\Editor\EditorLayer.h" />
     <ClInclude Include="Src\Rendering\Resources\MaterialTextureSystem.h" />
     <ClInclude Include="Src\Rendering\Systems\StaticMeshRenderer.h" />
@@ -221,13 +235,16 @@
     <ClInclude Include="Src\App\Win32\targetver.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="Src\Assets\AssetDatabase.cpp" />
     <ClCompile Include="Src\Assets\AssetFileSystem.cpp" />
     <ClCompile Include="Src\Assets\AssetHotReloadService.cpp" />
     <ClCompile Include="Src\Assets\AssetImportService.cpp" />
+    <ClCompile Include="Src\Assets\AssetImportSettings.cpp" />
     <ClCompile Include="Src\Assets\AssimpModelLoader.cpp" />
     <ClCompile Include="Src\Assets\PrimitiveMeshFactory.cpp" />
     <ClCompile Include="Src\Assets\RuntimeAssetRegistry.cpp" />
     <ClCompile Include="Src\Core\Engine\Engine.cpp" />
+    <ClCompile Include="Src\Editor\EditorCommandStack.cpp" />
     <ClCompile Include="Src\Input\InputSystem.cpp" />
     <ClCompile Include="Src\Jobs\FramePhaseScheduler.cpp" />
     <ClCompile Include="Src\Jobs\JobSystem.cpp" />
@@ -241,12 +258,17 @@
     <ClCompile Include="Src\Memory\TrackedAllocator.cpp" />
     <ClCompile Include="Src\Physics\PhysicsWorld.cpp" />
     <ClCompile Include="Src\Physics\PhysXBackend.cpp" />
+    <ClCompile Include="Src\Projects\ProjectBuildService.cpp" />
     <ClCompile Include="Src\Projects\ProjectService.cpp" />
+    <ClCompile Include="Src\Reflection\SceneComponentReflection.cpp" />
     <ClCompile Include="Src\Rendering\Graph\RenderGraph.cpp" />
     <ClCompile Include="Src\Rendering\Lighting\ShadowSystem.cpp" />
     <ClCompile Include="Src\Rendering\Post\PostProcessSystem.cpp" />
+    <ClCompile Include="Src\Rendering\Sky\SkyboxAsset.cpp" />
     <ClCompile Include="Src\Resources\ResourceManager.cpp" />
+    <ClCompile Include="Src\Scene\PrefabService.cpp" />
     <ClCompile Include="Src\Scene\ScenePersistenceService.cpp" />
+    <ClCompile Include="Src\Scripting\ScriptRuntime.cpp" />
     <ClCompile Include="Src\Rendering\Backends\DirectX12\DX12Buffer.cpp" />
     <ClCompile Include="Src\Rendering\Backends\DirectX12\DX12CommandList.cpp" />
     <ClCompile Include="Src\App\Win32\GameApp.cpp" />
@@ -279,6 +301,8 @@
     <None Include="Src\Rendering\Backends\Vulkan\Shaders\DeferredGeometry.vert" />
     <None Include="Src\Rendering\Backends\Vulkan\Shaders\DeferredLighting.frag" />
     <None Include="Src\Rendering\Backends\Vulkan\Shaders\DeferredLighting.vert" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\Skybox.frag" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\Skybox.vert" />
     <None Include="Src\Rendering\Backends\Vulkan\Shaders\ShadowDepth.vert" />
     <None Include="Src\Rendering\Backends\Vulkan\Shaders\ToneMap.frag" />
     <None Include="Src\Rendering\Backends\Vulkan\Shaders\ToneMap.vert" />
@@ -290,6 +314,7 @@
     <None Include="Src\Rendering\Backends\DirectX12\Shaders\DeferredGeometry.hlsl" />
     <None Include="Src\Rendering\Backends\DirectX12\Shaders\DeferredLighting.hlsl" />
     <None Include="Src\Rendering\Backends\DirectX12\Shaders\ShadowDepth.hlsl" />
+    <None Include="Src\Rendering\Backends\DirectX12\Shaders\Skybox.hlsl" />
     <None Include="Src\Rendering\Backends\DirectX12\Shaders\ToneMap.hlsl" />
     <None Include="Src\Rendering\Backends\DirectX12\Shaders\Triangle.hlsl" />
   </ItemGroup>

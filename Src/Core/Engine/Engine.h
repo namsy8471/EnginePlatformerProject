@@ -4,7 +4,9 @@
 #include "Assets/AssetFileSystem.h"
 #include "Assets/AssetHotReloadService.h"
 #include "Assets/AssetImportService.h"
+#include "Assets/AssetImportSettings.h"
 #include "Assets/RuntimeAssetRegistry.h"
+#include "Editor/EditorCommandStack.h"
 #include "Editor/EditorLayer.h"
 #include "Core/Engine/EngineStartupOptions.h"
 #include "Jobs/FramePhaseScheduler.h"
@@ -13,12 +15,14 @@
 #include "Materials/MaterialResource.h"
 #include "Materials/ShaderVariant.h"
 #include "Physics/PhysicsWorld.h"
+#include "Projects/ProjectBuildService.h"
 #include "Projects/ProjectService.h"
 #include "Rendering/Graph/RenderGraph.h"
 #include "Rendering/Lighting/ShadowSystem.h"
 #include "Rendering/Post/PostProcessSystem.h"
 #include "Resources/ResourceManager.h"
 #include "Scene/Scene.h"
+#include "Scene/PrefabService.h"
 #include "Scene/ScenePersistenceService.h"
 #include "Rendering/RHI/IGraphicsDevice.h"
 #include "Rendering/RHI/ICommandList.h"
@@ -29,6 +33,7 @@
 #include "Rendering/Systems/StaticMeshRenderer.h"
 #include "Samples/Benchmark/BenchmarkRunner.h"
 #include "Scene/SceneRenderState.h"
+#include "Scripting/ScriptRuntime.h"
 #include "Math/Camera.h"
 
 #include <chrono>
@@ -39,6 +44,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <wrl.h>
@@ -72,6 +78,33 @@ private:
 		size_t Transparency = static_cast<size_t>(-1);
 	};
 
+	struct MeshRestoreRequestState
+	{
+		uint64_t Generation = 0;
+		std::filesystem::path SourcePath;
+		std::filesystem::path SourcePrefabPath;
+		std::optional<std::filesystem::file_time_type> SourcePrefabWriteTime;
+		std::string ExpectedCurrentMeshSignature;
+		size_t ImportedVertexCount = 0;
+		size_t ImportedIndexCount = 0;
+		size_t ImportedMaterialCount = 0;
+		std::vector<std::string> MaterialDiffLines;
+		std::vector<Editor::MeshRestoreMaterialDiffRow> MaterialDiffRows;
+		bool Pending = false;
+		bool Failed = false;
+		bool Cancelled = false;
+		bool Conflicted = false;
+		std::string Message;
+	};
+
+	struct LoadedSceneReferenceState
+	{
+		std::filesystem::path ScenePath;
+		std::filesystem::file_time_type LastWriteTime = {};
+		std::vector<EntityId> LoadedEntities;
+		bool PendingExternalReload = false;
+	};
+
 	// Graphics API 전환 및 관리
 	[[nodiscard]] bool SwitchGraphicsAPI(GraphicsAPI api);
 	void SwitchRenderMode(RenderMode renderMode);
@@ -85,6 +118,7 @@ private:
 	// DirectX12 리소스 관리
 	[[nodiscard]] bool CreateDx12TriangleResources();
 	[[nodiscard]] bool CreateDx12DeferredResources();
+	[[nodiscard]] bool CreateDx12SkyboxResources();
 	[[nodiscard]] bool EnsureDx12DeferredResources();
 	[[nodiscard]] bool CreateDx12ShadowResources();
 	[[nodiscard]] bool EnsureDx12ShadowResources();
@@ -92,7 +126,9 @@ private:
 	void WriteDx12DeferredHdrSrv();
 	void DestroyDx12TriangleResources();
 	void DestroyDx12DeferredResources();
+	void DestroyDx12SkyboxResources();
 	void DestroyDx12ShadowResources();
+	void DrawDx12Skybox(const Editor::ViewportPanelState& viewport, const Camera& camera);
 	void DrawDx12ShadowDepthPass(const Camera& camera);
 	void DrawDx12ToneMapPass(const Editor::ViewportPanelState& viewport);
 	void DrawDx12Triangle(const Camera& camera);
@@ -102,6 +138,7 @@ private:
 	// Vulkan 리소스 관리
 	[[nodiscard]] bool CreateVulkanTriangleResources();
 	[[nodiscard]] bool CreateVulkanDeferredResources();
+	[[nodiscard]] bool CreateVulkanSkyboxResources();
 	[[nodiscard]] bool EnsureVulkanDeferredResources();
 	[[nodiscard]] bool CreateVulkanShadowResources();
 	[[nodiscard]] bool EnsureVulkanShadowResources();
@@ -109,7 +146,9 @@ private:
 	void WriteVulkanToneMapDescriptor();
 	void DestroyVulkanTriangleResources();
 	void DestroyVulkanDeferredResources();
+	void DestroyVulkanSkyboxResources();
 	void DestroyVulkanShadowResources();
+	void DrawVulkanSkybox(const Editor::ViewportPanelState& viewport, const Camera& camera);
 	void DrawVulkanShadowDepthPass(const Camera& camera);
 	void DrawVulkanToneMapPass(const Editor::ViewportPanelState& viewport);
 	void DrawVulkanTriangle(const Camera& camera);
@@ -155,7 +194,7 @@ private:
 	void InitializeJobSystem();
 	void ShutdownJobSystem();
 	void RunFramePhases(float deltaTime);
-	void UpdateAnimatedMesh(float deltaTime);
+	void UpdateAnimatedMesh(Scene& runtimeScene, float deltaTime);
 	void UpdateObjectPicking();
 	[[nodiscard]] bool TryPickSpider(float mouseX, float mouseY) const;
 	[[nodiscard]] EntityId TryPickEntity(float mouseX, float mouseY) const;
@@ -183,11 +222,14 @@ private:
 	void UploadBenchmarkGeometry(std::span<const Asset::StaticMeshVertex> vertices, std::span<const uint32_t> indices);
 	[[nodiscard]] uint64_t UpdateBenchmarkCameraBuffer(const Camera& camera, uint32_t instanceCount, float localScale);
 	void QueueModelImport(const std::filesystem::path& sourcePath, const Camera& placementCamera, bool isReload);
-	void QueueModelImportForSceneEntity(const ScenePersistence::LoadedSceneEntity& loadedEntity, EntityId targetEntity);
+	void QueueModelImportForSceneEntity(
+		const ScenePersistence::LoadedSceneEntity& loadedEntity,
+		EntityId targetEntity,
+		const std::filesystem::path& restoreSourcePrefabPath = {});
 	void QueueModelImportFromDrop(const std::filesystem::path& sourcePath, Editor::AssetDropTarget target);
 	void QueueModelReload(const std::filesystem::path& sourcePath, const std::filesystem::path& changedPath);
 	void DrainCompletedAssetJobs();
-	void ApplyImportedModel(Asset::AssetImportResult result);
+	void ApplyImportedModel(Asset::AssetImportResult result, bool allowMeshRestoreConflict = false);
 	void ApplyReloadedAsset(Asset::AssetImportResult result);
 	void HandleDroppedFiles(HDROP dropHandle);
 	void OpenAssetPath(const std::filesystem::path& path);
@@ -204,40 +246,138 @@ private:
 	[[nodiscard]] Materials::MaterialResourceStats BuildSceneMaterialResourceStats() const;
 	[[nodiscard]] Math::Transform BuildDroppedModelTransform(const Asset::AssetImportResult& result) const;
 	[[nodiscard]] static std::vector<std::filesystem::path> CollectWatchedTexturePaths(const std::vector<CpuMaterialTexture>& materialTextures);
+	[[nodiscard]] static std::vector<std::filesystem::path> CollectWatchedAssetPaths(const std::filesystem::path& sourcePath, const std::vector<CpuMaterialTexture>& materialTextures);
 	[[nodiscard]] bool SaveCurrentScene();
 	[[nodiscard]] bool SaveCurrentSceneAs();
 	[[nodiscard]] bool OpenSceneFromDialog();
 	[[nodiscard]] bool OpenSceneFromPath(const std::filesystem::path& scenePath, bool promptForDirtyScene);
+	[[nodiscard]] EntityId CreateEntityFromLoadedSceneEntity(const ScenePersistence::LoadedSceneEntity& loadedEntity, const std::filesystem::path& prefabSourcePath);
+	[[nodiscard]] std::optional<ScenePersistence::LoadedSceneEntity> BuildLoadedSceneEntityFromEntity(EntityId entityId) const;
+	[[nodiscard]] std::string BuildMeshRestoreSignature(EntityId entityId) const;
+	[[nodiscard]] std::string BuildMeshRestoreSignature(const ScenePersistence::LoadedSceneEntity& entity) const;
+	[[nodiscard]] std::vector<std::string> BuildMeshRestoreMaterialDiff(
+		EntityId entityId,
+		const Asset::StaticMeshAsset& importedMesh,
+		size_t maxLines) const;
+	[[nodiscard]] std::vector<Editor::MeshRestoreMaterialDiffRow> BuildMeshRestoreMaterialDiffRows(
+		EntityId entityId,
+		const Asset::StaticMeshAsset& importedMesh,
+		size_t maxRows) const;
+	[[nodiscard]] bool SaveSelectedEntityAsPrefab();
+	[[nodiscard]] bool InstantiatePrefabAsset(const std::filesystem::path& prefabPath);
+	[[nodiscard]] bool CreateOrUpdateImportSettingsForAsset(const std::filesystem::path& assetPath);
+	[[nodiscard]] bool ApplyEntityToPrefabSource(EntityId entityId);
+	[[nodiscard]] bool SavePrefabInspectionRoot(const std::filesystem::path& prefabPath, const ScenePersistence::LoadedSceneEntity& root);
+	[[nodiscard]] bool RevertEntityMeshToPrefabSource(
+		EntityId entityId,
+		const ScenePersistence::LoadedSceneEntity& prefabRoot,
+		const std::filesystem::path& prefabPath);
+	[[nodiscard]] Editor::MeshRestoreRuntimeStatus GetMeshRestoreRuntimeStatus(EntityId entityId) const;
+	[[nodiscard]] bool CancelMeshRestore(EntityId entityId);
+	[[nodiscard]] bool ApplyConflictedMeshRestore(EntityId entityId);
+	[[nodiscard]] bool ReloadMeshRestoreFromPrefabSource(EntityId entityId);
+	[[nodiscard]] bool LoadSceneReference(EntityId entityId, bool markDirty = true);
+	[[nodiscard]] bool UnloadSceneReference(EntityId entityId, bool markDirty = true);
+	[[nodiscard]] bool CreateProjectAsset(Editor::ProjectCreateAssetKind kind, const std::filesystem::path& targetDirectory);
+	[[nodiscard]] bool CreateProjectAsset(Editor::ProjectCreateAssetKind kind, const std::filesystem::path& targetDirectory, std::string_view requestedName);
+	[[nodiscard]] bool ApplySkyboxAsset(const std::filesystem::path& skyboxPath);
+	[[nodiscard]] bool ExportProjectPackage();
+	[[nodiscard]] bool ExportProjectPackage(const Editor::ExportProfileSettings& profile);
 	[[nodiscard]] bool ConfirmSaveDirtyScene();
 	[[nodiscard]] std::optional<std::filesystem::path> ShowOpenSceneDialog() const;
 	[[nodiscard]] std::optional<std::filesystem::path> ShowSaveSceneDialog() const;
 	[[nodiscard]] std::optional<std::filesystem::path> ShowOpenTextureDialog() const;
 	[[nodiscard]] std::filesystem::path GetDefaultScenePath() const;
+	[[nodiscard]] std::filesystem::path ResolveProjectScenePath(const std::filesystem::path& scenePath) const;
+	[[nodiscard]] std::unordered_set<EntityId> BuildRuntimeExpandedSceneReferenceSet() const;
+	[[nodiscard]] Editor::SceneReferenceRuntimeStatus GetSceneReferenceRuntimeStatus(EntityId entityId) const;
+	[[nodiscard]] Editor::NestedSceneChildStatus GetNestedSceneChildStatus(EntityId entityId) const;
+	[[nodiscard]] bool MakeNestedSceneChildLocal(EntityId entityId);
+	[[nodiscard]] bool MakeNestedSceneChildLocalWithUndo(EntityId entityId);
+	void ProcessSceneReferenceAutoLoads(bool markDirty);
+	void UpdateSceneReferenceHotReload(float deltaTime);
 	void ClearProjectSceneRuntimeState();
+	[[nodiscard]] bool IsStaleMeshRestoreResult(const Asset::AssetImportResult& result) const;
+	[[nodiscard]] bool HasMeshRestoreConflict(const Asset::AssetImportResult& result, std::string& conflictReason) const;
+	void MarkMeshRestoreFailed(const Asset::AssetImportResult& result);
 	void MarkSceneDirty();
 	void SetSceneDirty(bool dirty);
 	void MoveEntityInHierarchy(EntityId movedEntity, EntityId targetEntity, Editor::EntityDropPlacement placement);
+	void MoveEntitiesInHierarchyWithUndo(std::vector<EntityId> movedEntities, EntityId targetEntity, Editor::EntityDropPlacement placement);
+	void SetEntitySceneVisibilityWithUndo(EntityId entityId, bool visible);
+	void SetEntityScenePickabilityWithUndo(EntityId entityId, bool pickable);
 	void AlignGameCameraToSceneCamera();
 	void AlignSceneCameraToGameCamera();
 	void SetPhysicsSimulationEnabled(bool enabled);
 	void RebuildPhysicsWorldFromScene();
 	void MarkPhysicsActorDirty(EntityId entityId);
 	void CreateDefaultColliderForPrimitive(EntityId entityId, Asset::PrimitiveMeshKind kind);
-	[[nodiscard]] EntityId CreatePrimitiveEntity(Asset::PrimitiveMeshKind kind);
+	void CreateGeneratedColliderForImportedModel(EntityId entityId, const BoundsComponent& bounds);
+	[[nodiscard]] EntityId CreatePrimitiveEntity(Asset::PrimitiveMeshKind kind, EntityId parentEntity = InvalidEntityId);
+	void CreatePrimitiveEntityWithUndo(Asset::PrimitiveMeshKind kind, EntityId parentEntity = InvalidEntityId);
 	[[nodiscard]] bool ApplyPrimitiveMeshToEntity(EntityId entityId, Asset::PrimitiveMeshKind kind, const Math::Transform& localTransform, bool createDefaultCollider = true);
+	[[nodiscard]] bool ApplyMeshSnapshotToEntity(
+		EntityId entityId,
+		const ScenePersistence::LoadedSceneEntity& meshSnapshot,
+		std::string_view logLabel,
+		const std::filesystem::path& sourcePrefabPath = {});
 	void AddComponentToEntity(EntityId entityId, SceneComponentKind kind);
+	void AddComponentToEntityWithUndo(EntityId entityId, SceneComponentKind kind);
 	void RemoveComponentFromEntity(EntityId entityId, SceneComponentKind kind);
+	void RemoveComponentFromEntityWithUndo(EntityId entityId, SceneComponentKind kind);
 	void SetComponentEnabledForEntity(EntityId entityId, SceneComponentKind kind, bool enabled);
+	void SetComponentEnabledForEntityWithUndo(EntityId entityId, SceneComponentKind kind, bool enabled);
+	[[nodiscard]] bool HasSceneComponentKind(EntityId entityId, SceneComponentKind kind) const;
+	[[nodiscard]] bool IsSceneComponentKindEnabled(EntityId entityId, SceneComponentKind kind) const;
+	[[nodiscard]] bool SceneComponentSnapshotHasKind(SceneComponentKind kind, const ScenePersistence::LoadedSceneEntity& snapshot) const;
+	[[nodiscard]] std::optional<ScenePersistence::LoadedSceneEntity> BuildDefaultComponentSnapshot(EntityId entityId, SceneComponentKind kind) const;
+	void ApplyComponentSnapshotToEntity(EntityId entityId, SceneComponentKind kind, const ScenePersistence::LoadedSceneEntity& snapshot, std::string_view logLabel);
+	void ApplyComponentSnapshotToEntity(Scene& targetScene, EntityId entityId, SceneComponentKind kind, const ScenePersistence::LoadedSceneEntity& snapshot, std::string_view logLabel, bool markDirty);
+	void ResetComponentForEntityWithUndo(EntityId entityId, SceneComponentKind kind);
+	void PasteComponentValuesToEntityWithUndo(EntityId entityId, SceneComponentKind kind, const ScenePersistence::LoadedSceneEntity& snapshot);
+	void CommitComponentBatchEdit(std::vector<Editor::ComponentEditRecord> records);
+	void RestoreComponentFromSnapshot(EntityId entityId, SceneComponentKind kind, const ScenePersistence::LoadedSceneEntity& snapshot);
+	void CommitTransformEdit(EntityId entityId, const Math::Transform& beforeTransform, const Math::Transform& afterTransform);
+	void CommitTransformBatchEdit(std::vector<Editor::TransformEditRecord> records);
+	void ApplyEntityTransform(EntityId entityId, const Math::Transform& transform, std::string_view logLabel);
+	void ApplyEntityTransform(Scene& targetScene, EntityId entityId, const Math::Transform& transform, std::string_view logLabel, bool markDirty);
 	void SetMaterialShadingModel(EntityId entityId, size_t materialIndex, Asset::MaterialShadingModel model);
+	void SetMaterialShadingModelWithUndo(EntityId entityId, size_t materialIndex, Asset::MaterialShadingModel model);
 	void AssignMaterialTexture(EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot, const std::filesystem::path& texturePath);
+	void AssignMaterialTextureWithUndo(EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot, const std::filesystem::path& texturePath);
+	void AssignMaterialTexturesWithUndo(EntityId entityId, size_t materialIndex, const std::vector<Editor::MaterialTextureAssignment>& assignments);
+	void AssignMaterialTextureBatchWithUndo(EntityId entityId, const std::vector<Editor::MaterialTextureBatchAssignment>& batchAssignments);
 	void ClearMaterialTexture(EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot);
+	void ClearMaterialTextureWithUndo(EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot);
 	void BrowseMaterialTexture(EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot);
 	void MarkMaterialEdited(EntityId entityId, size_t materialIndex);
+	void CommitMaterialEdit(EntityId entityId, size_t materialIndex, const Asset::StaticMeshMaterial& beforeMaterial, const Asset::StaticMeshMaterial& afterMaterial);
+	void CommitMaterialBatchEdit(std::vector<Editor::MaterialEditRecord> records);
+	void ApplyMaterialSnapshot(EntityId entityId, size_t materialIndex, const Asset::StaticMeshMaterial& material, std::string_view logLabel);
+	void ApplyMaterialSnapshot(Scene& targetScene, EntityId entityId, size_t materialIndex, const Asset::StaticMeshMaterial& material, std::string_view logLabel, bool markDirty, bool updateRegistry);
 	[[nodiscard]] bool RefreshMaterialResourcesForEntity(EntityId entityId);
+	[[nodiscard]] bool RefreshMaterialResourcesForEntity(Scene& targetScene, EntityId entityId, bool markDirty, bool updateRegistry);
 	[[nodiscard]] std::filesystem::path NormalizeTexturePathForProject(const std::filesystem::path& texturePath);
 	void RenameEntityFromHierarchy(EntityId entityId, std::string_view name);
-	void DuplicateEntityFromHierarchy(EntityId entityId);
+	[[nodiscard]] EntityId DuplicateEntityFromHierarchy(EntityId entityId);
+	void DuplicateEntityFromHierarchyWithUndo(EntityId entityId);
+	void DuplicateEntitiesFromHierarchyWithUndo(std::vector<EntityId> entityIds);
 	void DeleteEntityFromHierarchy(EntityId entityId);
+	void DeleteEntityFromHierarchyWithUndo(EntityId entityId);
+	void DeleteEntitiesFromHierarchyWithUndo(std::vector<EntityId> entityIds);
+	void UndoEditorCommand();
+	void RedoEditorCommand();
+	void SetPlayModeEnabled(bool enabled);
+	void SetPlayPaused(bool paused);
+	void StepPlayMode();
+	void ResetPlayRuntimeScene();
+	[[nodiscard]] bool EnterPlayMode();
+	[[nodiscard]] bool ExitPlayMode();
+	void UpdateAutosave(float deltaTime);
+	[[nodiscard]] bool SaveAutosaveSnapshot();
+	void SetAutosaveEnabled(bool enabled);
+	void SetAutosaveInterval(float intervalSeconds);
+	[[nodiscard]] bool RestoreSceneFromLoadResult(const ScenePersistence::LoadSceneResult& loadResult, const std::filesystem::path& scenePath, bool restoreDirtyState);
 	[[nodiscard]] std::string MakeDuplicateEntityName(EntityId entityId) const;
 	void RemoveEntityFromRenderState(EntityId entityId);
 	[[nodiscard]] bool CreateTextureResourcesForEntity(EntityId entityId);
@@ -246,6 +386,13 @@ private:
 	[[nodiscard]] bool RecreateDynamicTextureResources();
 	[[nodiscard]] bool RecreateVulkanEntityDescriptorSets();
 	[[nodiscard]] EntityId CreateEntity(std::string_view name);
+	[[nodiscard]] EntityId CreateEmptySceneEntity(std::string_view name, EntityId parentEntity = InvalidEntityId);
+	[[nodiscard]] EntityId CreateCameraSceneEntity(EntityId parentEntity = InvalidEntityId);
+	[[nodiscard]] EntityId CreateLightSceneEntity(EntityId parentEntity = InvalidEntityId);
+	void CreateEmptySceneEntityWithUndo(std::string name, EntityId parentEntity = InvalidEntityId);
+	void CreateCameraSceneEntityWithUndo(EntityId parentEntity = InvalidEntityId);
+	void CreateLightSceneEntityWithUndo(EntityId parentEntity = InvalidEntityId);
+	void CreateEmptyParentForEntityWithUndo(EntityId childEntity);
 	[[nodiscard]] TransformComponent* GetTransformComponent(EntityId entityId);
 	[[nodiscard]] const TransformComponent* GetTransformComponent(EntityId entityId) const;
 	[[nodiscard]] Asset::StaticMeshAsset* GetMeshAsset(EntityId entityId);
@@ -265,6 +412,11 @@ private:
 	void InitializeProjectScene();
 	void SyncRuntimeCameraToGameCameraEntity();
 	void SyncGameCameraFromSceneEntity();
+	[[nodiscard]] Scene& GetRuntimeScene() noexcept;
+	[[nodiscard]] const Scene& GetRuntimeScene() const noexcept;
+	[[nodiscard]] bool IsRuntimeMode() const noexcept;
+	[[nodiscard]] bool IsRuntimePlaying() const noexcept;
+	[[nodiscard]] bool BlockEditSceneMutationDuringPlay(std::string_view action);
 	[[nodiscard]] bool IsGameCameraEntity(EntityId entityId) const noexcept;
 	[[nodiscard]] EntityId ResolveKeyLightEntity();
 
@@ -284,6 +436,7 @@ private:
 	Camera m_Camera;
 	Camera m_SceneCamera;
 	Scene m_Scene;
+	std::optional<Scene> m_PlayScene;
 	EntityId m_SpiderEntity = InvalidEntityId;
 	EntityId m_GameCameraEntity = InvalidEntityId;
 	EntityId m_KeyLightEntity = InvalidEntityId;
@@ -294,8 +447,18 @@ private:
 	EngineStartupOptions m_StartupOptions;
 	std::optional<Projects::ProjectDescriptor> m_Project;
 	std::filesystem::path m_CurrentScenePath;
+	std::filesystem::path m_PlayModeSnapshotScenePath;
+	std::filesystem::path m_PlayModeRestoreScenePath;
+	std::optional<ScenePersistence::LoadSceneResult> m_PlayModeEditSceneSnapshot;
+	std::filesystem::path m_LastAutosavePath;
+	std::string m_AutosaveStatusMessage = "Autosave waiting for scene changes.";
+	bool m_PlayModeRestoreDirty = false;
 	uint64_t m_AssetSceneGeneration = 1;
 	Editor::EditorLayer m_EditorLayer;
+	Editor::EditorCommandStack m_EditorCommandStack;
+	Editor::EditorCommandStack m_RuntimeCommandStack;
+	Editor::EditorPlayState m_PlayState = Editor::EditorPlayState::Edit;
+	bool m_PlayStepRequested = false;
 	Asset::AssetFileSystem m_AssetFileSystem;
 	Asset::AssetImportService m_AssetImportService;
 	Asset::AssetHotReloadService m_AssetHotReloadService;
@@ -306,17 +469,28 @@ private:
 	Jobs::JobSystem m_JobSystem;
 	Jobs::FramePhaseScheduler m_PhaseScheduler;
 	Jobs::SceneCommandBuffer m_SceneCommandBuffer;
+	Scripting::NativeScriptRuntime m_ScriptRuntime;
 	std::unordered_map<EntityId, Math::Transform> m_PhysicsSimulationSnapshot;
+	std::unordered_map<EntityId, LoadedSceneReferenceState> m_LoadedSceneReferenceEntities;
+	std::unordered_map<EntityId, uint64_t> m_MeshRestoreGenerations;
+	std::unordered_map<EntityId, MeshRestoreRequestState> m_MeshRestoreRequests;
+	std::unordered_map<EntityId, Asset::AssetImportResult> m_MeshRestoreConflictResults;
 	std::vector<std::string> m_AssetLogLines;
 	float m_LastDeltaTime = 1.0f / 60.0f;
 	DirectX::XMFLOAT3 m_AmbientColor = { 0.62f, 0.68f, 0.78f };
 	float m_AmbientIntensity = 0.35f;
 	float m_Exposure = 1.0f;
+	Rendering::SkyboxSettings m_SkyboxSettings;
 	MaterialDebugView m_MaterialDebugView = MaterialDebugView::Lit;
 	bool m_ViewFrustumCullingEnabled = true;
 	bool m_SceneCameraControlActive = false;
 	bool m_SceneDirty = false;
 	bool m_PhysicsSimulationEnabled = false;
+	bool m_AutosaveEnabled = true;
+	bool m_LastAutosaveSucceeded = false;
+	float m_AutosaveIntervalSeconds = 120.0f;
+	float m_AutosaveElapsedSeconds = 0.0f;
+	float m_SceneReferenceHotReloadElapsedSeconds = 0.0f;
 	bool m_RoadmapHealthLogPending = true;
 	uint32_t m_SmokeRenderedFrameCount = 0;
 	bool m_SmokeShutdownRequested = false;

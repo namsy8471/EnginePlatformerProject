@@ -75,7 +75,7 @@ namespace PickingSystem
 		}
 	}
 
-	[[nodiscard]] inline bool IntersectRayAabb(DirectX::FXMVECTOR rayOrigin, DirectX::FXMVECTOR rayDirection, const DirectX::XMFLOAT3& aabbMin, const DirectX::XMFLOAT3& aabbMax)
+	[[nodiscard]] inline bool IntersectRayAabb(DirectX::FXMVECTOR rayOrigin, DirectX::FXMVECTOR rayDirection, const DirectX::XMFLOAT3& aabbMin, const DirectX::XMFLOAT3& aabbMax, float& hitDistance)
 	{
 		DirectX::XMFLOAT3 origin = {};
 		DirectX::XMFLOAT3 direction = {};
@@ -119,10 +119,22 @@ namespace PickingSystem
 			}
 		}
 
-		return tMax >= 0.0f;
+		if (tMax < 0.0f)
+		{
+			return false;
+		}
+
+		hitDistance = tMin >= 0.0f ? tMin : tMax;
+		return true;
 	}
 
-	[[nodiscard]] inline bool TryPickEntityAabb(const Scene& scene, EntityId entityId, const Camera& camera, float mouseX, float mouseY, float viewportWidth, float viewportHeight)
+	[[nodiscard]] inline bool IntersectRayAabb(DirectX::FXMVECTOR rayOrigin, DirectX::FXMVECTOR rayDirection, const DirectX::XMFLOAT3& aabbMin, const DirectX::XMFLOAT3& aabbMax)
+	{
+		float hitDistance = 0.0f;
+		return IntersectRayAabb(rayOrigin, rayDirection, aabbMin, aabbMax, hitDistance);
+	}
+
+	[[nodiscard]] inline bool TryPickEntityAabb(const Scene& scene, EntityId entityId, const Camera& camera, float mouseX, float mouseY, float viewportWidth, float viewportHeight, float& hitDistance)
 	{
 		if (!scene.IsMeshEnabled(entityId))
 		{
@@ -141,6 +153,12 @@ namespace PickingSystem
 		DirectX::XMFLOAT3 worldBoundsMin = {};
 		DirectX::XMFLOAT3 worldBoundsMax = {};
 		ComputeWorldAabb(bounds->LocalMin, bounds->LocalMax, transform->GetWorldMatrix(), worldBoundsMin, worldBoundsMax);
-		return IntersectRayAabb(ray.Origin, ray.Direction, worldBoundsMin, worldBoundsMax);
+		return IntersectRayAabb(ray.Origin, ray.Direction, worldBoundsMin, worldBoundsMax, hitDistance);
+	}
+
+	[[nodiscard]] inline bool TryPickEntityAabb(const Scene& scene, EntityId entityId, const Camera& camera, float mouseX, float mouseY, float viewportWidth, float viewportHeight)
+	{
+		float hitDistance = 0.0f;
+		return TryPickEntityAabb(scene, entityId, camera, mouseX, mouseY, viewportWidth, viewportHeight, hitDistance);
 	}
 }

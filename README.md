@@ -26,6 +26,7 @@ Win32 기반의 실시간 게임 엔진 프로토타입입니다. DirectX 12와 
 - imported texture의 sRGB/linear slot 구분
 - primitive white diffuse fallback 및 material diffuse color 관리
 - Normal Y Flip, Use Vertex Color, material debug view 지원
+- Inspector Materials에서 선택 Entity의 material 스칼라 값을 다른 선택 Entity에 texture slot 보존 상태로 batch apply 가능
 - Directional / Point / Spot light 렌더링
 - Ambient color/intensity, exposure, key light 대표값을 Editor에서 조절 가능
 
@@ -34,11 +35,25 @@ Win32 기반의 실시간 게임 엔진 프로토타입입니다. DirectX 12와 
 - DockSpace 기반 `Scene`, `Game`, `Hierarchy`, `Inspector`, `Project`, `Benchmark`, `Console` 패널
 - Scene 카메라와 Game 카메라 분리
 - Scene View에서 GameCamera frustum gizmo, collider gizmo 표시
+- Scene View View Cube에서 축 endpoint, face/edge/corner hotspot, preset popup, drag orbit, hover label 지원
+- Scene View Transform Gizmo에서 Translate/Rotate/Scale, 회전 링, snap, World/Local, Pivot/Center, XY/XZ/YZ plane move, uniform scale, scale value badge 지원
+- Scene View Measure에서 ground/view/bounds/mesh surface 측정, static/dynamic triangle acceleration cache, Profiler 비용 표시 지원
 - Hierarchy 선택, 우클릭 context menu, rename/duplicate/delete 단축키 지원
-- Hierarchy drag/drop reorder 지원
+- Hierarchy 검색과 Mesh/Camera/Light/Physics/Script/Hidden/Locked/Nested 빠른 타입 필터 지원
+- Hierarchy expand/collapse all, branch 단위 expand/collapse, drag/drop reorder 지원
+- Scene View 좌클릭 드래그 marquee selection과 Ctrl/Shift additive selection 지원
 - Inspector Transform 편집, Add Component, component on/off, component remove 지원
+- Inspector component search, lock, reorder, pin-to-top, reset/copy/paste values 지원
+- Command Palette는 Ctrl+P/Ctrl+K, All/Commands/Entities/Assets 범주 필터와 `>`/`@`/`/` prefix 검색, pinned/recent 명령 상단 표시, Up/Down/Page/Home/End 결과 이동, Enter 실행 지원
 - File 메뉴, Save/Open Scene, Reveal Project, dirty state 표시
 - Renderer Roadmap Health 섹션으로 렌더링 핵심 기능 상태를 Console에서 확인 가능
+- Reflection Quick Edit에서 Mesh asset 통계, material 목록, material scalar quick edit/batch apply, texture slot actions, full Materials row focus 지원
+- Prefab Overrides에서 reflected component 차이와 material scalar/texture slot 차이를 확인하고, Focus로 해당 Materials row/slot에 바로 이동 가능
+- Play/Stop은 edit scene의 in-memory snapshot을 기반으로 별도 `m_PlayScene` runtime clone을 만들고 Stop 시 edit scene을 보존하며 `Temp/PlayModeSnapshot.scene` 파일을 fallback으로 유지
+- Script/animation/physics frame phase와 주요 render read path, picking은 `GetRuntimeScene()` 실행 대상 Scene accessor를 통해 Play/Edit scene 분리를 사용
+- Play 중 Hierarchy/Inspector/Status Bar는 `Play Runtime Clone` 및 runtime-only 편집 상태를 표시하고, edit scene 저장/생성/삭제/Undo/Redo command 계열 변경은 guard로 차단
+- Play 중 Transform, Material scalar/shading, component property 실험 편집은 runtime 전용 undo stack으로 Ctrl+Z/Ctrl+Y를 지원하며, Stop/Reset 시 runtime stack을 폐기
+- Play 진입 전 dirty scene은 Save / Don't Save / Cancel로 확인하고, runtime clone은 F5 Play/Stop, F6 Pause/Resume, F10 Step, Reset 제어를 지원해 simulation phase를 멈추거나 edit snapshot 상태로 즉시 되돌려도 editor/render는 계속 응답
 
 ### Component 기반 Scene 구조
 
@@ -75,6 +90,21 @@ MyGame/
 
 - Project 패널에서 project `Assets` 트리 캐시 표시
 - 파일/폴더 선택, 열기, Explorer reveal, refresh 지원
+- Project 패널 breadcrumb와 Up 버튼으로 선택 asset의 상위 폴더를 빠르게 재선택
+- Project 패널 Folder Scope 토글로 선택 폴더만 임시 root처럼 탐색
+- Project details와 폴더 context menu에서 Select Folder, Scope Here, Clear Scope 지원
+- Project details에서 선택 asset 기준 Search Name, Filter Type, Filter Extension 지원
+- Project/Content Drawer Active filter bar에서 Scope/Type/Text 필터 상태 확인과 개별 해제 지원
+- Project details의 Directory Summary로 선택 폴더 통계와 타입별 `Show` 드릴다운 지원
+- Project/Content Drawer 검색과 Favorites/Folders/Models/Images/Scenes/Materials/Prefabs/Source/Text 빠른 타입 필터 지원
+- Project 패널과 Content Drawer가 프로젝트별 saved search를 공유
+- Project 패널 Recent Assets 섹션으로 최근 선택/열기/로드한 asset을 빠르게 재선택
+- Content Drawer 결과를 Up/Down/Page/Home/End로 이동하고 Enter로 열기, Ctrl+Enter로 모델 로드 지원
+- Content Drawer Path/Name/Type/Size/Modified 정렬과 오름/내림 방향 전환 지원
+- Content Drawer 선택 asset details/preview pane 토글 지원
+- Content Drawer 결과에서 asset favorite/unfavorite 즉시 토글 지원
+- Project/Content Drawer context menu와 details pane에서 absolute path, project-relative path, file name 복사 지원
+- Details pane의 Dependencies/References 항목에서 클릭 선택, 더블클릭 open, context action 지원
 - FBX/OBJ/GLTF/GLB 모델 drag/drop import 지원
 - Windows Explorer에서 엔진 창으로 모델 파일 drop 지원
 - import worker thread와 completion queue 기반 비동기 모델 로딩
@@ -280,9 +310,8 @@ x64/Debug/EnginePlatformer.exe --project "D:/Projects/MyGame/MyGame.engineprojec
 
 - **에디터 고도화**
   - Scene/Game을 실제 offscreen render texture로 완전히 분리
-  - transform gizmo, parent/child hierarchy, reparent drag/drop
-  - Undo/Redo command stack
-  - Play/Edit mode 분리
+  - parent/child hierarchy reparent drag/drop과 multi-select polish
+  - Play mode runtime Scene 편집 UX polish와 Play 중 Inspector runtime-only edit 표시
   - Prefab v1과 prefab override 추적
 
 - **렌더링 확장**

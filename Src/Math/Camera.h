@@ -20,6 +20,7 @@ public:
 	void SetPosition(const XMFLOAT3& position) noexcept;
 	void SetTransform(const Math::Transform& transform) noexcept;
 	void SetLens(float fovY, float aspect, float nearZ, float farZ) noexcept;
+	void SetMoveSpeed(float moveSpeed) noexcept;
 
 	// 카메라 방향 제어
 	void SetRotation(float pitch, float yaw) noexcept;
@@ -60,6 +61,7 @@ public:
 	[[nodiscard]] float GetAspect() const noexcept { return m_Aspect; }
 	[[nodiscard]] float GetNearZ() const noexcept { return m_NearZ; }
 	[[nodiscard]] float GetFarZ() const noexcept { return m_FarZ; }
+	[[nodiscard]] float GetMoveSpeed() const noexcept { return m_MoveSpeed; }
 	[[nodiscard]] const Math::Transform& GetTransform() const noexcept { return m_Transform; }
 
 	[[nodiscard]] XMMATRIX GetViewMatrix() const noexcept;

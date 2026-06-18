@@ -2,6 +2,7 @@
 #include <stb_image.h>
 
 #include "AssimpModelLoader.h"
+#include "TextureMatching.h"
 
 #include <assimp/Importer.hpp>
 #include <assimp/material.h>
@@ -246,6 +247,40 @@ namespace Asset
 			}
 		}
 
+		[[nodiscard]] unsigned int BuildStaticPostProcessFlags(const AssimpLoadOptions& options) noexcept
+		{
+			unsigned int flags =
+				aiProcess_Triangulate |
+				aiProcess_JoinIdenticalVertices |
+				aiProcess_GenSmoothNormals |
+				aiProcess_PreTransformVertices |
+				aiProcess_ImproveCacheLocality |
+				aiProcess_SortByPType |
+				aiProcess_FlipUVs;
+			if (options.GenerateTangents)
+			{
+				flags |= aiProcess_CalcTangentSpace;
+			}
+			return flags;
+		}
+
+		[[nodiscard]] unsigned int BuildAnimatedPostProcessFlags(const AssimpLoadOptions& options) noexcept
+		{
+			unsigned int flags =
+				aiProcess_Triangulate |
+				aiProcess_JoinIdenticalVertices |
+				aiProcess_GenSmoothNormals |
+				aiProcess_LimitBoneWeights |
+				aiProcess_ImproveCacheLocality |
+				aiProcess_SortByPType |
+				aiProcess_FlipUVs;
+			if (options.GenerateTangents)
+			{
+				flags |= aiProcess_CalcTangentSpace;
+			}
+			return flags;
+		}
+
 		[[nodiscard]] TextureResolveResult ResolveTexturePath(
 			const aiMaterial& material,
 			aiTextureType textureType,
@@ -480,28 +515,210 @@ namespace Asset
 			return false;
 		}
 
-		[[nodiscard]] bool ContainsAnyKeyword(std::string_view text, std::span<const std::string_view> keywords)
+		[[nodiscard]] bool ContainsAnyKeyword(std::string_view text, std::span<const std::string_view> keywords);
+
+		[[nodiscard]] std::vector<std::string> BuildTextureMatchTokens(
+			const StaticMeshMaterial& material,
+			const aiMaterial& aiMaterial,
+			const std::filesystem::path& sourcePath);
+
+		[[nodiscard]] int ScoreTextureFileCandidate(
+			const TextureFileCandidate& candidate,
+			MaterialTextureSlot slot,
+			std::span<const std::string> matchTokens,
+			std::span<const std::string_view> slotKeywords);
+
+		void AddUniqueInspectionTexture(
+			ModelInspectionSummary& summary,
+			ModelTextureInspection inspection)
 		{
-			for (std::string_view keyword : keywords)
+			if (inspection.Slot == MaterialTextureSlot::Count)
 			{
-				if (!keyword.empty() && text.find(keyword) != std::string_view::npos)
+				return;
+			}
+
+			const std::string resolvedKey = PathKey(inspection.ResolvedPath);
+			const auto duplicateIt = std::ranges::find_if(summary.Textures, [&inspection, &resolvedKey](const ModelTextureInspection& existing)
 				{
-					return true;
+					return existing.MaterialIndex == inspection.MaterialIndex
+						&& existing.Slot == inspection.Slot
+						&& existing.RawPath == inspection.RawPath
+						&& existing.Embedded == inspection.Embedded
+						&& PathKey(existing.ResolvedPath) == resolvedKey;
+				});
+			if (duplicateIt == summary.Textures.end())
+			{
+				summary.Textures.push_back(std::move(inspection));
+			}
+		}
+
+		[[nodiscard]] bool InspectTextureSlotFromTypes(
+			ModelInspectionSummary& summary,
+			const aiMaterial& aiMaterial,
+			uint32_t materialIndex,
+			std::string_view materialName,
+			MaterialTextureSlot slot,
+			std::span<const aiTextureType> textureTypes,
+			const std::filesystem::path& sourcePath)
+		{
+			for (const aiTextureType textureType : textureTypes)
+			{
+				const uint32_t textureCount = aiMaterial.GetTextureCount(textureType);
+				for (uint32_t textureIndex = 0; textureIndex < textureCount; ++textureIndex)
+				{
+					const TextureResolveResult result = ResolveTexturePath(aiMaterial, textureType, sourcePath, textureIndex);
+					if (result.RawPath.empty())
+					{
+						continue;
+					}
+
+					ModelTextureInspection inspection = {};
+					inspection.MaterialIndex = materialIndex;
+					inspection.MaterialName = std::string(materialName);
+					inspection.Slot = slot;
+					inspection.SourceType = TextureTypeName(textureType);
+					inspection.RawPath = result.RawPath;
+					inspection.ResolvedPath = result.SelectedPath;
+					inspection.Embedded = result.IsEmbeddedReference;
+					inspection.Resolved = !result.SelectedPath.empty() || result.IsEmbeddedReference;
+					const bool resolved = inspection.Resolved;
+					AddUniqueInspectionTexture(summary, std::move(inspection));
+					if (resolved)
+					{
+						return true;
+					}
 				}
 			}
 			return false;
+		}
+
+		[[nodiscard]] bool InspectTextureSlotByName(
+			ModelInspectionSummary& summary,
+			const aiMaterial& aiMaterial,
+			uint32_t materialIndex,
+			std::string_view materialName,
+			MaterialTextureSlot slot,
+			std::span<const std::string_view> keywords,
+			const std::filesystem::path& sourcePath)
+		{
+			static constexpr std::array kSearchTypes = {
+				aiTextureType_DIFFUSE,
+				aiTextureType_SPECULAR,
+				aiTextureType_EMISSIVE,
+				aiTextureType_HEIGHT,
+				aiTextureType_NORMALS,
+				aiTextureType_SHININESS,
+				aiTextureType_OPACITY,
+				aiTextureType_LIGHTMAP,
+				aiTextureType_BASE_COLOR,
+				aiTextureType_NORMAL_CAMERA,
+				aiTextureType_EMISSION_COLOR,
+				aiTextureType_METALNESS,
+				aiTextureType_DIFFUSE_ROUGHNESS,
+				aiTextureType_AMBIENT_OCCLUSION,
+				aiTextureType_UNKNOWN
+			};
+
+			for (const aiTextureType textureType : kSearchTypes)
+			{
+				const uint32_t textureCount = aiMaterial.GetTextureCount(textureType);
+				for (uint32_t textureIndex = 0; textureIndex < textureCount; ++textureIndex)
+				{
+					const TextureResolveResult result = ResolveTexturePath(aiMaterial, textureType, sourcePath, textureIndex);
+					if (result.RawPath.empty())
+					{
+						continue;
+					}
+
+					const std::string rawKey = ToLowerInvariant(result.RawPath);
+					const std::string selectedKey = ToLowerInvariant(result.SelectedPath.filename().string());
+					if (!ContainsAnyKeyword(rawKey, keywords) && !ContainsAnyKeyword(selectedKey, keywords))
+					{
+						continue;
+					}
+
+					ModelTextureInspection inspection = {};
+					inspection.MaterialIndex = materialIndex;
+					inspection.MaterialName = std::string(materialName);
+					inspection.Slot = slot;
+					inspection.SourceType = TextureTypeName(textureType);
+					inspection.RawPath = result.RawPath;
+					inspection.ResolvedPath = result.SelectedPath;
+					inspection.Embedded = result.IsEmbeddedReference;
+					inspection.Resolved = !result.SelectedPath.empty() || result.IsEmbeddedReference;
+					const bool resolved = inspection.Resolved;
+					AddUniqueInspectionTexture(summary, std::move(inspection));
+					if (resolved)
+					{
+						return true;
+					}
+				}
+			}
+
+			return false;
+		}
+
+		void InspectTextureSlotFromNearbyFiles(
+			ModelInspectionSummary& summary,
+			const aiMaterial& aiMaterial,
+			uint32_t materialIndex,
+			std::string_view materialName,
+			MaterialTextureSlot slot,
+			std::span<const std::string_view> keywords,
+			const std::filesystem::path& sourcePath,
+			std::span<const TextureFileCandidate> textureFiles)
+		{
+			if (textureFiles.empty())
+			{
+				return;
+			}
+
+			StaticMeshMaterial tokenMaterial = {};
+			tokenMaterial.Name = std::string(materialName);
+			const std::vector<std::string> matchTokens = BuildTextureMatchTokens(tokenMaterial, aiMaterial, sourcePath);
+			const TextureFileCandidate* bestCandidate = nullptr;
+			int bestScore = 0;
+			for (const TextureFileCandidate& candidate : textureFiles)
+			{
+				const int score = ScoreTextureFileCandidate(candidate, slot, matchTokens, keywords);
+				if (score > bestScore
+					|| (score == bestScore
+						&& bestCandidate
+						&& candidate.PixelArea > bestCandidate->PixelArea))
+				{
+					bestCandidate = &candidate;
+					bestScore = score;
+				}
+			}
+
+			const int minimumScore = slot == MaterialTextureSlot::BaseColor ? 24 : 16;
+			if (!bestCandidate || bestScore < minimumScore)
+			{
+				return;
+			}
+
+			ModelTextureInspection inspection = {};
+			inspection.MaterialIndex = materialIndex;
+			inspection.MaterialName = std::string(materialName);
+			inspection.Slot = slot;
+			inspection.SourceType = "NearbyMatch";
+			inspection.RawPath = bestCandidate->Path.filename().string();
+			inspection.ResolvedPath = bestCandidate->Path;
+			inspection.Resolved = true;
+			inspection.AutoMatched = true;
+			AddUniqueInspectionTexture(summary, std::move(inspection));
+		}
+
+		[[nodiscard]] bool ContainsAnyKeyword(std::string_view text, std::span<const std::string_view> keywords)
+		{
+			return TextureMatching::ContainsAnyKeyword(text, keywords);
 		}
 
 		[[nodiscard]] bool HasMaterialSlotSource(const StaticMeshMaterial& material, MaterialTextureSlot slot) noexcept;
 
 		[[nodiscard]] bool IsIgnoredTextureMatchToken(std::string_view token) noexcept
 		{
-			static constexpr std::array<std::string_view, 18> kIgnoredTokens = {
-				"asset", "default", "image", "jpg", "jpeg", "material", "materials", "mesh",
-				"model", "neuer", "none", "ordner", "png", "tga", "tex", "texture",
-				"textures", "video"
-			};
-			return token.size() < 2 || std::ranges::find(kIgnoredTokens, token) != kIgnoredTokens.end();
+			return TextureMatching::IsIgnoredMatchToken(token);
 		}
 
 		void AddUniqueToken(std::vector<std::string>& tokens, std::string token)
@@ -639,16 +856,10 @@ namespace Asset
 			std::span<const std::string> matchTokens,
 			std::span<const std::string_view> slotKeywords)
 		{
-			static constexpr std::array<std::string_view, 19> kNonBaseColorKeywords = {
-				"ambientocclusion", "alpha", "ao_", "_ao", "bump", "emissive", "gloss",
-				"glow", "metal", "metallic", "metalness", "_n.", "_nrm", "normal",
-				"opacity", "rough", "roughness", "spec", "specular"
-			};
-
 			const bool hasSlotKeyword = ContainsAnyKeyword(candidate.SearchText, slotKeywords);
 			if (slot == MaterialTextureSlot::BaseColor)
 			{
-				if (ContainsAnyKeyword(candidate.SearchText, kNonBaseColorKeywords))
+				if (ContainsAnyKeyword(candidate.SearchText, TextureMatching::NonBaseColorKeywords()))
 				{
 					return 0;
 				}
@@ -860,24 +1071,12 @@ namespace Asset
 			static constexpr std::array kSpecularTypes = { aiTextureType_SPECULAR };
 			static constexpr std::array kShininessTypes = { aiTextureType_SHININESS };
 
-			static constexpr std::array<std::string_view, 5> kBaseColorKeywords = { "basecolor", "base_color", "albedo", "diffuse", "color" };
-			static constexpr std::array<std::string_view, 4> kNormalKeywords = { "normal", "_nrm", "_n.", "bump" };
-			static constexpr std::array<std::string_view, 4> kMetallicKeywords = { "metallic", "metalness", "_metal", "_m." };
-			static constexpr std::array<std::string_view, 4> kRoughnessKeywords = { "roughness", "_rough", "_rgh", "_r." };
-			static constexpr std::array<std::string_view, 6> kMetallicRoughnessKeywords = { "metallicroughness", "metal_rough", "orm", "mrao", "arm", "occlusionroughnessmetallic" };
-			static constexpr std::array<std::string_view, 4> kAoKeywords = { "ambientocclusion", "occlusion", "_ao", "ao_" };
-			static constexpr std::array<std::string_view, 4> kEmissiveKeywords = { "emissive", "emission", "glow", "emit" };
-			static constexpr std::array<std::string_view, 4> kOpacityKeywords = { "opacity", "alpha", "transparency", "transparent" };
-			static constexpr std::array<std::string_view, 4> kSpecularKeywords = { "specular", "_spec", "spec_", "reflection" };
-			static constexpr std::array<std::string_view, 3> kShininessKeywords = { "shininess", "gloss", "glossiness" };
-
-			auto assignSlot = [&]<typename TypeArray, typename KeywordArray>(
+			auto assignSlot = [&]<typename TypeArray>(
 				MaterialTextureSlot slot,
 				const TypeArray& textureTypes,
-				const KeywordArray& keywords)
+				std::span<const std::string_view> keywordSpan)
 			{
 				const std::span<const aiTextureType> textureTypeSpan(textureTypes.data(), textureTypes.size());
-				const std::span<const std::string_view> keywordSpan(keywords.data(), keywords.size());
 				if (TryAssignTextureSlotFromTypes(material, scene, *aiMaterialPtr, materialIndex, slot, textureTypeSpan, sourcePath))
 				{
 					return;
@@ -889,16 +1088,16 @@ namespace Asset
 				static_cast<void>(TryAssignTextureSlotFromNearbyFiles(material, *aiMaterialPtr, materialIndex, slot, keywordSpan, sourcePath, textureFiles));
 			};
 
-			assignSlot(MaterialTextureSlot::BaseColor, kBaseColorTypes, kBaseColorKeywords);
-			assignSlot(MaterialTextureSlot::Normal, kNormalTypes, kNormalKeywords);
-			assignSlot(MaterialTextureSlot::MetallicRoughness, kMetallicRoughnessTypes, kMetallicRoughnessKeywords);
-			assignSlot(MaterialTextureSlot::Metallic, kMetallicTypes, kMetallicKeywords);
-			assignSlot(MaterialTextureSlot::Roughness, kRoughnessTypes, kRoughnessKeywords);
-			assignSlot(MaterialTextureSlot::AO, kAoTypes, kAoKeywords);
-			assignSlot(MaterialTextureSlot::Emissive, kEmissiveTypes, kEmissiveKeywords);
-			assignSlot(MaterialTextureSlot::Opacity, kOpacityTypes, kOpacityKeywords);
-			assignSlot(MaterialTextureSlot::Specular, kSpecularTypes, kSpecularKeywords);
-			assignSlot(MaterialTextureSlot::Shininess, kShininessTypes, kShininessKeywords);
+			assignSlot(MaterialTextureSlot::BaseColor, kBaseColorTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::BaseColor));
+			assignSlot(MaterialTextureSlot::Normal, kNormalTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::Normal));
+			assignSlot(MaterialTextureSlot::MetallicRoughness, kMetallicRoughnessTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::MetallicRoughness));
+			assignSlot(MaterialTextureSlot::Metallic, kMetallicTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::Metallic));
+			assignSlot(MaterialTextureSlot::Roughness, kRoughnessTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::Roughness));
+			assignSlot(MaterialTextureSlot::AO, kAoTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::AO));
+			assignSlot(MaterialTextureSlot::Emissive, kEmissiveTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::Emissive));
+			assignSlot(MaterialTextureSlot::Opacity, kOpacityTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::Opacity));
+			assignSlot(MaterialTextureSlot::Specular, kSpecularTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::Specular));
+			assignSlot(MaterialTextureSlot::Shininess, kShininessTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::Shininess));
 
 			material.ImportedDiffuseTint = material.DiffuseColor;
 			if (HasMaterialSlotSource(material, MaterialTextureSlot::BaseColor))
@@ -1275,7 +1474,92 @@ namespace Asset
 			return meshAsset;
 		}
 
-		void PopulateInspectionSummary(ModelInspectionSummary& summary, const aiScene* scene, std::string_view assimpError)
+		void PopulateTextureInspection(ModelInspectionSummary& summary, const aiScene& scene, const std::filesystem::path& sourcePath)
+		{
+			static constexpr std::array kBaseColorTypes = { aiTextureType_BASE_COLOR, aiTextureType_DIFFUSE };
+			static constexpr std::array kNormalTypes = { aiTextureType_NORMAL_CAMERA, aiTextureType_NORMALS, aiTextureType_HEIGHT };
+			static constexpr std::array kMetallicTypes = { aiTextureType_METALNESS };
+			static constexpr std::array kRoughnessTypes = { aiTextureType_DIFFUSE_ROUGHNESS };
+			static constexpr std::array<aiTextureType, 0> kMetallicRoughnessTypes = {};
+			static constexpr std::array kAoTypes = { aiTextureType_AMBIENT_OCCLUSION, aiTextureType_LIGHTMAP };
+			static constexpr std::array kEmissiveTypes = { aiTextureType_EMISSION_COLOR, aiTextureType_EMISSIVE };
+			static constexpr std::array kOpacityTypes = { aiTextureType_OPACITY };
+			static constexpr std::array kSpecularTypes = { aiTextureType_SPECULAR };
+			static constexpr std::array kShininessTypes = { aiTextureType_SHININESS };
+
+			const std::vector<TextureFileCandidate> textureFiles = CollectNearbyTextureFiles(sourcePath);
+			for (uint32_t materialIndex = 0; materialIndex < scene.mNumMaterials; ++materialIndex)
+			{
+				const aiMaterial* material = scene.mMaterials[materialIndex];
+				if (!material)
+				{
+					continue;
+				}
+
+				aiString aiMaterialName;
+				std::string materialName;
+				if (material->Get(AI_MATKEY_NAME, aiMaterialName) == aiReturn_SUCCESS)
+				{
+					materialName = aiMaterialName.C_Str();
+				}
+
+				const auto inspectSlot = [&]<typename TypeArray>(
+					MaterialTextureSlot slot,
+					const TypeArray& textureTypes,
+					std::span<const std::string_view> keywordSpan)
+				{
+					const std::span<const aiTextureType> textureTypeSpan(textureTypes.data(), textureTypes.size());
+					const bool resolvedFromTypedSlot = InspectTextureSlotFromTypes(
+						summary,
+						*material,
+						materialIndex,
+						materialName,
+						slot,
+						textureTypeSpan,
+						sourcePath);
+					if (resolvedFromTypedSlot)
+					{
+						return;
+					}
+
+					const bool resolvedByName = InspectTextureSlotByName(
+						summary,
+						*material,
+						materialIndex,
+						materialName,
+						slot,
+						keywordSpan,
+						sourcePath);
+					if (resolvedByName)
+					{
+						return;
+					}
+
+					InspectTextureSlotFromNearbyFiles(
+						summary,
+						*material,
+						materialIndex,
+						materialName,
+						slot,
+						keywordSpan,
+						sourcePath,
+						textureFiles);
+				};
+
+				inspectSlot(MaterialTextureSlot::BaseColor, kBaseColorTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::BaseColor));
+				inspectSlot(MaterialTextureSlot::Normal, kNormalTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::Normal));
+				inspectSlot(MaterialTextureSlot::MetallicRoughness, kMetallicRoughnessTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::MetallicRoughness));
+				inspectSlot(MaterialTextureSlot::Metallic, kMetallicTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::Metallic));
+				inspectSlot(MaterialTextureSlot::Roughness, kRoughnessTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::Roughness));
+				inspectSlot(MaterialTextureSlot::AO, kAoTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::AO));
+				inspectSlot(MaterialTextureSlot::Emissive, kEmissiveTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::Emissive));
+				inspectSlot(MaterialTextureSlot::Opacity, kOpacityTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::Opacity));
+				inspectSlot(MaterialTextureSlot::Specular, kSpecularTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::Specular));
+				inspectSlot(MaterialTextureSlot::Shininess, kShininessTypes, TextureMatching::SlotKeywords(MaterialTextureSlot::Shininess));
+			}
+		}
+
+		void PopulateInspectionSummary(ModelInspectionSummary& summary, const aiScene* scene, const std::filesystem::path& sourcePath, std::string_view assimpError)
 		{
 			summary.AssimpError = assimpError;
 			if (!scene)
@@ -1315,6 +1599,8 @@ namespace Asset
 					++summary.RenderableMeshCount;
 				}
 			}
+
+			PopulateTextureInspection(summary, *scene, sourcePath);
 		}
 	}
 
@@ -1329,7 +1615,7 @@ namespace Asset
 				path.c_str(),
 				aiProcess_Triangulate);
 
-			PopulateInspectionSummary(summary, scene, importer.GetErrorString());
+			PopulateInspectionSummary(summary, scene, std::filesystem::path(path), importer.GetErrorString());
 		}
 		catch (const std::exception& exception)
 		{
@@ -1341,19 +1627,17 @@ namespace Asset
 
 	std::unique_ptr<StaticMeshAsset> AssimpModelLoader::LoadStaticMesh(std::string_view filePath) const
 	{
+		return LoadStaticMesh(filePath, AssimpLoadOptions{});
+	}
+
+	std::unique_ptr<StaticMeshAsset> AssimpModelLoader::LoadStaticMesh(std::string_view filePath, const AssimpLoadOptions& options) const
+	{
 		try
 		{
 			Assimp::Importer importer;
 			const aiScene* scene = importer.ReadFile(
 				filePath.data(),
-				aiProcess_Triangulate |
-				aiProcess_JoinIdenticalVertices |
-				aiProcess_GenSmoothNormals |
-				aiProcess_CalcTangentSpace |
-				aiProcess_PreTransformVertices |
-				aiProcess_ImproveCacheLocality |
-				aiProcess_SortByPType |
-				aiProcess_FlipUVs);
+				BuildStaticPostProcessFlags(options));
 
 			if (!scene || !scene->mRootNode || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) != 0)
 			{
@@ -1365,7 +1649,7 @@ namespace Asset
 				return nullptr;
 			}
 
-			if (scene->HasAnimations())
+			if (scene->HasAnimations() && !options.AllowAnimatedSceneAsStatic)
 			{
 				std::string errorMessage = "Rejected animated asset in static loader: '";
 				errorMessage.append(filePath);
@@ -1389,19 +1673,17 @@ namespace Asset
 
 	std::unique_ptr<StaticMeshAsset> AssimpModelLoader::LoadAnimatedMesh(std::string_view filePath) const
 	{
+		return LoadAnimatedMesh(filePath, AssimpLoadOptions{});
+	}
+
+	std::unique_ptr<StaticMeshAsset> AssimpModelLoader::LoadAnimatedMesh(std::string_view filePath, const AssimpLoadOptions& options) const
+	{
 		try
 		{
 			Assimp::Importer importer;
 			const aiScene* scene = importer.ReadFile(
 				filePath.data(),
-				aiProcess_Triangulate |
-				aiProcess_JoinIdenticalVertices |
-				aiProcess_GenSmoothNormals |
-				aiProcess_CalcTangentSpace |
-				aiProcess_LimitBoneWeights |
-				aiProcess_ImproveCacheLocality |
-				aiProcess_SortByPType |
-				aiProcess_FlipUVs);
+				BuildAnimatedPostProcessFlags(options));
 
 			if (!scene || !scene->mRootNode || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) != 0)
 			{

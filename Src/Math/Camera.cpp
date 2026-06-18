@@ -47,6 +47,11 @@ void Camera::SetLens(float fovY, float aspect, float nearZ, float farZ) noexcept
 	Math::Store(m_Projection, XMMatrixPerspectiveFovLH(fovY, aspect, nearZ, farZ));
 }
 
+void Camera::SetMoveSpeed(float moveSpeed) noexcept
+{
+	m_MoveSpeed = std::clamp(moveSpeed, 0.1f, 5000.0f);
+}
+
 void Camera::SetRotation(float pitch, float yaw) noexcept
 {
 	m_Pitch = std::clamp(pitch, -XM_PIDIV2 + 0.01f, XM_PIDIV2 - 0.01f);

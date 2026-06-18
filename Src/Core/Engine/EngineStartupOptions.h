@@ -10,6 +10,7 @@
 struct EngineStartupOptions
 {
 	std::optional<std::filesystem::path> ProjectFilePath;
+	std::optional<std::filesystem::path> RuntimePackageManifestPath;
 	std::optional<std::uint32_t> SmokeTestFrameLimit;
 	std::optional<std::filesystem::path> SmokeLogPath;
 	std::optional<GraphicsAPI> SmokeGraphicsApi;

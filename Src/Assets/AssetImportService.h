@@ -30,6 +30,7 @@ namespace Asset
 	{
 		bool HasTargetEntity = false;
 		EntityId TargetEntity = InvalidEntityId;
+		uint64_t RestoreGeneration = 0;
 		std::string EntityName;
 		Math::Transform LocalTransform = Math::Transform::Identity();
 		bool MeshEnabled = true;
@@ -57,6 +58,7 @@ namespace Asset
 		bool IsReload = false;
 		bool Success = false;
 		bool IsAnimated = false;
+		bool GenerateColliders = false;
 		std::string ErrorMessage;
 		std::vector<std::string> Diagnostics;
 		AssetImportPlacement Placement;

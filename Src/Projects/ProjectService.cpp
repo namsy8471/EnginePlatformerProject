@@ -1,5 +1,7 @@
 #include "ProjectService.h"
 
+#include "Rendering/Sky/SkyboxAsset.h"
+
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
 #include <rapidjson/prettywriter.h>
@@ -96,6 +98,7 @@ namespace Projects
 		std::string errorMessage;
 		if (!CreateDirectoryIfMissing(descriptor.RootPath, errorMessage) ||
 			!CreateDirectoryIfMissing(descriptor.RootPath / descriptor.AssetRoot, errorMessage) ||
+			!CreateDirectoryIfMissing(descriptor.RootPath / descriptor.AssetRoot / "Skyboxes", errorMessage) ||
 			!CreateDirectoryIfMissing(descriptor.RootPath / descriptor.ScenesRoot, errorMessage) ||
 			!CreateDirectoryIfMissing(descriptor.RootPath / descriptor.SettingsRoot, errorMessage) ||
 			!CreateDirectoryIfMissing(descriptor.RootPath / "Library", errorMessage) ||
@@ -112,9 +115,38 @@ namespace Projects
 				"{\n"
 				"  \"fileVersion\": 1,\n"
 				"  \"name\": \"Main\",\n"
+				"  \"lighting\": {\n"
+				"    \"ambientColor\": [0.62, 0.68, 0.78],\n"
+				"    \"ambientIntensity\": 0.35,\n"
+				"    \"exposure\": 1.0,\n"
+				"    \"skybox\": {\n"
+				"      \"enabled\": true,\n"
+				"      \"zenithColor\": [0.32, 0.55, 0.95],\n"
+				"      \"horizonColor\": [0.78, 0.88, 1.0],\n"
+				"      \"groundColor\": [0.34, 0.39, 0.46],\n"
+				"      \"sunColor\": [1.0, 0.86, 0.58],\n"
+				"      \"sunDirection\": [-0.35, 0.78, -0.42],\n"
+				"      \"intensity\": 1.0,\n"
+				"      \"horizonHeight\": -0.04,\n"
+				"      \"horizonBlend\": 1.35,\n"
+				"      \"sunSize\": 0.035,\n"
+				"      \"sunIntensity\": 1.15\n"
+				"    }\n"
+				"  },\n"
 				"  \"entities\": []\n"
 				"}\n";
 			if (!WriteTextFile(startupScenePath, scenePlaceholder, errorMessage))
+			{
+				result.ErrorMessage = errorMessage;
+				return result;
+			}
+		}
+
+		const std::filesystem::path defaultSkyboxPath = descriptor.RootPath / descriptor.AssetRoot / "Skyboxes" / "Default.skybox";
+		if (!std::filesystem::exists(defaultSkyboxPath))
+		{
+			const std::string skyboxJson = Rendering::BuildSkyboxAssetJson(Rendering::SkyboxSettings{});
+			if (!WriteTextFile(defaultSkyboxPath, skyboxJson, errorMessage))
 			{
 				result.ErrorMessage = errorMessage;
 				return result;

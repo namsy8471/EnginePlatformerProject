@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Rendering/Lighting/ShadowSystem.h"
+#include "Rendering/Sky/SkyboxSettings.h"
 #include "Scene/Scene.h"
 #include "Math/Camera.h"
 
@@ -83,6 +84,7 @@ struct alignas(16) DeferredLightingConstants
 		0.0f, 0.0f, 0.0f, 1.0f };
 	DirectX::XMFLOAT4 ShadowParams = { 0.0f, 0.0015f, 0.02f, 0.75f };
 	DirectX::XMFLOAT4 ShadowDirection = { -0.45f, 0.75f, -0.45f, 0.0f };
+	Rendering::SkyboxGpuConstants Skybox = {};
 };
 
 namespace RenderSystem

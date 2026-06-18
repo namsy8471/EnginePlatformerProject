@@ -12,6 +12,14 @@ layout(set = 0, binding = 0) uniform DeferredLightingConstants
 	mat4 ShadowViewProjection;
 	vec4 ShadowParams;
 	vec4 ShadowDirection;
+	vec4 SkyCameraRightTanX;
+	vec4 SkyCameraUpTanY;
+	vec4 SkyCameraForwardEnabled;
+	vec4 SkyZenithColorIntensity;
+	vec4 SkyHorizonColorBlend;
+	vec4 SkyGroundColorHorizon;
+	vec4 SkySunDirectionSize;
+	vec4 SkySunColorIntensity;
 } lightingConstants;
 
 struct GpuLightData
@@ -273,13 +281,49 @@ vec3 applyPhong(vec3 baseColor, vec3 normal, vec3 worldPosition, float shininess
 	return baseColor * (ambient + diffuseLighting) + specularLighting;
 }
 
+vec3 buildSkyDirection(vec2 texCoord)
+{
+	const vec2 ndc = vec2(texCoord.x * 2.0 - 1.0, 1.0 - texCoord.y * 2.0);
+	return normalize(
+		lightingConstants.SkyCameraForwardEnabled.xyz +
+		lightingConstants.SkyCameraRightTanX.xyz * ndc.x * lightingConstants.SkyCameraRightTanX.w +
+		lightingConstants.SkyCameraUpTanY.xyz * ndc.y * lightingConstants.SkyCameraUpTanY.w);
+}
+
+vec3 evaluateSky(vec2 texCoord)
+{
+	if (lightingConstants.SkyCameraForwardEnabled.w < 0.5)
+	{
+		return vec3(0.025, 0.027, 0.032);
+	}
+
+	const vec3 direction = buildSkyDirection(texCoord);
+	const float horizonHeight = clamp(lightingConstants.SkyGroundColorHorizon.w, -0.95, 0.95);
+	const float blend = max(lightingConstants.SkyHorizonColorBlend.w, 0.05);
+	const float height = direction.y;
+	const float topFactor = clamp((height - horizonHeight) / max(1.0 - horizonHeight, 0.001), 0.0, 1.0);
+	const float bottomFactor = clamp((horizonHeight - height) / max(1.0 + horizonHeight, 0.001), 0.0, 1.0);
+	vec3 color = mix(lightingConstants.SkyHorizonColorBlend.rgb, lightingConstants.SkyZenithColorIntensity.rgb, pow(topFactor, blend));
+	color = mix(color, lightingConstants.SkyGroundColorHorizon.rgb, pow(bottomFactor, blend));
+	color *= lightingConstants.SkyZenithColorIntensity.w;
+
+	const vec3 sunDirection = normalize(lightingConstants.SkySunDirectionSize.xyz);
+	const float sunDot = clamp(dot(direction, sunDirection), 0.0, 1.0);
+	const float sunSize = clamp(lightingConstants.SkySunDirectionSize.w, 0.001, 0.35);
+	const float sunCore = smoothstep(cos(sunSize * 1.45), cos(sunSize), sunDot);
+	const float sunGlow = pow(sunDot, max(2.0, 0.18 / sunSize));
+	color += lightingConstants.SkySunColorIntensity.rgb * lightingConstants.SkySunColorIntensity.w * (sunCore + sunGlow * 0.18);
+	return color;
+}
+
 void main()
 {
 	const vec2 texCoord = gl_FragCoord.xy * lightingConstants.ScreenSize.zw;
 	const vec4 albedo = texture(gBufferAlbedo, texCoord);
 	if (albedo.a < 0.001)
 	{
-		discard;
+		outColor = vec4(evaluateSky(texCoord), 1.0);
+		return;
 	}
 
 	const vec4 normalPacked = texture(gBufferNormal, texCoord);

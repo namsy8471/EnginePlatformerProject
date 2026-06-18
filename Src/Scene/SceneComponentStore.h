@@ -12,7 +12,39 @@
 
 class SceneComponentStore
 {
+private:
+	struct IComponentPool;
+
 public:
+	SceneComponentStore() = default;
+
+	SceneComponentStore(const SceneComponentStore& other)
+	{
+		for (const auto& [type, pool] : other.m_Pools)
+		{
+			m_Pools.emplace(type, pool->Clone());
+		}
+	}
+
+	SceneComponentStore& operator=(const SceneComponentStore& other)
+	{
+		if (this == &other)
+		{
+			return *this;
+		}
+
+		Memory::UnorderedMap<std::type_index, std::unique_ptr<IComponentPool>, Memory::MemoryTag::Scene> clonedPools;
+		for (const auto& [type, pool] : other.m_Pools)
+		{
+			clonedPools.emplace(type, pool->Clone());
+		}
+		m_Pools = std::move(clonedPools);
+		return *this;
+	}
+
+	SceneComponentStore(SceneComponentStore&&) noexcept = default;
+	SceneComponentStore& operator=(SceneComponentStore&&) noexcept = default;
+
 	template <typename Component>
 	using ComponentMap = Memory::UnorderedMap<EntityId, Component, Memory::MemoryTag::Scene>;
 
@@ -135,6 +167,7 @@ private:
 	{
 		virtual ~IComponentPool() = default;
 		virtual bool Remove(EntityId entityId) = 0;
+		[[nodiscard]] virtual std::unique_ptr<IComponentPool> Clone() const = 0;
 	};
 
 	template <typename Component>
@@ -147,6 +180,11 @@ private:
 		{
 			DisabledEntities.erase(entityId);
 			return Components.erase(entityId) > 0;
+		}
+
+		[[nodiscard]] std::unique_ptr<IComponentPool> Clone() const override
+		{
+			return std::make_unique<ComponentPool<Component>>(*this);
 		}
 
 		[[nodiscard]] bool IsEnabled(EntityId entityId) const

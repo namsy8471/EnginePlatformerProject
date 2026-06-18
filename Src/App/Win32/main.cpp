@@ -109,6 +109,7 @@ namespace
 		{
 			const std::wstring_view argument(arguments[argumentIndex]);
 			constexpr std::wstring_view projectPrefix = L"--project=";
+			constexpr std::wstring_view runtimePackagePrefix = L"--runtime-package=";
 			constexpr std::wstring_view smokeTestPrefix = L"--smoke-test=";
 			constexpr std::wstring_view smokeFramesPrefix = L"--smoke-frames=";
 			constexpr std::wstring_view smokeLogPrefix = L"--smoke-log=";
@@ -123,6 +124,18 @@ namespace
 			if (argument.starts_with(projectPrefix))
 			{
 				options.ProjectFilePath = std::filesystem::path(argument.substr(projectPrefix.size()));
+				continue;
+			}
+
+			if (argument == L"--runtime-package" && argumentIndex + 1 < argumentCount)
+			{
+				options.RuntimePackageManifestPath = std::filesystem::path(arguments[++argumentIndex]);
+				continue;
+			}
+
+			if (argument.starts_with(runtimePackagePrefix))
+			{
+				options.RuntimePackageManifestPath = std::filesystem::path(argument.substr(runtimePackagePrefix.size()));
 				continue;
 			}
 

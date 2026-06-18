@@ -89,6 +89,8 @@ namespace Rendering
 		Microsoft::WRL::ComPtr<ID3D12RootSignature> RootSignature;
 		Microsoft::WRL::ComPtr<ID3D12PipelineState> PipelineState;
 		Microsoft::WRL::ComPtr<ID3D12PipelineState> TransparentPipelineState;
+		Microsoft::WRL::ComPtr<ID3D12RootSignature> SkyboxRootSignature;
+		Microsoft::WRL::ComPtr<ID3D12PipelineState> SkyboxPipelineState;
 		Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> ShaderResourceHeap;
 		std::vector<MaterialTexture> MaterialTextures;
 		size_t MaterialCount = 0;
@@ -155,6 +157,10 @@ namespace Rendering
 		VkPipelineLayout PipelineLayout = nullptr;
 		VkPipeline Pipeline = nullptr;
 		VkPipeline TransparentPipeline = nullptr;
+		VkShaderModule SkyboxVertexShader = nullptr;
+		VkShaderModule SkyboxFragmentShader = nullptr;
+		VkPipelineLayout SkyboxPipelineLayout = nullptr;
+		VkPipeline SkyboxPipeline = nullptr;
 		bool IsValid = false;
 
 		struct DeferredResources

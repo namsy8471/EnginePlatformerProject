@@ -123,6 +123,9 @@
     <ClInclude Include="Src\Scene\TransformComponent.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
+    <ClInclude Include="Src\Scripting\ScriptRuntime.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
     <ClInclude Include="Src\Scene\Scene.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
@@ -192,16 +195,25 @@
     <ClInclude Include="Src\Assets\AssetFileSystem.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
+    <ClInclude Include="Src\Assets\AssetDatabase.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
     <ClInclude Include="Src\Assets\AssetHotReloadService.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
     <ClInclude Include="Src\Assets\AssetImportService.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
+    <ClInclude Include="Src\Assets\AssetImportSettings.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
     <ClInclude Include="Src\Assets\PrimitiveMeshFactory.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
     <ClInclude Include="Src\Assets\RuntimeAssetRegistry.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Assets\TextureMatching.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
     <ClInclude Include="Src\Physics\PhysicsComponents.h">
@@ -267,6 +279,24 @@
     <ClInclude Include="Src\Rendering\Post\PostProcessSystem.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
+    <ClInclude Include="Src\Rendering\Sky\SkyboxAsset.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Rendering\Sky\SkyboxSettings.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Editor\EditorCommandStack.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Projects\ProjectBuildService.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Reflection\SceneComponentReflection.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Src\Scene\PrefabService.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Src\App\Win32\main.cpp">
@@ -311,6 +341,9 @@
     <ClCompile Include="Src\Scene\ScenePersistenceService.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
+    <ClCompile Include="Src\Scripting\ScriptRuntime.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
     <ClCompile Include="Src\Utilities\ShaderUtils.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
@@ -338,10 +371,16 @@
     <ClCompile Include="Src\Assets\AssetFileSystem.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
+    <ClCompile Include="Src\Assets\AssetDatabase.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
     <ClCompile Include="Src\Assets\AssetHotReloadService.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
     <ClCompile Include="Src\Assets\AssetImportService.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Assets\AssetImportSettings.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
     <ClCompile Include="Src\Assets\PrimitiveMeshFactory.cpp">
@@ -395,6 +434,21 @@
     <ClCompile Include="Src\Rendering\Post\PostProcessSystem.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
+    <ClCompile Include="Src\Rendering\Sky\SkyboxAsset.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Editor\EditorCommandStack.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Projects\ProjectBuildService.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Reflection\SceneComponentReflection.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Scene\PrefabService.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Src\App\Win32\DX12Eninge.rc">
@@ -418,6 +472,8 @@
     <None Include="Src\Rendering\Backends\Vulkan\Shaders\DeferredGeometry.vert" />
     <None Include="Src\Rendering\Backends\Vulkan\Shaders\DeferredLighting.frag" />
     <None Include="Src\Rendering\Backends\Vulkan\Shaders\DeferredLighting.vert" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\Skybox.frag" />
+    <None Include="Src\Rendering\Backends\Vulkan\Shaders\Skybox.vert" />
     <None Include="Src\Rendering\Backends\Vulkan\Shaders\ShadowDepth.vert" />
     <None Include="Src\Rendering\Backends\Vulkan\Shaders\ToneMap.frag" />
     <None Include="Src\Rendering\Backends\Vulkan\Shaders\ToneMap.vert" />
@@ -426,6 +482,7 @@
     <None Include="Src\Rendering\Backends\DirectX12\Shaders\DeferredGeometry.hlsl" />
     <None Include="Src\Rendering\Backends\DirectX12\Shaders\DeferredLighting.hlsl" />
     <None Include="Src\Rendering\Backends\DirectX12\Shaders\ShadowDepth.hlsl" />
+    <None Include="Src\Rendering\Backends\DirectX12\Shaders\Skybox.hlsl" />
     <None Include="Src\Rendering\Backends\DirectX12\Shaders\ToneMap.hlsl" />
     <None Include="Src\Rendering\Backends\DirectX12\Shaders\Triangle.hlsl" />
   </ItemGroup>

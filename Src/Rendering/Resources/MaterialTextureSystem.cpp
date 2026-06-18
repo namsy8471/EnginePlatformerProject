@@ -1,5 +1,6 @@
 #include "MaterialTextureSystem.h"
 
+#include "Assets/AssetImportSettings.h"
 #include "Scene/SceneRenderState.h"
 
 #include <stb_image.h>
@@ -102,18 +103,26 @@ namespace Rendering
 			target.Width = width;
 			target.Height = height;
 			target.Srgb = Asset::IsMaterialTextureSlotSrgb(slot);
+			const std::filesystem::path textureSettingsPath = Asset::AssetImportSettingsService::GetSettingsPathForAsset(texturePath);
+			const bool hasTextureSettingsFile = std::filesystem::exists(textureSettingsPath);
+			const Asset::AssetImportSettingsResult importSettings = Asset::AssetImportSettingsService::LoadOrDefault(texturePath);
+			if (importSettings.Success)
+			{
+				target.Srgb = importSettings.Settings.Texture.NormalMap ? false : importSettings.Settings.Texture.Srgb;
+			}
 			target.Pixels.assign(pixels, pixels + static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
 			stbi_image_free(pixels);
 
 			if (logCallback)
 			{
 				logCallback(std::format(
-					"Material texture loaded - MaterialIndex={} Slot={} Path={} SourceChannels={} UploadedAs={}",
+					"Material texture loaded - MaterialIndex={} Slot={} Path={} SourceChannels={} UploadedAs={} ImportSettings={}",
 					materialIndex,
 					Asset::MaterialTextureSlotName(slot),
 					texturePath.string(),
 					channels,
-					target.Srgb ? "sRGB RGBA8" : "linear RGBA8"));
+					target.Srgb ? "sRGB RGBA8" : "linear RGBA8",
+					hasTextureSettingsFile && importSettings.Success ? "sidecar" : "default"));
 			}
 			return true;
 		}

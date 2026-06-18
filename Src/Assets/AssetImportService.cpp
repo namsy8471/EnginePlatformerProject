@@ -2,9 +2,11 @@
 
 #include "Assets/AssimpModelLoader.h"
 #include "Assets/AssetFileSystem.h"
+#include "Assets/AssetImportSettings.h"
 #include "Rendering/Resources/MaterialTextureSystem.h"
 
 #include <algorithm>
+#include <cmath>
 #include <format>
 #include <limits>
 #include <string_view>
@@ -164,6 +166,113 @@ namespace Asset
 				}
 			}
 		}
+
+		[[nodiscard]] float DegreesToRadians(float degrees) noexcept
+		{
+			return degrees * DirectX::XM_PI / 180.0f;
+		}
+
+		void ApplyImportTransform(StaticMeshAsset& mesh, const ModelImportSettings& settings, std::vector<std::string>& diagnostics)
+		{
+			const bool hasScale = std::isfinite(settings.Scale) && std::fabs(settings.Scale - 1.0f) > 1.0e-5f;
+			const bool hasRotation =
+				std::fabs(settings.RotationOffset.x) > 1.0e-5f ||
+				std::fabs(settings.RotationOffset.y) > 1.0e-5f ||
+				std::fabs(settings.RotationOffset.z) > 1.0e-5f;
+			if (!hasScale && !hasRotation)
+			{
+				return;
+			}
+
+			if (mesh.IsAnimated)
+			{
+				diagnostics.push_back("Import settings: scale/rotationOffset skipped for animated mesh to preserve CPU skinning bind pose.");
+				return;
+			}
+
+			const float scale = std::isfinite(settings.Scale) && settings.Scale > 0.0f ? settings.Scale : 1.0f;
+			const DirectX::XMMATRIX transform =
+				DirectX::XMMatrixScaling(scale, scale, scale) *
+				DirectX::XMMatrixRotationRollPitchYaw(
+					DegreesToRadians(settings.RotationOffset.x),
+					DegreesToRadians(settings.RotationOffset.y),
+					DegreesToRadians(settings.RotationOffset.z));
+			const DirectX::XMMATRIX normalTransform = DirectX::XMMatrixRotationRollPitchYaw(
+				DegreesToRadians(settings.RotationOffset.x),
+				DegreesToRadians(settings.RotationOffset.y),
+				DegreesToRadians(settings.RotationOffset.z));
+
+			for (StaticMeshVertex& vertex : mesh.Vertices)
+			{
+				DirectX::XMStoreFloat3(
+					&vertex.Position,
+					DirectX::XMVector3TransformCoord(DirectX::XMLoadFloat3(&vertex.Position), transform));
+				DirectX::XMStoreFloat3(
+					&vertex.Normal,
+					DirectX::XMVector3Normalize(DirectX::XMVector3TransformNormal(DirectX::XMLoadFloat3(&vertex.Normal), normalTransform)));
+				DirectX::XMStoreFloat3(
+					&vertex.Tangent,
+					DirectX::XMVector3Normalize(DirectX::XMVector3TransformNormal(DirectX::XMLoadFloat3(&vertex.Tangent), normalTransform)));
+			}
+			mesh.BindPoseVertices = mesh.Vertices;
+			diagnostics.push_back(std::format(
+				"Import settings applied: scale={:.4f}, rotationOffsetDegrees=({:.2f}, {:.2f}, {:.2f})",
+				scale,
+				settings.RotationOffset.x,
+				settings.RotationOffset.y,
+				settings.RotationOffset.z));
+		}
+
+		void ApplyMaterialImportSettings(StaticMeshAsset& mesh, const ModelImportSettings& settings, std::vector<std::string>& diagnostics)
+		{
+			if (!settings.ImportMaterials)
+			{
+				StaticMeshMaterial defaultMaterial;
+				defaultMaterial.Name = "Default Imported Material";
+				defaultMaterial.ShadingModel = MaterialShadingModel::Phong;
+				defaultMaterial.DiffuseColor = { 1.0f, 1.0f, 1.0f, 1.0f };
+				defaultMaterial.UseVertexColor = false;
+				mesh.Materials.clear();
+				mesh.Materials.push_back(std::move(defaultMaterial));
+				for (StaticMeshSubmesh& submesh : mesh.Submeshes)
+				{
+					submesh.MaterialIndex = 0;
+				}
+				diagnostics.push_back("Import settings applied: importMaterials=false, replaced imported materials with one default Phong material.");
+				return;
+			}
+
+			for (StaticMeshMaterial& material : mesh.Materials)
+			{
+				material.NormalYFlip = settings.NormalYFlip;
+			}
+			if (settings.NormalYFlip)
+			{
+				diagnostics.push_back("Import settings applied: normalYFlip=true for imported materials.");
+			}
+		}
+
+		void ApplyAnimationImportSettings(StaticMeshAsset& mesh, const ModelImportSettings& settings, std::vector<std::string>& diagnostics)
+		{
+			if (settings.ImportAnimations)
+			{
+				return;
+			}
+
+			mesh.IsAnimated = false;
+			mesh.AnimationCount = 0;
+			mesh.BoneCount = 0;
+			mesh.Bones.clear();
+			mesh.BoneIndices.clear();
+			mesh.Animations.clear();
+			for (StaticMeshVertex& vertex : mesh.Vertices)
+			{
+				vertex.BoneIndices = { 0, 0, 0, 0 };
+				vertex.BoneWeights = { 0.0f, 0.0f, 0.0f, 0.0f };
+			}
+			mesh.BindPoseVertices = mesh.Vertices;
+			diagnostics.push_back("Import settings applied: importAnimations=false, imported as static mesh.");
+		}
 	}
 
 	AssetImportService::AssetImportService()
@@ -284,14 +393,48 @@ namespace Asset
 			return result;
 		}
 
+		AssetImportSettings importSettings;
+		importSettings.SourcePath = result.SourcePath;
+		const std::filesystem::path importSettingsPath = AssetImportSettingsService::GetSettingsPathForAsset(result.SourcePath);
+		const bool hasImportSettingsFile = std::filesystem::exists(importSettingsPath);
+		const AssetImportSettingsResult settingsResult = AssetImportSettingsService::LoadOrDefault(result.SourcePath);
+		if (settingsResult.Success)
+		{
+			importSettings = settingsResult.Settings;
+			result.Diagnostics.push_back(std::format(
+				"Import settings {}: {}",
+				hasImportSettingsFile ? "loaded" : "using defaults",
+				importSettingsPath.string()));
+		}
+		else
+		{
+			result.Diagnostics.push_back(std::format("Import settings unavailable, using defaults: {}", settingsResult.ErrorMessage));
+		}
+		result.GenerateColliders = importSettings.Model.GenerateColliders;
+
 		AssimpModelLoader loader;
 		const ModelInspectionSummary inspection = loader.InspectModel(result.SourcePath.string());
-		result.IsAnimated = inspection.HasScene ? inspection.HasAnimations : loader.HasAnimation(result.SourcePath.string());
+		result.IsAnimated = importSettings.Model.ImportAnimations && (inspection.HasScene ? inspection.HasAnimations : loader.HasAnimation(result.SourcePath.string()));
 		AppendInspectionDiagnostics(result.Diagnostics, inspection, result.IsAnimated ? "animated" : "static");
+		result.Diagnostics.push_back(std::format(
+			"Import settings model: scale={:.4f}, importMaterials={}, importAnimations={}, generateColliders={}, generateTangents={}, normalYFlip={}, rotationOffsetDegrees=({:.2f}, {:.2f}, {:.2f})",
+			importSettings.Model.Scale,
+			BoolText(importSettings.Model.ImportMaterials),
+			BoolText(importSettings.Model.ImportAnimations),
+			BoolText(importSettings.Model.GenerateColliders),
+			BoolText(importSettings.Model.GenerateTangents),
+			BoolText(importSettings.Model.NormalYFlip),
+			importSettings.Model.RotationOffset.x,
+			importSettings.Model.RotationOffset.y,
+			importSettings.Model.RotationOffset.z));
 
+		const AssimpLoadOptions loadOptions{
+			.GenerateTangents = importSettings.Model.GenerateTangents,
+			.AllowAnimatedSceneAsStatic = !importSettings.Model.ImportAnimations
+		};
 		result.Mesh = result.IsAnimated
-			? loader.LoadAnimatedMesh(result.SourcePath.string())
-			: loader.LoadStaticMesh(result.SourcePath.string());
+			? loader.LoadAnimatedMesh(result.SourcePath.string(), loadOptions)
+			: loader.LoadStaticMesh(result.SourcePath.string(), loadOptions);
 
 		if (!result.Mesh || result.Mesh->Vertices.empty() || result.Mesh->Indices.empty())
 		{
@@ -301,6 +444,9 @@ namespace Asset
 			return result;
 		}
 
+		ApplyAnimationImportSettings(*result.Mesh, importSettings.Model, result.Diagnostics);
+		ApplyImportTransform(*result.Mesh, importSettings.Model, result.Diagnostics);
+		ApplyMaterialImportSettings(*result.Mesh, importSettings.Model, result.Diagnostics);
 		ComputeBounds(*result.Mesh, result.LocalMin, result.LocalMax);
 		if (!Rendering::MaterialTextureSystem::LoadCpuMaterialTextures(
 			*result.Mesh,

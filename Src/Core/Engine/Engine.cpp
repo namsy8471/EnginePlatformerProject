@@ -6,6 +6,7 @@
 #include "Scene/PickingSystem.h"
 #include "App/Win32/Resource.h"
 #include "Rendering/Resources/MaterialTextureSystem.h"
+#include "Rendering/Sky/SkyboxAsset.h"
 #include "Rendering/Systems/RenderSystem.h"
 #include "Samples/Spider/SpiderSampleScene.h"
 #include "Utilities/ShaderUtils.h"
@@ -36,6 +37,7 @@
 
 #include <array>
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
@@ -48,6 +50,7 @@
 #include <span>
 #include <string_view>
 #include <system_error>
+#include <unordered_set>
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
@@ -108,6 +111,39 @@ namespace
 		return alignment > 0 ? ((value + alignment - 1) / alignment) * alignment : value;
 	}
 
+	[[nodiscard]] std::array<float, 4> BuildSkyClearColor(const Rendering::SkyboxSettings& skybox) noexcept
+	{
+		if (!skybox.Enabled)
+		{
+			return { 0.025f, 0.027f, 0.032f, 1.0f };
+		}
+
+		const DirectX::XMFLOAT3 color = Rendering::EstimateSkyboxClearColor(skybox);
+		return {
+			std::clamp(color.x, 0.0f, 8.0f),
+			std::clamp(color.y, 0.0f, 8.0f),
+			std::clamp(color.z, 0.0f, 8.0f),
+			1.0f
+		};
+	}
+
+	[[nodiscard]] std::string SanitizeFileStem(std::string_view name)
+	{
+		std::string sanitized;
+		sanitized.reserve(name.size());
+		for (const char character : name)
+		{
+			const bool valid =
+				(character >= 'a' && character <= 'z') ||
+				(character >= 'A' && character <= 'Z') ||
+				(character >= '0' && character <= '9') ||
+				character == '_' ||
+				character == '-';
+			sanitized.push_back(valid ? character : '_');
+		}
+		return sanitized.empty() ? "Entity" : sanitized;
+	}
+
 	template <typename Fn>
 	void MeasureRenderGraphPass(Rendering::RenderGraph& graph, size_t passIndex, Fn&& fn)
 	{
@@ -136,6 +172,22 @@ namespace
 			return "Collider";
 		case SceneComponentKind::PhysicsMaterial:
 			return "Physics Material";
+		case SceneComponentKind::PrefabInstance:
+			return "Prefab Instance";
+		case SceneComponentKind::SceneReference:
+			return "Scene Reference";
+		case SceneComponentKind::Script:
+			return "Script";
+		case SceneComponentKind::Sprite2D:
+			return "Sprite 2D";
+		case SceneComponentKind::UiElement:
+			return "UI Element";
+		case SceneComponentKind::AudioSource:
+			return "Audio Source";
+		case SceneComponentKind::NavigationAgent:
+			return "Navigation Agent";
+		case SceneComponentKind::NetworkIdentity:
+			return "Network Identity";
 		default:
 			return "Component";
 		}
@@ -353,6 +405,11 @@ namespace
 		return "Src/Rendering/Backends/DirectX12/Shaders/ToneMap.hlsl";
 	}
 
+	[[nodiscard]] constexpr std::string_view GetDx12SkyboxShaderPath() noexcept
+	{
+		return "Src/Rendering/Backends/DirectX12/Shaders/Skybox.hlsl";
+	}
+
 	[[nodiscard]] constexpr std::string_view GetVulkanVertexShaderPath() noexcept
 	{
 		return "Src/Rendering/Backends/Vulkan/Shaders/Triangle.vert";
@@ -391,6 +448,16 @@ namespace
 	[[nodiscard]] constexpr std::string_view GetVulkanToneMapFragmentShaderPath() noexcept
 	{
 		return "Src/Rendering/Backends/Vulkan/Shaders/ToneMap.frag";
+	}
+
+	[[nodiscard]] constexpr std::string_view GetVulkanSkyboxVertexShaderPath() noexcept
+	{
+		return "Src/Rendering/Backends/Vulkan/Shaders/Skybox.vert";
+	}
+
+	[[nodiscard]] constexpr std::string_view GetVulkanSkyboxFragmentShaderPath() noexcept
+	{
+		return "Src/Rendering/Backends/Vulkan/Shaders/Skybox.frag";
 	}
 
 	[[nodiscard]] constexpr std::string_view GetVulkanShadowDepthVertexShaderPath() noexcept
@@ -664,6 +731,7 @@ void Engine::InitializeJobSystem()
 {
 	m_JobSystem.Initialize();
 	m_PhaseScheduler.SetJobSystem(m_JobSystem);
+	m_ScriptRuntime.RegisterDefaultScripts();
 	AppendAssetLog(std::format("Job system initialized with {} workers.", m_JobSystem.GetWorkerCount()));
 }
 
@@ -676,6 +744,201 @@ void Engine::ShutdownJobSystem()
 EntityId Engine::CreateEntity(std::string_view name)
 {
 	return m_Scene.CreateEntity(name);
+}
+
+EntityId Engine::CreateEmptySceneEntity(std::string_view name, EntityId parentEntity)
+{
+	const std::string entityName = name.empty() ? std::string("Entity") : std::string(name);
+	const EntityId entityId = CreateEntity(entityName);
+	const DirectX::XMFLOAT3 cameraPosition = m_SceneCamera.GetPosition();
+	const DirectX::XMFLOAT3 cameraForward = m_SceneCamera.GetForward();
+	const DirectX::XMVECTOR target = DirectX::XMVectorAdd(
+		DirectX::XMLoadFloat3(&cameraPosition),
+		DirectX::XMVectorScale(DirectX::XMVector3Normalize(DirectX::XMLoadFloat3(&cameraForward)), 5.0f));
+	DirectX::XMFLOAT3 translation = {};
+	DirectX::XMStoreFloat3(&translation, target);
+
+	TransformComponent& transform = m_Scene.EnsureTransformComponent(entityId);
+	transform.LocalTransform = Math::Transform(translation, Math::IdentityQuaternion(), Math::OneVector3());
+	transform.UpdateWorld();
+	if (parentEntity != InvalidEntityId && m_Scene.ContainsEntity(parentEntity))
+	{
+		static_cast<void>(m_Scene.SetParentEntity(entityId, parentEntity, true));
+	}
+
+	m_Scene.SetSelectedEntity(entityId);
+	MarkSceneDirty();
+	AppendAssetLog(std::format("Created empty entity {} ({})", entityId, entityName));
+	return entityId;
+}
+
+EntityId Engine::CreateCameraSceneEntity(EntityId parentEntity)
+{
+	const EntityId entityId = CreateEmptySceneEntity("Camera", parentEntity);
+	CameraComponent& camera = m_Scene.EnsureCameraComponent(entityId);
+	camera.FovY = m_SceneCamera.GetFovY();
+	camera.NearZ = m_SceneCamera.GetNearZ();
+	camera.FarZ = m_SceneCamera.GetFarZ();
+	camera.IsGameCamera = false;
+	AppendAssetLog(std::format("Added Camera component to entity {}", entityId));
+	return entityId;
+}
+
+EntityId Engine::CreateLightSceneEntity(EntityId parentEntity)
+{
+	const EntityId entityId = CreateEmptySceneEntity("Light", parentEntity);
+	LightComponent& light = m_Scene.EnsureLightComponent(entityId);
+	light.Type = LightType::Directional;
+	light.Color = { 1.0f, 0.95f, 0.82f };
+	light.Intensity = 3.25f;
+	light.Range = 450.0f;
+	light.SpotAngle = DirectX::XM_PIDIV4;
+	light.Enabled = true;
+	AppendAssetLog(std::format("Added Light component to entity {}", entityId));
+	return entityId;
+}
+
+void Engine::CreateEmptySceneEntityWithUndo(std::string name, EntityId parentEntity)
+{
+	if (BlockEditSceneMutationDuringPlay("Create Entity"))
+	{
+		return;
+	}
+
+	if (name.empty())
+	{
+		name = "Entity";
+	}
+
+	const auto createdEntity = std::make_shared<EntityId>(InvalidEntityId);
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Create {}", name),
+		.Execute = [this, name, parentEntity, createdEntity]()
+		{
+			*createdEntity = CreateEmptySceneEntity(name, parentEntity);
+		},
+		.Undo = [this, createdEntity]()
+		{
+			if (*createdEntity != InvalidEntityId && m_Scene.ContainsEntity(*createdEntity))
+			{
+				DeleteEntityFromHierarchy(*createdEntity);
+				*createdEntity = InvalidEntityId;
+			}
+		}
+	});
+}
+
+void Engine::CreateCameraSceneEntityWithUndo(EntityId parentEntity)
+{
+	if (BlockEditSceneMutationDuringPlay("Create Camera"))
+	{
+		return;
+	}
+
+	const auto createdEntity = std::make_shared<EntityId>(InvalidEntityId);
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = "Create Camera",
+		.Execute = [this, parentEntity, createdEntity]()
+		{
+			*createdEntity = CreateCameraSceneEntity(parentEntity);
+		},
+		.Undo = [this, createdEntity]()
+		{
+			if (*createdEntity != InvalidEntityId && m_Scene.ContainsEntity(*createdEntity))
+			{
+				DeleteEntityFromHierarchy(*createdEntity);
+				*createdEntity = InvalidEntityId;
+			}
+		}
+	});
+}
+
+void Engine::CreateLightSceneEntityWithUndo(EntityId parentEntity)
+{
+	if (BlockEditSceneMutationDuringPlay("Create Light"))
+	{
+		return;
+	}
+
+	const auto createdEntity = std::make_shared<EntityId>(InvalidEntityId);
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = "Create Light",
+		.Execute = [this, parentEntity, createdEntity]()
+		{
+			*createdEntity = CreateLightSceneEntity(parentEntity);
+		},
+		.Undo = [this, createdEntity]()
+		{
+			if (*createdEntity != InvalidEntityId && m_Scene.ContainsEntity(*createdEntity))
+			{
+				DeleteEntityFromHierarchy(*createdEntity);
+				*createdEntity = InvalidEntityId;
+			}
+		}
+	});
+}
+
+void Engine::CreateEmptyParentForEntityWithUndo(EntityId childEntity)
+{
+	if (BlockEditSceneMutationDuringPlay("Create Empty Parent"))
+	{
+		return;
+	}
+
+	if (childEntity == InvalidEntityId || !m_Scene.ContainsEntity(childEntity))
+	{
+		return;
+	}
+
+	const std::string* childName = m_Scene.GetEntityName(childEntity);
+	const std::string parentName = std::format("{} Parent", childName && !childName->empty() ? *childName : std::string("Entity"));
+	const EntityId previousParent = m_Scene.GetParentEntity(childEntity);
+	Math::Transform parentWorldTransform = Math::Transform::Identity();
+	if (const TransformComponent* childTransform = m_Scene.GetTransformComponent(childEntity))
+	{
+		parentWorldTransform = childTransform->WorldTransform;
+	}
+
+	const auto createdParent = std::make_shared<EntityId>(InvalidEntityId);
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = "Create Empty Parent",
+		.Execute = [this, childEntity, previousParent, parentName, parentWorldTransform, createdParent]()
+		{
+			if (!m_Scene.ContainsEntity(childEntity))
+			{
+				return;
+			}
+
+			*createdParent = CreateEmptySceneEntity(parentName);
+			if (*createdParent == InvalidEntityId)
+			{
+				return;
+			}
+
+			if (TransformComponent* parentTransform = m_Scene.GetTransformComponent(*createdParent))
+			{
+				parentTransform->LocalTransform = parentWorldTransform;
+				parentTransform->WorldTransform = parentWorldTransform;
+			}
+			if (previousParent != InvalidEntityId && m_Scene.ContainsEntity(previousParent))
+			{
+				static_cast<void>(m_Scene.SetParentEntity(*createdParent, previousParent, true));
+			}
+			static_cast<void>(m_Scene.SetParentEntity(childEntity, *createdParent, true));
+			static_cast<void>(m_Scene.MoveEntityBefore(*createdParent, childEntity));
+			m_Scene.SetSelectedEntity(*createdParent);
+			MarkSceneDirty();
+			AppendAssetLog(std::format("Created empty parent entity {} for child {}", *createdParent, childEntity));
+		},
+		.Undo = [this, createdParent]()
+		{
+			if (*createdParent != InvalidEntityId && m_Scene.ContainsEntity(*createdParent))
+			{
+				DeleteEntityFromHierarchy(*createdParent);
+				*createdParent = InvalidEntityId;
+			}
+		}
+	});
 }
 
 TransformComponent* Engine::GetTransformComponent(EntityId entityId)
@@ -715,7 +978,7 @@ const std::string* Engine::GetEntityName(EntityId entityId) const
 
 bool Engine::IsMaterialTransparent(EntityId entityId, size_t materialIndex) const
 {
-	return m_RenderState.IsMaterialTransparent(m_Scene, entityId, materialIndex);
+	return m_RenderState.IsMaterialTransparent(GetRuntimeScene(), entityId, materialIndex);
 }
 
 void Engine::QueueModelImport(const std::filesystem::path& sourcePath, const Camera& placementCamera, bool isReload)
@@ -739,7 +1002,10 @@ void Engine::QueueModelImport(const std::filesystem::path& sourcePath, const Cam
 	AppendAssetLog(std::format("{} queued: {}", isReload ? "Reload" : "Import", sourcePath.string()));
 }
 
-void Engine::QueueModelImportForSceneEntity(const ScenePersistence::LoadedSceneEntity& loadedEntity, EntityId targetEntity)
+void Engine::QueueModelImportForSceneEntity(
+	const ScenePersistence::LoadedSceneEntity& loadedEntity,
+	EntityId targetEntity,
+	const std::filesystem::path& restoreSourcePrefabPath)
 {
 	if (!loadedEntity.HasMesh || loadedEntity.MeshAssetPath.empty())
 	{
@@ -756,6 +1022,7 @@ void Engine::QueueModelImportForSceneEntity(const ScenePersistence::LoadedSceneE
 	request.Placement.HasPlacement = false;
 	request.Restore.HasTargetEntity = true;
 	request.Restore.TargetEntity = targetEntity;
+	request.Restore.RestoreGeneration = ++m_MeshRestoreGenerations[targetEntity];
 	request.Restore.EntityName = loadedEntity.Name;
 	request.Restore.LocalTransform = loadedEntity.Transform;
 	request.Restore.MeshEnabled = loadedEntity.MeshEnabled;
@@ -763,6 +1030,30 @@ void Engine::QueueModelImportForSceneEntity(const ScenePersistence::LoadedSceneE
 	request.Restore.HasAnimator = loadedEntity.HasAnimator;
 	request.Restore.AnimatorEnabled = loadedEntity.AnimatorEnabled;
 	request.Restore.Animator = loadedEntity.Animator;
+
+	std::optional<std::filesystem::file_time_type> sourcePrefabWriteTime;
+	if (!restoreSourcePrefabPath.empty())
+	{
+		std::error_code writeTimeError;
+		sourcePrefabWriteTime = std::filesystem::last_write_time(restoreSourcePrefabPath, writeTimeError);
+		if (writeTimeError)
+		{
+			sourcePrefabWriteTime.reset();
+		}
+	}
+
+	m_MeshRestoreRequests[targetEntity] = MeshRestoreRequestState{
+		.Generation = request.Restore.RestoreGeneration,
+		.SourcePath = loadedEntity.MeshAssetPath,
+		.SourcePrefabPath = restoreSourcePrefabPath,
+		.SourcePrefabWriteTime = sourcePrefabWriteTime,
+		.ExpectedCurrentMeshSignature = BuildMeshRestoreSignature(targetEntity),
+		.Pending = true,
+		.Failed = false,
+		.Cancelled = false,
+		.Conflicted = false,
+		.Message = std::format("Queued async Mesh restore: {}", loadedEntity.MeshAssetPath.filename().string())
+	};
 	m_AssetImportService.Queue(std::move(request));
 
 	AppendAssetLog(std::format("Scene model restore queued: {}", loadedEntity.MeshAssetPath.string()));
@@ -819,8 +1110,18 @@ void Engine::DrainCompletedAssetJobs()
 			continue;
 		}
 
+		if (!result.IsReload && result.Restore.HasTargetEntity && result.Restore.RestoreGeneration != 0 && IsStaleMeshRestoreResult(result))
+		{
+			AppendAssetLog(std::format(
+				"Stale scene model restore discarded for entity {}: {}",
+				result.Restore.TargetEntity,
+				result.SourcePath.string()));
+			continue;
+		}
+
 		if (!result.Success)
 		{
+			MarkMeshRestoreFailed(result);
 			m_RuntimeAssetRegistry.UpdateStatus(result.SourcePath, result.ErrorMessage);
 			MarkResourceFailed(result.SourcePath, Resources::ResourceKind::Mesh, result.ErrorMessage);
 			AppendAssetLog(std::format("Asset job failed: {}", result.ErrorMessage));
@@ -850,7 +1151,7 @@ void Engine::DrainCompletedAssetJobs()
 	}
 }
 
-void Engine::ApplyImportedModel(Asset::AssetImportResult result)
+void Engine::ApplyImportedModel(Asset::AssetImportResult result, bool allowMeshRestoreConflict)
 {
 	if (!result.Mesh)
 	{
@@ -867,6 +1168,47 @@ void Engine::ApplyImportedModel(Asset::AssetImportResult result)
 		if (!m_Scene.ContainsEntity(entityId))
 		{
 			AppendAssetLog(std::format("Scene restore skipped for missing entity {}: {}", entityId, result.SourcePath.string()));
+			return;
+		}
+
+		if (result.Restore.RestoreGeneration != 0)
+		{
+			if (IsStaleMeshRestoreResult(result))
+			{
+				AppendAssetLog(std::format(
+					"Stale scene model restore discarded for entity {}: {}",
+					entityId,
+					result.SourcePath.string()));
+				return;
+			}
+		}
+
+		std::string conflictReason;
+		if (!allowMeshRestoreConflict && HasMeshRestoreConflict(result, conflictReason))
+		{
+			if (auto restoreIt = m_MeshRestoreRequests.find(entityId); restoreIt != m_MeshRestoreRequests.end())
+			{
+				restoreIt->second.Pending = false;
+				restoreIt->second.Failed = false;
+				restoreIt->second.Cancelled = false;
+				restoreIt->second.Conflicted = true;
+				restoreIt->second.ImportedVertexCount = result.Mesh ? result.Mesh->Vertices.size() : 0;
+				restoreIt->second.ImportedIndexCount = result.Mesh ? result.Mesh->Indices.size() : 0;
+				restoreIt->second.ImportedMaterialCount = result.Mesh ? result.Mesh->Materials.size() : 0;
+				restoreIt->second.MaterialDiffLines = result.Mesh
+					? BuildMeshRestoreMaterialDiff(entityId, *result.Mesh, 32)
+					: std::vector<std::string>{ "Stored restore has no imported Mesh material data." };
+				restoreIt->second.MaterialDiffRows = result.Mesh
+					? BuildMeshRestoreMaterialDiffRows(entityId, *result.Mesh, 64)
+					: std::vector<Editor::MeshRestoreMaterialDiffRow>{ Editor::MeshRestoreMaterialDiffRow{
+						.Field = "Mesh",
+						.CurrentValue = "Current Entity Mesh",
+						.RestoreValue = "<no imported Mesh material data>"
+					} };
+				restoreIt->second.Message = conflictReason;
+			}
+			AppendAssetLog(std::format("Mesh restore conflict for entity {}: {}", entityId, conflictReason));
+			m_MeshRestoreConflictResults[entityId] = std::move(result);
 			return;
 		}
 
@@ -892,8 +1234,18 @@ void Engine::ApplyImportedModel(Asset::AssetImportResult result)
 				}));
 		}
 
+		DestroyTextureResourcesForEntity(entityId);
+		for (const auto& removedSourcePath : m_RuntimeAssetRegistry.UnregisterEntity(entityId))
+		{
+			m_AssetHotReloadService.UnwatchLoadedAsset(removedSourcePath);
+		}
+
 		m_Scene.ReplaceEntityModel(entityId, std::move(result.Mesh), std::move(result.MaterialTextures), bounds);
 		static_cast<void>(m_Scene.SetMeshEnabled(entityId, result.Restore.MeshEnabled));
+		if (result.GenerateColliders)
+		{
+			CreateGeneratedColliderForImportedModel(entityId, bounds);
+		}
 		if (result.Restore.HasAnimator)
 		{
 			AnimatorComponent& animator = m_Scene.EnsureAnimatorComponent(entityId);
@@ -937,10 +1289,12 @@ void Engine::ApplyImportedModel(Asset::AssetImportResult result)
 		std::vector<std::filesystem::path> watchedTexturePaths;
 		if (const auto* materialTextures = m_Scene.GetMaterialTextures(entityId))
 		{
-			watchedTexturePaths = CollectWatchedTexturePaths(*materialTextures);
+			watchedTexturePaths = CollectWatchedAssetPaths(result.SourcePath, *materialTextures);
 		}
 		m_RuntimeAssetRegistry.RegisterEntity(result.SourcePath, entityId, watchedTexturePaths, "Scene Loaded");
 		m_AssetHotReloadService.WatchLoadedAsset(result.SourcePath, watchedTexturePaths);
+		m_MeshRestoreRequests.erase(entityId);
+		m_MeshRestoreConflictResults.erase(entityId);
 		MarkPhysicsActorDirty(entityId);
 		AppendAssetLog(std::format("Restored scene model entity {}: {}", entityId, result.SourcePath.string()));
 		return;
@@ -955,6 +1309,10 @@ void Engine::ApplyImportedModel(Asset::AssetImportResult result)
 		std::move(result.Mesh),
 		std::move(result.MaterialTextures),
 		bounds);
+	if (result.GenerateColliders)
+	{
+		CreateGeneratedColliderForImportedModel(entityId, bounds);
+	}
 
 	m_RenderState.RenderEntities.push_back(entityId);
 	m_RenderState.EntityMaterialTransparency[entityId] = result.MaterialTransparency;
@@ -971,7 +1329,7 @@ void Engine::ApplyImportedModel(Asset::AssetImportResult result)
 		AppendAssetLog(std::format("GPU texture upload failed for entity {}", entityId));
 	}
 
-	std::vector<std::filesystem::path> watchedTexturePaths = CollectWatchedTexturePaths(*m_Scene.GetMaterialTextures(entityId));
+	std::vector<std::filesystem::path> watchedTexturePaths = CollectWatchedAssetPaths(result.SourcePath, *m_Scene.GetMaterialTextures(entityId));
 	m_RuntimeAssetRegistry.RegisterEntity(result.SourcePath, entityId, watchedTexturePaths, "Loaded");
 	m_AssetHotReloadService.WatchLoadedAsset(result.SourcePath, watchedTexturePaths);
 	MarkPhysicsActorDirty(entityId);
@@ -1021,6 +1379,10 @@ void Engine::ApplyReloadedAsset(Asset::AssetImportResult result)
 				}));
 		}
 		m_Scene.ReplaceEntityModel(entityId, std::move(meshCopy), std::move(materialTextures), bounds);
+		if (result.GenerateColliders)
+		{
+			CreateGeneratedColliderForImportedModel(entityId, bounds);
+		}
 		m_RenderState.EntityMaterialTransparency[entityId] = materialTransparency;
 		const Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId);
 		if (!hadAnimator)
@@ -1049,7 +1411,7 @@ void Engine::ApplyReloadedAsset(Asset::AssetImportResult result)
 	{
 		const auto* materialTextures = m_Scene.GetMaterialTextures(entityId);
 		const std::vector<std::filesystem::path> entityWatchedTexturePaths = materialTextures
-			? CollectWatchedTexturePaths(*materialTextures)
+			? CollectWatchedAssetPaths(result.SourcePath, *materialTextures)
 			: std::vector<std::filesystem::path>{};
 		for (const std::filesystem::path& path : entityWatchedTexturePaths)
 		{
@@ -1083,6 +1445,16 @@ void Engine::OpenAssetPath(const std::filesystem::path& path)
 	if (path.extension() == ".scene")
 	{
 		static_cast<void>(OpenSceneFromPath(path, true));
+		return;
+	}
+	if (path.extension() == ".prefab")
+	{
+		static_cast<void>(InstantiatePrefabAsset(path));
+		return;
+	}
+	if (Asset::IsSkyboxAssetPath(path) || Rendering::IsSkyboxAssetPath(path))
+	{
+		static_cast<void>(ApplySkyboxAsset(path));
 		return;
 	}
 
@@ -1153,7 +1525,7 @@ void Engine::LogRendererRoadmapHealthSnapshot()
 		(m_Graphics.CurrentApi == GraphicsAPI::DirectX12 && m_StaticMeshRenderer.Dx12.Deferred.HdrColorTexture != nullptr) ||
 		(m_Graphics.CurrentApi == GraphicsAPI::Vulkan && m_StaticMeshRenderer.Vulkan.Deferred.HdrColorImage != VK_NULL_HANDLE);
 	const Rendering::PostProcessStats postStats = Rendering::PostProcessSystem::BuildStats(m_PostProcessSettings, m_Graphics.CurrentApi, m_RenderMode, hdrTargetAvailable);
-	const uint32_t sceneLightCount = RenderSystem::CountSceneRenderableLights(m_Scene);
+	const uint32_t sceneLightCount = RenderSystem::CountSceneRenderableLights(GetRuntimeScene());
 	const uint32_t forwardLightUsedCount = sceneLightCount == 0
 		? 1u
 		: (std::min)(sceneLightCount, kMaxForwardGpuLights);
@@ -1420,6 +1792,17 @@ std::vector<std::filesystem::path> Engine::CollectWatchedTexturePaths(const std:
 	return paths;
 }
 
+std::vector<std::filesystem::path> Engine::CollectWatchedAssetPaths(const std::filesystem::path& sourcePath, const std::vector<CpuMaterialTexture>& materialTextures)
+{
+	std::vector<std::filesystem::path> paths = CollectWatchedTexturePaths(materialTextures);
+	const std::filesystem::path settingsPath = Asset::AssetImportSettingsService::GetSettingsPathForAsset(sourcePath);
+	if (!settingsPath.empty() && std::ranges::find(paths, settingsPath) == paths.end())
+	{
+		paths.push_back(settingsPath);
+	}
+	return paths;
+}
+
 bool Engine::SaveCurrentScene()
 {
 	if (!m_Project || m_SampleMode != Samples::Benchmark::SampleMode::ProjectScene)
@@ -1433,6 +1816,7 @@ bool Engine::SaveCurrentScene()
 		return SaveCurrentSceneAs();
 	}
 
+	const std::unordered_set<EntityId> excludedEntities = BuildRuntimeExpandedSceneReferenceSet();
 	std::string errorMessage;
 	if (!ScenePersistence::ScenePersistenceService::SaveScene(
 		m_Scene,
@@ -1442,7 +1826,9 @@ bool Engine::SaveCurrentScene()
 		m_AmbientColor,
 		m_AmbientIntensity,
 		m_Exposure,
-		errorMessage))
+		m_SkyboxSettings,
+		errorMessage,
+		&excludedEntities))
 	{
 		AppendAssetLog(std::format("Scene save failed: {}", errorMessage));
 		const std::wstring message(errorMessage.begin(), errorMessage.end());
@@ -1470,6 +1856,115 @@ bool Engine::SaveCurrentSceneAs()
 	return SaveCurrentScene();
 }
 
+void Engine::UpdateAutosave(float deltaTime)
+{
+	if (!m_AutosaveEnabled || IsRuntimeMode() || IsRuntimePlaying())
+	{
+		return;
+	}
+
+	if (!m_Project || m_SampleMode != Samples::Benchmark::SampleMode::ProjectScene || !m_SceneDirty)
+	{
+		if (!m_SceneDirty)
+		{
+			m_AutosaveElapsedSeconds = 0.0f;
+		}
+		return;
+	}
+
+	m_AutosaveElapsedSeconds += (std::max)(0.0f, deltaTime);
+	if (m_AutosaveElapsedSeconds < m_AutosaveIntervalSeconds)
+	{
+		return;
+	}
+
+	m_AutosaveElapsedSeconds = 0.0f;
+	static_cast<void>(SaveAutosaveSnapshot());
+}
+
+bool Engine::SaveAutosaveSnapshot()
+{
+	if (!m_Project || m_SampleMode != Samples::Benchmark::SampleMode::ProjectScene)
+	{
+		m_LastAutosaveSucceeded = false;
+		m_AutosaveStatusMessage = "Autosave skipped: no project scene is active.";
+		return false;
+	}
+
+	const std::filesystem::path sceneSource = m_CurrentScenePath.empty() ? GetDefaultScenePath() : m_CurrentScenePath;
+	std::string sceneStem = sceneSource.stem().string();
+	if (sceneStem.empty())
+	{
+		sceneStem = "Untitled";
+	}
+
+	const std::filesystem::path autosaveDirectory = m_Project->RootPath / "Temp" / "Autosaves";
+	std::error_code directoryError;
+	std::filesystem::create_directories(autosaveDirectory, directoryError);
+	if (directoryError)
+	{
+		m_LastAutosaveSucceeded = false;
+		m_AutosaveStatusMessage = std::format("Autosave failed: {}", directoryError.message());
+		AppendAssetLog(m_AutosaveStatusMessage);
+		return false;
+	}
+
+	const std::filesystem::path autosavePath = autosaveDirectory / std::format("{}.autosave.scene", sceneStem);
+	const std::unordered_set<EntityId> excludedEntities = BuildRuntimeExpandedSceneReferenceSet();
+	std::string errorMessage;
+	if (!ScenePersistence::ScenePersistenceService::SaveScene(
+		m_Scene,
+		m_RenderState,
+		*m_Project,
+		autosavePath,
+		m_AmbientColor,
+		m_AmbientIntensity,
+		m_Exposure,
+		m_SkyboxSettings,
+		errorMessage,
+		&excludedEntities))
+	{
+		m_LastAutosaveSucceeded = false;
+		m_LastAutosavePath = autosavePath;
+		m_AutosaveStatusMessage = std::format("Autosave failed: {}", errorMessage);
+		AppendAssetLog(m_AutosaveStatusMessage);
+		return false;
+	}
+
+	m_LastAutosaveSucceeded = true;
+	m_LastAutosavePath = autosavePath;
+	m_AutosaveStatusMessage = std::format("Autosaved dirty scene: {}", autosavePath.filename().string());
+	AppendAssetLog(std::format("Autosaved scene snapshot: {}", autosavePath.string()));
+	return true;
+}
+
+void Engine::SetAutosaveEnabled(bool enabled)
+{
+	if (m_AutosaveEnabled == enabled)
+	{
+		return;
+	}
+
+	m_AutosaveEnabled = enabled;
+	m_AutosaveElapsedSeconds = 0.0f;
+	m_AutosaveStatusMessage = enabled ? "Autosave enabled." : "Autosave disabled.";
+	AppendAssetLog(m_AutosaveStatusMessage);
+}
+
+void Engine::SetAutosaveInterval(float intervalSeconds)
+{
+	const float clampedInterval = std::clamp(intervalSeconds, 15.0f, 900.0f);
+	if (std::abs(m_AutosaveIntervalSeconds - clampedInterval) < 0.001f)
+	{
+		return;
+	}
+
+	m_AutosaveIntervalSeconds = clampedInterval;
+	m_AutosaveElapsedSeconds = (std::min)(m_AutosaveElapsedSeconds, m_AutosaveIntervalSeconds);
+	m_AutosaveStatusMessage = std::format("Autosave interval set to {:.0f} seconds.", m_AutosaveIntervalSeconds);
+	AppendAssetLog(m_AutosaveStatusMessage);
+}
+
 bool Engine::OpenSceneFromDialog()
 {
 	const std::optional<std::filesystem::path> selectedPath = ShowOpenSceneDialog();
@@ -1489,7 +1984,8 @@ bool Engine::OpenSceneFromPath(const std::filesystem::path& scenePath, bool prom
 		return false;
 	}
 
-	ScenePersistence::LoadSceneResult loadResult = ScenePersistence::ScenePersistenceService::LoadScene(scenePath, *m_Project);
+	const std::filesystem::path resolvedScenePath = ResolveProjectScenePath(scenePath);
+	ScenePersistence::LoadSceneResult loadResult = ScenePersistence::ScenePersistenceService::LoadScene(resolvedScenePath, *m_Project);
 	if (!loadResult.Success)
 	{
 		AppendAssetLog(std::format("Scene load failed: {}", loadResult.ErrorMessage));
@@ -1499,97 +1995,42 @@ bool Engine::OpenSceneFromPath(const std::filesystem::path& scenePath, bool prom
 	}
 
 	ClearProjectSceneRuntimeState();
-	m_CurrentScenePath = std::filesystem::absolute(scenePath).lexically_normal();
+	m_CurrentScenePath = resolvedScenePath;
 	m_SampleMode = Samples::Benchmark::SampleMode::ProjectScene;
 	m_LastSampleMode = m_SampleMode;
 	m_AmbientColor = loadResult.AmbientColor;
 	m_AmbientIntensity = loadResult.AmbientIntensity;
 	m_Exposure = loadResult.Exposure;
+	m_SkyboxSettings = loadResult.Skybox;
 
+	std::vector<EntityId> createdEntityIds;
+	createdEntityIds.reserve(loadResult.Entities.size());
 	for (const ScenePersistence::LoadedSceneEntity& loadedEntity : loadResult.Entities)
 	{
-		const EntityId entityId = m_Scene.CreateEntity(loadedEntity.Name);
-		if (loadedEntity.HasTransform)
-		{
-			TransformComponent& transform = m_Scene.EnsureTransformComponent(entityId);
-			transform.LocalTransform = loadedEntity.Transform;
-			transform.UpdateWorld();
-		}
-
-		if (loadedEntity.HasCamera)
-		{
-			CameraComponent& camera = m_Scene.EnsureCameraComponent(entityId);
-			camera = loadedEntity.Camera;
-			static_cast<void>(m_Scene.SetCameraEnabled(entityId, loadedEntity.CameraEnabled));
-			if (camera.IsGameCamera && m_GameCameraEntity == InvalidEntityId)
-			{
-				m_GameCameraEntity = entityId;
-			}
-			else if (camera.IsGameCamera)
-			{
-				camera.IsGameCamera = false;
-			}
-		}
-
-		if (loadedEntity.HasLight)
-		{
-			m_Scene.EnsureLightComponent(entityId) = loadedEntity.Light;
-			static_cast<void>(m_Scene.SetLightEnabled(entityId, loadedEntity.LightEnabled));
-			if (m_KeyLightEntity == InvalidEntityId)
-			{
-				m_KeyLightEntity = entityId;
-			}
-		}
-
-		if (loadedEntity.HasMesh)
-		{
-			if (loadedEntity.PrimitiveKind != Asset::PrimitiveMeshKind::None)
-			{
-				static_cast<void>(ApplyPrimitiveMeshToEntity(entityId, loadedEntity.PrimitiveKind, loadedEntity.Transform, false));
-				if (!loadedEntity.MaterialOverrides.empty())
-				{
-					if (Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId))
-					{
-						ApplyMaterialOverrides(*meshAsset, loadedEntity.MaterialOverrides);
-						static_cast<void>(RefreshMaterialResourcesForEntity(entityId));
-					}
-				}
-				static_cast<void>(m_Scene.SetMeshEnabled(entityId, loadedEntity.MeshEnabled));
-			}
-			else if (!loadedEntity.MeshAssetPath.empty())
-			{
-				QueueModelImportForSceneEntity(loadedEntity, entityId);
-			}
-			else
-			{
-				static_cast<void>(m_Scene.EnsureMeshComponent(entityId));
-				static_cast<void>(m_Scene.SetMeshEnabled(entityId, loadedEntity.MeshEnabled));
-			}
-		}
-		else if (loadedEntity.HasAnimator)
-		{
-			m_Scene.EnsureAnimatorComponent(entityId) = loadedEntity.Animator;
-			static_cast<void>(m_Scene.SetAnimatorEnabled(entityId, loadedEntity.AnimatorEnabled));
-		}
-
-		if (loadedEntity.HasRigidBody)
-		{
-			m_Scene.EnsureRigidBodyComponent(entityId) = loadedEntity.RigidBody;
-			static_cast<void>(m_Scene.SetRigidBodyEnabled(entityId, loadedEntity.RigidBodyEnabled));
-		}
-		if (loadedEntity.HasCollider)
-		{
-			m_Scene.EnsureColliderComponent(entityId) = loadedEntity.Collider;
-			static_cast<void>(m_Scene.SetColliderEnabled(entityId, loadedEntity.ColliderEnabled));
-		}
-		if (loadedEntity.HasPhysicsMaterial)
-		{
-			m_Scene.EnsurePhysicsMaterialComponent(entityId) = loadedEntity.PhysicsMaterial;
-			static_cast<void>(m_Scene.SetPhysicsMaterialEnabled(entityId, loadedEntity.PhysicsMaterialEnabled));
-		}
+		createdEntityIds.push_back(CreateEntityFromLoadedSceneEntity(loadedEntity, {}));
 	}
+	for (size_t entityIndex = 0; entityIndex < loadResult.Entities.size(); ++entityIndex)
+	{
+		const ScenePersistence::LoadedSceneEntity& loadedEntity = loadResult.Entities[entityIndex];
+		if (!loadedEntity.HasHierarchy || entityIndex >= createdEntityIds.size() || createdEntityIds[entityIndex] == InvalidEntityId)
+		{
+			continue;
+		}
+		EntityId parentEntityId = loadedEntity.ParentEntityId;
+		if (parentEntityId == InvalidEntityId && loadedEntity.ParentIndex < createdEntityIds.size())
+		{
+			parentEntityId = createdEntityIds[loadedEntity.ParentIndex];
+		}
+		if (parentEntityId != InvalidEntityId)
+		{
+			static_cast<void>(m_Scene.SetParentEntity(createdEntityIds[entityIndex], parentEntityId, false));
+		}
+		m_Scene.EnsureHierarchyComponent(createdEntityIds[entityIndex]).Expanded = loadedEntity.HierarchyExpanded;
+	}
+	m_Scene.UpdateWorldTransforms();
 
 	CreateEditorSceneEntities();
+	ProcessSceneReferenceAutoLoads(false);
 	SyncGameCameraFromSceneEntity();
 	RebuildPhysicsWorldFromScene();
 	SetSceneDirty(false);
@@ -1599,9 +2040,1965 @@ bool Engine::OpenSceneFromPath(const std::filesystem::path& scenePath, bool prom
 	return true;
 }
 
+EntityId Engine::CreateEntityFromLoadedSceneEntity(const ScenePersistence::LoadedSceneEntity& loadedEntity, const std::filesystem::path& prefabSourcePath)
+{
+	const EntityId entityId = m_Scene.CreateEntity(loadedEntity.Name);
+	if (loadedEntity.HasTransform)
+	{
+		TransformComponent& transform = m_Scene.EnsureTransformComponent(entityId);
+		transform.LocalTransform = loadedEntity.Transform;
+		transform.UpdateWorld();
+	}
+	if (loadedEntity.HasEditorState)
+	{
+		m_Scene.EnsureEditorStateComponent(entityId) = loadedEntity.EditorState;
+	}
+	if (loadedEntity.HasHierarchy)
+	{
+		SceneHierarchyComponent& hierarchy = m_Scene.EnsureHierarchyComponent(entityId);
+		hierarchy.Expanded = loadedEntity.HierarchyExpanded;
+		if (loadedEntity.ParentEntityId != InvalidEntityId && m_Scene.ContainsEntity(loadedEntity.ParentEntityId))
+		{
+			static_cast<void>(m_Scene.SetParentEntity(entityId, loadedEntity.ParentEntityId, false));
+		}
+	}
+
+	if (loadedEntity.HasCamera)
+	{
+		CameraComponent& camera = m_Scene.EnsureCameraComponent(entityId);
+		camera = loadedEntity.Camera;
+		static_cast<void>(m_Scene.SetCameraEnabled(entityId, loadedEntity.CameraEnabled));
+		if (camera.IsGameCamera && m_GameCameraEntity == InvalidEntityId)
+		{
+			m_GameCameraEntity = entityId;
+		}
+		else if (camera.IsGameCamera)
+		{
+			camera.IsGameCamera = false;
+		}
+	}
+
+	if (loadedEntity.HasLight)
+	{
+		m_Scene.EnsureLightComponent(entityId) = loadedEntity.Light;
+		static_cast<void>(m_Scene.SetLightEnabled(entityId, loadedEntity.LightEnabled));
+		if (m_KeyLightEntity == InvalidEntityId)
+		{
+			m_KeyLightEntity = entityId;
+		}
+	}
+
+	if (loadedEntity.HasMesh)
+	{
+		if (loadedEntity.PrimitiveKind != Asset::PrimitiveMeshKind::None)
+		{
+			static_cast<void>(ApplyPrimitiveMeshToEntity(entityId, loadedEntity.PrimitiveKind, loadedEntity.Transform, false));
+			if (!loadedEntity.MaterialOverrides.empty())
+			{
+				if (Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId))
+				{
+					ApplyMaterialOverrides(*meshAsset, loadedEntity.MaterialOverrides);
+					static_cast<void>(RefreshMaterialResourcesForEntity(entityId));
+				}
+			}
+			static_cast<void>(m_Scene.SetMeshEnabled(entityId, loadedEntity.MeshEnabled));
+		}
+		else if (!loadedEntity.MeshAssetPath.empty())
+		{
+			QueueModelImportForSceneEntity(loadedEntity, entityId);
+		}
+		else
+		{
+			static_cast<void>(m_Scene.EnsureMeshComponent(entityId));
+			static_cast<void>(m_Scene.SetMeshEnabled(entityId, loadedEntity.MeshEnabled));
+		}
+	}
+	else if (loadedEntity.HasAnimator)
+	{
+		m_Scene.EnsureAnimatorComponent(entityId) = loadedEntity.Animator;
+		static_cast<void>(m_Scene.SetAnimatorEnabled(entityId, loadedEntity.AnimatorEnabled));
+	}
+
+	if (loadedEntity.HasRigidBody)
+	{
+		m_Scene.EnsureRigidBodyComponent(entityId) = loadedEntity.RigidBody;
+		static_cast<void>(m_Scene.SetRigidBodyEnabled(entityId, loadedEntity.RigidBodyEnabled));
+	}
+	if (loadedEntity.HasCollider)
+	{
+		m_Scene.EnsureColliderComponent(entityId) = loadedEntity.Collider;
+		static_cast<void>(m_Scene.SetColliderEnabled(entityId, loadedEntity.ColliderEnabled));
+	}
+	if (loadedEntity.HasPhysicsMaterial)
+	{
+		m_Scene.EnsurePhysicsMaterialComponent(entityId) = loadedEntity.PhysicsMaterial;
+		static_cast<void>(m_Scene.SetPhysicsMaterialEnabled(entityId, loadedEntity.PhysicsMaterialEnabled));
+	}
+	if (loadedEntity.HasPrefabInstance)
+	{
+		m_Scene.EnsurePrefabInstanceComponent(entityId) = loadedEntity.PrefabInstance;
+		static_cast<void>(m_Scene.SetComponentEnabled<PrefabInstanceComponent>(entityId, loadedEntity.PrefabInstanceEnabled));
+	}
+	if (!prefabSourcePath.empty())
+	{
+		PrefabInstanceComponent& prefab = m_Scene.EnsurePrefabInstanceComponent(entityId);
+		prefab.PrefabPath = std::filesystem::absolute(prefabSourcePath).lexically_normal();
+		prefab.SourceName = loadedEntity.Name;
+		prefab.TrackPrefabOverrides = true;
+		static_cast<void>(m_Scene.SetComponentEnabled<PrefabInstanceComponent>(entityId, true));
+	}
+	if (loadedEntity.HasSceneReference)
+	{
+		m_Scene.EnsureSceneReferenceComponent(entityId) = loadedEntity.SceneReference;
+		static_cast<void>(m_Scene.SetComponentEnabled<SceneReferenceComponent>(entityId, loadedEntity.SceneReferenceEnabled));
+	}
+	if (loadedEntity.HasScript)
+	{
+		m_Scene.EnsureScriptComponent(entityId) = loadedEntity.Script;
+		static_cast<void>(m_Scene.SetComponentEnabled<ScriptComponent>(entityId, loadedEntity.ScriptEnabled));
+	}
+	if (loadedEntity.HasSprite2D)
+	{
+		m_Scene.EnsureSprite2DComponent(entityId) = loadedEntity.Sprite2D;
+		static_cast<void>(m_Scene.SetComponentEnabled<Sprite2DComponent>(entityId, loadedEntity.Sprite2DEnabled));
+	}
+	if (loadedEntity.HasUiElement)
+	{
+		m_Scene.EnsureUiElementComponent(entityId) = loadedEntity.UiElement;
+		static_cast<void>(m_Scene.SetComponentEnabled<UiElementComponent>(entityId, loadedEntity.UiElementEnabled));
+	}
+	if (loadedEntity.HasAudioSource)
+	{
+		m_Scene.EnsureAudioSourceComponent(entityId) = loadedEntity.AudioSource;
+		static_cast<void>(m_Scene.SetComponentEnabled<AudioSourceComponent>(entityId, loadedEntity.AudioSourceEnabled));
+	}
+	if (loadedEntity.HasNavigationAgent)
+	{
+		m_Scene.EnsureNavigationAgentComponent(entityId) = loadedEntity.NavigationAgent;
+		static_cast<void>(m_Scene.SetComponentEnabled<NavigationAgentComponent>(entityId, loadedEntity.NavigationAgentEnabled));
+	}
+	if (loadedEntity.HasNetworkIdentity)
+	{
+		m_Scene.EnsureNetworkIdentityComponent(entityId) = loadedEntity.NetworkIdentity;
+		static_cast<void>(m_Scene.SetComponentEnabled<NetworkIdentityComponent>(entityId, loadedEntity.NetworkIdentityEnabled));
+	}
+
+	return entityId;
+}
+
+std::optional<ScenePersistence::LoadedSceneEntity> Engine::BuildLoadedSceneEntityFromEntity(EntityId entityId) const
+{
+	if (!m_Scene.ContainsEntity(entityId))
+	{
+		return std::nullopt;
+	}
+
+	ScenePersistence::LoadedSceneEntity entity;
+	if (const std::string* name = m_Scene.GetEntityName(entityId))
+	{
+		entity.Name = *name;
+	}
+	if (const TransformComponent* transform = m_Scene.GetTransformComponent(entityId))
+	{
+		entity.HasTransform = true;
+		entity.Transform = transform->LocalTransform;
+	}
+	if (const EditorStateComponent* editorState = m_Scene.GetEditorStateComponent(entityId))
+	{
+		entity.HasEditorState = true;
+		entity.EditorState = *editorState;
+	}
+	if (const SceneHierarchyComponent* hierarchy = m_Scene.GetHierarchyComponent(entityId))
+	{
+		entity.HasHierarchy = true;
+		entity.ParentEntityId = hierarchy->Parent;
+		entity.HierarchyExpanded = hierarchy->Expanded;
+	}
+	if (const MeshComponent* mesh = m_Scene.GetMeshComponent(entityId))
+	{
+		entity.HasMesh = true;
+		entity.MeshEnabled = m_Scene.IsMeshEnabled(entityId);
+		if (mesh->Asset)
+		{
+			entity.PrimitiveKind = mesh->Asset->PrimitiveKind;
+			entity.MeshAssetPath = mesh->Asset->SourcePath;
+			entity.MaterialOverrides.assign(mesh->Asset->Materials.begin(), mesh->Asset->Materials.end());
+		}
+	}
+	if (const CameraComponent* camera = m_Scene.GetCameraComponent(entityId))
+	{
+		entity.HasCamera = true;
+		entity.CameraEnabled = m_Scene.IsCameraEnabled(entityId);
+		entity.Camera = *camera;
+	}
+	if (const LightComponent* light = m_Scene.GetLightComponent(entityId))
+	{
+		entity.HasLight = true;
+		entity.LightEnabled = m_Scene.IsLightEnabled(entityId);
+		entity.Light = *light;
+	}
+	if (const AnimatorComponent* animator = m_Scene.GetAnimatorComponent(entityId))
+	{
+		entity.HasAnimator = true;
+		entity.AnimatorEnabled = m_Scene.IsAnimatorEnabled(entityId);
+		entity.Animator = *animator;
+	}
+	if (const RigidBodyComponent* rigidBody = m_Scene.GetRigidBodyComponent(entityId))
+	{
+		entity.HasRigidBody = true;
+		entity.RigidBodyEnabled = m_Scene.IsRigidBodyEnabled(entityId);
+		entity.RigidBody = *rigidBody;
+	}
+	if (const ColliderComponent* collider = m_Scene.GetColliderComponent(entityId))
+	{
+		entity.HasCollider = true;
+		entity.ColliderEnabled = m_Scene.IsColliderEnabled(entityId);
+		entity.Collider = *collider;
+	}
+	if (const PhysicsMaterialComponent* physicsMaterial = m_Scene.GetPhysicsMaterialComponent(entityId))
+	{
+		entity.HasPhysicsMaterial = true;
+		entity.PhysicsMaterialEnabled = m_Scene.IsPhysicsMaterialEnabled(entityId);
+		entity.PhysicsMaterial = *physicsMaterial;
+	}
+	if (const PrefabInstanceComponent* prefab = m_Scene.GetPrefabInstanceComponent(entityId))
+	{
+		entity.HasPrefabInstance = true;
+		entity.PrefabInstanceEnabled = m_Scene.IsComponentEnabled<PrefabInstanceComponent>(entityId);
+		entity.PrefabInstance = *prefab;
+	}
+	if (const SceneReferenceComponent* sceneReference = m_Scene.GetSceneReferenceComponent(entityId))
+	{
+		entity.HasSceneReference = true;
+		entity.SceneReferenceEnabled = m_Scene.IsComponentEnabled<SceneReferenceComponent>(entityId);
+		entity.SceneReference = *sceneReference;
+	}
+	if (const ScriptComponent* script = m_Scene.GetScriptComponent(entityId))
+	{
+		entity.HasScript = true;
+		entity.ScriptEnabled = m_Scene.IsComponentEnabled<ScriptComponent>(entityId);
+		entity.Script = *script;
+	}
+	if (const Sprite2DComponent* sprite = m_Scene.GetSprite2DComponent(entityId))
+	{
+		entity.HasSprite2D = true;
+		entity.Sprite2DEnabled = m_Scene.IsComponentEnabled<Sprite2DComponent>(entityId);
+		entity.Sprite2D = *sprite;
+	}
+	if (const UiElementComponent* ui = m_Scene.GetUiElementComponent(entityId))
+	{
+		entity.HasUiElement = true;
+		entity.UiElementEnabled = m_Scene.IsComponentEnabled<UiElementComponent>(entityId);
+		entity.UiElement = *ui;
+	}
+	if (const AudioSourceComponent* audio = m_Scene.GetAudioSourceComponent(entityId))
+	{
+		entity.HasAudioSource = true;
+		entity.AudioSourceEnabled = m_Scene.IsComponentEnabled<AudioSourceComponent>(entityId);
+		entity.AudioSource = *audio;
+	}
+	if (const NavigationAgentComponent* navigation = m_Scene.GetNavigationAgentComponent(entityId))
+	{
+		entity.HasNavigationAgent = true;
+		entity.NavigationAgentEnabled = m_Scene.IsComponentEnabled<NavigationAgentComponent>(entityId);
+		entity.NavigationAgent = *navigation;
+	}
+	if (const NetworkIdentityComponent* network = m_Scene.GetNetworkIdentityComponent(entityId))
+	{
+		entity.HasNetworkIdentity = true;
+		entity.NetworkIdentityEnabled = m_Scene.IsComponentEnabled<NetworkIdentityComponent>(entityId);
+		entity.NetworkIdentity = *network;
+	}
+
+	return entity;
+}
+
+std::string Engine::BuildMeshRestoreSignature(EntityId entityId) const
+{
+	const std::optional<ScenePersistence::LoadedSceneEntity> entity = BuildLoadedSceneEntityFromEntity(entityId);
+	return entity ? BuildMeshRestoreSignature(*entity) : "entity:missing";
+}
+
+std::string Engine::BuildMeshRestoreSignature(const ScenePersistence::LoadedSceneEntity& entity) const
+{
+	if (!entity.HasMesh)
+	{
+		return "mesh:none";
+	}
+
+	std::string signature = std::format(
+		"mesh:enabled={};primitive={};path={};materials={}",
+		entity.MeshEnabled,
+		static_cast<uint32_t>(entity.PrimitiveKind),
+		entity.MeshAssetPath.lexically_normal().string(),
+		entity.MaterialOverrides.size());
+
+	for (size_t materialIndex = 0; materialIndex < entity.MaterialOverrides.size(); ++materialIndex)
+	{
+		const Asset::StaticMeshMaterial& material = entity.MaterialOverrides[materialIndex];
+		signature.append(std::format(
+			"|m{}:{}:{}:{:.4f},{:.4f},{:.4f},{:.4f}:vc={}:ny={}",
+			materialIndex,
+			material.Name,
+			static_cast<uint32_t>(material.ShadingModel),
+			material.DiffuseColor.x,
+			material.DiffuseColor.y,
+			material.DiffuseColor.z,
+			material.DiffuseColor.w,
+			material.UseVertexColor,
+			material.NormalYFlip));
+		for (size_t slotIndex = 0; slotIndex < Asset::kMaterialTextureSlotCount; ++slotIndex)
+		{
+			const auto slot = static_cast<Asset::MaterialTextureSlot>(slotIndex);
+			const std::filesystem::path texturePath = Asset::GetMaterialTexturePath(material, slot).lexically_normal();
+			const Asset::MaterialTextureBinding& binding = material.TextureBindings[slotIndex];
+			signature.append(std::format(
+				";{}={}:override={}:embedded={}",
+				Asset::MaterialTextureSlotKey(slot),
+				texturePath.string(),
+				binding.IsOverride,
+				binding.Embedded.IsValid()));
+		}
+	}
+
+	return signature;
+}
+
+std::vector<std::string> Engine::BuildMeshRestoreMaterialDiff(
+	EntityId entityId,
+	const Asset::StaticMeshAsset& importedMesh,
+	size_t maxLines) const
+{
+	std::vector<std::string> lines;
+	const Asset::StaticMeshAsset* currentMesh = m_Scene.GetMeshAsset(entityId);
+	if (!currentMesh)
+	{
+		lines.push_back("Current Entity has no Mesh asset; stored restore would assign all imported materials.");
+		return lines;
+	}
+
+	const auto pathLabel = [](const Asset::StaticMeshMaterial& material, Asset::MaterialTextureSlot slot)
+	{
+		const std::filesystem::path path = Asset::GetMaterialTexturePath(material, slot).lexically_normal();
+		if (!path.empty())
+		{
+			return path.string();
+		}
+
+		const Asset::MaterialTextureBinding& binding = Asset::GetMaterialTextureBinding(material, slot);
+		return binding.Embedded.IsValid() ? std::string("<embedded>") : std::string("<none>");
+	};
+
+	const auto pushLine = [&lines, maxLines](std::string line)
+	{
+		if (lines.size() < maxLines)
+		{
+			lines.push_back(std::move(line));
+		}
+	};
+
+	const size_t currentMaterialCount = currentMesh->Materials.size();
+	const size_t importedMaterialCount = importedMesh.Materials.size();
+	if (currentMaterialCount != importedMaterialCount)
+	{
+		pushLine(std::format("Material count: current {} -> restore {}", currentMaterialCount, importedMaterialCount));
+	}
+
+	size_t skippedChangeCount = 0;
+	const size_t compareCount = (std::max)(currentMaterialCount, importedMaterialCount);
+	for (size_t materialIndex = 0; materialIndex < compareCount; ++materialIndex)
+	{
+		if (lines.size() >= maxLines)
+		{
+			++skippedChangeCount;
+			continue;
+		}
+
+		if (materialIndex >= currentMaterialCount)
+		{
+			const Asset::StaticMeshMaterial& importedMaterial = importedMesh.Materials[materialIndex];
+			pushLine(std::format(
+				"Material[{}] added by restore: '{}'",
+				materialIndex,
+				importedMaterial.Name.empty() ? "<unnamed>" : importedMaterial.Name));
+			continue;
+		}
+
+		if (materialIndex >= importedMaterialCount)
+		{
+			const Asset::StaticMeshMaterial& currentMaterial = currentMesh->Materials[materialIndex];
+			pushLine(std::format(
+				"Material[{}] removed by restore: '{}'",
+				materialIndex,
+				currentMaterial.Name.empty() ? "<unnamed>" : currentMaterial.Name));
+			continue;
+		}
+
+		const Asset::StaticMeshMaterial& currentMaterial = currentMesh->Materials[materialIndex];
+		const Asset::StaticMeshMaterial& importedMaterial = importedMesh.Materials[materialIndex];
+		if (currentMaterial.Name != importedMaterial.Name)
+		{
+			pushLine(std::format(
+				"Material[{}] name: '{}' -> '{}'",
+				materialIndex,
+				currentMaterial.Name.empty() ? "<unnamed>" : currentMaterial.Name,
+				importedMaterial.Name.empty() ? "<unnamed>" : importedMaterial.Name));
+		}
+		if (currentMaterial.ShadingModel != importedMaterial.ShadingModel)
+		{
+			pushLine(std::format(
+				"Material[{}] shading: {} -> {}",
+				materialIndex,
+				Asset::MaterialShadingModelName(currentMaterial.ShadingModel),
+				Asset::MaterialShadingModelName(importedMaterial.ShadingModel)));
+		}
+
+		for (size_t slotIndex = 0; slotIndex < Asset::kMaterialTextureSlotCount; ++slotIndex)
+		{
+			const auto slot = static_cast<Asset::MaterialTextureSlot>(slotIndex);
+			const std::string currentPath = pathLabel(currentMaterial, slot);
+			const std::string importedPath = pathLabel(importedMaterial, slot);
+			const Asset::MaterialTextureBinding& currentBinding = Asset::GetMaterialTextureBinding(currentMaterial, slot);
+			const Asset::MaterialTextureBinding& importedBinding = Asset::GetMaterialTextureBinding(importedMaterial, slot);
+			if (currentPath == importedPath
+				&& currentBinding.IsOverride == importedBinding.IsOverride
+				&& currentBinding.Embedded.IsValid() == importedBinding.Embedded.IsValid())
+			{
+				continue;
+			}
+
+			if (lines.size() >= maxLines)
+			{
+				++skippedChangeCount;
+				continue;
+			}
+
+			pushLine(std::format(
+				"Material[{}] {}: {}{} -> {}{}",
+				materialIndex,
+				Asset::MaterialTextureSlotName(slot),
+				currentPath,
+				currentBinding.IsOverride ? " (override)" : "",
+				importedPath,
+				importedBinding.IsOverride ? " (override)" : ""));
+		}
+	}
+
+	if (skippedChangeCount > 0)
+	{
+		lines.push_back(std::format("... {} more material differences not shown.", skippedChangeCount));
+	}
+	if (lines.empty())
+	{
+		lines.push_back("No material slot differences detected; conflict came from Mesh identity, counts, or source prefab timestamp.");
+	}
+	return lines;
+}
+
+std::vector<Editor::MeshRestoreMaterialDiffRow> Engine::BuildMeshRestoreMaterialDiffRows(
+	EntityId entityId,
+	const Asset::StaticMeshAsset& importedMesh,
+	size_t maxRows) const
+{
+	std::vector<Editor::MeshRestoreMaterialDiffRow> rows;
+	const Asset::StaticMeshAsset* currentMesh = m_Scene.GetMeshAsset(entityId);
+	if (!currentMesh)
+	{
+		rows.push_back({
+			.MaterialIndex = static_cast<size_t>(-1),
+			.TextureSlot = Asset::MaterialTextureSlot::Count,
+			.Field = "Mesh",
+			.CurrentValue = "<none>",
+			.RestoreValue = "Imported Mesh materials"
+		});
+		return rows;
+	}
+
+	const auto pathLabel = [](const Asset::StaticMeshMaterial& material, Asset::MaterialTextureSlot slot)
+	{
+		const std::filesystem::path path = Asset::GetMaterialTexturePath(material, slot).lexically_normal();
+		if (!path.empty())
+		{
+			return path.string();
+		}
+
+		const Asset::MaterialTextureBinding& binding = Asset::GetMaterialTextureBinding(material, slot);
+		return binding.Embedded.IsValid() ? std::string("<embedded>") : std::string("<none>");
+	};
+	const auto textureLabel = [&pathLabel](const Asset::StaticMeshMaterial& material, Asset::MaterialTextureSlot slot)
+	{
+		const Asset::MaterialTextureBinding& binding = Asset::GetMaterialTextureBinding(material, slot);
+		std::string label = pathLabel(material, slot);
+		if (binding.IsOverride)
+		{
+			label.append(" (override)");
+		}
+		if (binding.Embedded.IsValid())
+		{
+			label.append(std::format(" {}x{}", binding.Embedded.Width, binding.Embedded.Height));
+		}
+		return label;
+	};
+	const auto color3Label = [](const DirectX::XMFLOAT3& value)
+	{
+		return std::format("{:.3f}, {:.3f}, {:.3f}", value.x, value.y, value.z);
+	};
+	const auto color4Label = [](const DirectX::XMFLOAT4& value)
+	{
+		return std::format("{:.3f}, {:.3f}, {:.3f}, {:.3f}", value.x, value.y, value.z, value.w);
+	};
+	const auto floatLabel = [](float value)
+	{
+		return std::format("{:.4f}", value);
+	};
+	const auto boolLabel = [](bool value)
+	{
+		return value ? std::string("true") : std::string("false");
+	};
+	const auto sameFloat = [](float lhs, float rhs)
+	{
+		return std::abs(lhs - rhs) <= 0.0001f;
+	};
+	const auto sameFloat3 = [&sameFloat](const DirectX::XMFLOAT3& lhs, const DirectX::XMFLOAT3& rhs)
+	{
+		return sameFloat(lhs.x, rhs.x) && sameFloat(lhs.y, rhs.y) && sameFloat(lhs.z, rhs.z);
+	};
+	const auto sameFloat4 = [&sameFloat](const DirectX::XMFLOAT4& lhs, const DirectX::XMFLOAT4& rhs)
+	{
+		return sameFloat(lhs.x, rhs.x) && sameFloat(lhs.y, rhs.y) && sameFloat(lhs.z, rhs.z) && sameFloat(lhs.w, rhs.w);
+	};
+
+	size_t skippedChangeCount = 0;
+	const auto pushRow = [&rows, maxRows, &skippedChangeCount](
+		std::string field,
+		std::string currentValue,
+		std::string restoreValue,
+		size_t materialIndex = static_cast<size_t>(-1),
+		Asset::MaterialTextureSlot textureSlot = Asset::MaterialTextureSlot::Count,
+		Editor::MeshRestoreMaterialFocusKind focusKind = Editor::MeshRestoreMaterialFocusKind::None)
+	{
+		if (rows.size() < maxRows)
+		{
+			rows.push_back({
+				.MaterialIndex = materialIndex,
+				.TextureSlot = textureSlot,
+				.FocusKind = focusKind,
+				.Field = std::move(field),
+				.CurrentValue = std::move(currentValue),
+				.RestoreValue = std::move(restoreValue)
+			});
+		}
+		else
+		{
+			++skippedChangeCount;
+		}
+	};
+
+	const size_t currentMaterialCount = currentMesh->Materials.size();
+	const size_t importedMaterialCount = importedMesh.Materials.size();
+	if (currentMaterialCount != importedMaterialCount)
+	{
+		pushRow("Material Count", std::to_string(currentMaterialCount), std::to_string(importedMaterialCount));
+	}
+
+	const size_t compareCount = (std::max)(currentMaterialCount, importedMaterialCount);
+	for (size_t materialIndex = 0; materialIndex < compareCount; ++materialIndex)
+	{
+		if (materialIndex >= currentMaterialCount)
+		{
+			const Asset::StaticMeshMaterial& importedMaterial = importedMesh.Materials[materialIndex];
+			pushRow(
+				std::format("Material[{}]", materialIndex),
+				"<missing>",
+				importedMaterial.Name.empty() ? "<unnamed>" : importedMaterial.Name,
+				materialIndex);
+			continue;
+		}
+		if (materialIndex >= importedMaterialCount)
+		{
+			const Asset::StaticMeshMaterial& currentMaterial = currentMesh->Materials[materialIndex];
+			pushRow(
+				std::format("Material[{}]", materialIndex),
+				currentMaterial.Name.empty() ? "<unnamed>" : currentMaterial.Name,
+				"<removed>",
+				materialIndex);
+			continue;
+		}
+
+		const Asset::StaticMeshMaterial& currentMaterial = currentMesh->Materials[materialIndex];
+		const Asset::StaticMeshMaterial& importedMaterial = importedMesh.Materials[materialIndex];
+		const std::string materialPrefix = std::format("Material[{}]", materialIndex);
+		if (currentMaterial.Name != importedMaterial.Name)
+		{
+			pushRow(
+				materialPrefix + " Name",
+				currentMaterial.Name.empty() ? "<unnamed>" : currentMaterial.Name,
+				importedMaterial.Name.empty() ? "<unnamed>" : importedMaterial.Name,
+				materialIndex);
+		}
+		if (currentMaterial.ShadingModel != importedMaterial.ShadingModel)
+		{
+			pushRow(
+				materialPrefix + " Shading",
+				std::string(Asset::MaterialShadingModelName(currentMaterial.ShadingModel)),
+				std::string(Asset::MaterialShadingModelName(importedMaterial.ShadingModel)),
+				materialIndex,
+				Asset::MaterialTextureSlot::Count,
+				Editor::MeshRestoreMaterialFocusKind::ShadingModel);
+		}
+		if (!sameFloat4(currentMaterial.DiffuseColor, importedMaterial.DiffuseColor))
+		{
+			pushRow(
+				materialPrefix + " Base Color Tint",
+				color4Label(currentMaterial.DiffuseColor),
+				color4Label(importedMaterial.DiffuseColor),
+				materialIndex,
+				Asset::MaterialTextureSlot::Count,
+				Editor::MeshRestoreMaterialFocusKind::BaseColor);
+		}
+		if (!sameFloat4(currentMaterial.ImportedDiffuseTint, importedMaterial.ImportedDiffuseTint))
+		{
+			pushRow(materialPrefix + " Imported Diffuse Tint", color4Label(currentMaterial.ImportedDiffuseTint), color4Label(importedMaterial.ImportedDiffuseTint), materialIndex);
+		}
+		if (!sameFloat3(currentMaterial.SpecularColor, importedMaterial.SpecularColor))
+		{
+			pushRow(
+				materialPrefix + " Specular Color",
+				color3Label(currentMaterial.SpecularColor),
+				color3Label(importedMaterial.SpecularColor),
+				materialIndex,
+				Asset::MaterialTextureSlot::Count,
+				Editor::MeshRestoreMaterialFocusKind::SpecularColor);
+		}
+		if (!sameFloat3(currentMaterial.EmissiveColor, importedMaterial.EmissiveColor))
+		{
+			pushRow(
+				materialPrefix + " Emissive Color",
+				color3Label(currentMaterial.EmissiveColor),
+				color3Label(importedMaterial.EmissiveColor),
+				materialIndex,
+				Asset::MaterialTextureSlot::Count,
+				Editor::MeshRestoreMaterialFocusKind::EmissiveColor);
+		}
+		if (!sameFloat(currentMaterial.MetallicFactor, importedMaterial.MetallicFactor))
+		{
+			pushRow(
+				materialPrefix + " Metallic",
+				floatLabel(currentMaterial.MetallicFactor),
+				floatLabel(importedMaterial.MetallicFactor),
+				materialIndex,
+				Asset::MaterialTextureSlot::Count,
+				Editor::MeshRestoreMaterialFocusKind::Metallic);
+		}
+		if (!sameFloat(currentMaterial.RoughnessFactor, importedMaterial.RoughnessFactor))
+		{
+			pushRow(
+				materialPrefix + " Roughness",
+				floatLabel(currentMaterial.RoughnessFactor),
+				floatLabel(importedMaterial.RoughnessFactor),
+				materialIndex,
+				Asset::MaterialTextureSlot::Count,
+				Editor::MeshRestoreMaterialFocusKind::Roughness);
+		}
+		if (!sameFloat(currentMaterial.Shininess, importedMaterial.Shininess))
+		{
+			pushRow(
+				materialPrefix + " Shininess",
+				floatLabel(currentMaterial.Shininess),
+				floatLabel(importedMaterial.Shininess),
+				materialIndex,
+				Asset::MaterialTextureSlot::Count,
+				Editor::MeshRestoreMaterialFocusKind::Shininess);
+		}
+		if (!sameFloat(currentMaterial.Opacity, importedMaterial.Opacity))
+		{
+			pushRow(
+				materialPrefix + " Opacity",
+				floatLabel(currentMaterial.Opacity),
+				floatLabel(importedMaterial.Opacity),
+				materialIndex,
+				Asset::MaterialTextureSlot::Count,
+				Editor::MeshRestoreMaterialFocusKind::Opacity);
+		}
+		if (currentMaterial.UseVertexColor != importedMaterial.UseVertexColor)
+		{
+			pushRow(
+				materialPrefix + " Use Vertex Color",
+				boolLabel(currentMaterial.UseVertexColor),
+				boolLabel(importedMaterial.UseVertexColor),
+				materialIndex,
+				Asset::MaterialTextureSlot::Count,
+				Editor::MeshRestoreMaterialFocusKind::UseVertexColor);
+		}
+		if (currentMaterial.NormalYFlip != importedMaterial.NormalYFlip)
+		{
+			pushRow(
+				materialPrefix + " Normal Y Flip",
+				boolLabel(currentMaterial.NormalYFlip),
+				boolLabel(importedMaterial.NormalYFlip),
+				materialIndex,
+				Asset::MaterialTextureSlot::Count,
+				Editor::MeshRestoreMaterialFocusKind::NormalYFlip);
+		}
+
+		for (size_t slotIndex = 0; slotIndex < Asset::kMaterialTextureSlotCount; ++slotIndex)
+		{
+			const auto slot = static_cast<Asset::MaterialTextureSlot>(slotIndex);
+			const std::string currentTexture = textureLabel(currentMaterial, slot);
+			const std::string importedTexture = textureLabel(importedMaterial, slot);
+			const Asset::MaterialTextureBinding& currentBinding = Asset::GetMaterialTextureBinding(currentMaterial, slot);
+			const Asset::MaterialTextureBinding& importedBinding = Asset::GetMaterialTextureBinding(importedMaterial, slot);
+			if (currentTexture == importedTexture
+				&& currentBinding.IsOverride == importedBinding.IsOverride
+				&& currentBinding.Embedded.IsValid() == importedBinding.Embedded.IsValid())
+			{
+				continue;
+			}
+			pushRow(
+				materialPrefix + " " + std::string(Asset::MaterialTextureSlotName(slot)),
+				currentTexture,
+				importedTexture,
+				materialIndex,
+				slot,
+				Editor::MeshRestoreMaterialFocusKind::TextureSlot);
+		}
+	}
+
+	if (skippedChangeCount > 0)
+	{
+		rows.push_back({
+			.MaterialIndex = static_cast<size_t>(-1),
+			.TextureSlot = Asset::MaterialTextureSlot::Count,
+			.Field = "More Differences",
+			.CurrentValue = std::format("{} hidden", skippedChangeCount),
+			.RestoreValue = std::format("{} hidden", skippedChangeCount)
+		});
+	}
+	if (rows.empty())
+	{
+		rows.push_back({
+			.MaterialIndex = static_cast<size_t>(-1),
+			.TextureSlot = Asset::MaterialTextureSlot::Count,
+			.Field = "Material Diff",
+			.CurrentValue = "No material factor or slot differences detected",
+			.RestoreValue = "Conflict came from Mesh identity, counts, or source prefab timestamp"
+		});
+	}
+	return rows;
+}
+
+bool Engine::SaveSelectedEntityAsPrefab()
+{
+	if (!m_Project || m_SampleMode != Samples::Benchmark::SampleMode::ProjectScene)
+	{
+		AppendAssetLog("Prefab save is only available in Project Scene.");
+		return false;
+	}
+
+	const EntityId selectedEntity = m_Scene.GetSelectedEntity();
+	if (selectedEntity == InvalidEntityId || !m_Scene.ContainsEntity(selectedEntity))
+	{
+		AppendAssetLog("Prefab save failed: no selected entity.");
+		return false;
+	}
+
+	const std::string* entityName = m_Scene.GetEntityName(selectedEntity);
+	const std::string prefabName = SanitizeFileStem(entityName && !entityName->empty() ? *entityName : "Entity");
+	const std::filesystem::path prefabPath = (m_Project->RootPath / m_Project->AssetRoot / "Prefabs" / (prefabName + ".prefab")).lexically_normal();
+
+	ScenePersistence::PrefabSaveOptions options;
+	options.AmbientColor = m_AmbientColor;
+	options.AmbientIntensity = m_AmbientIntensity;
+	options.Exposure = m_Exposure;
+	options.Skybox = m_SkyboxSettings;
+
+	std::string errorMessage;
+	if (!ScenePersistence::PrefabService::SaveEntityAsPrefab(m_Scene, selectedEntity, *m_Project, prefabPath, options, errorMessage))
+	{
+		AppendAssetLog(std::format("Prefab save failed: {}", errorMessage));
+		return false;
+	}
+
+	PrefabInstanceComponent& prefab = m_Scene.EnsurePrefabInstanceComponent(selectedEntity);
+	prefab.PrefabPath = prefabPath;
+	prefab.SourceName = entityName && !entityName->empty() ? *entityName : "Entity";
+	prefab.TrackPrefabOverrides = true;
+	static_cast<void>(m_Scene.SetComponentEnabled<PrefabInstanceComponent>(selectedEntity, true));
+	static_cast<void>(DeclareResourceForPath(prefabPath, Resources::ResourceKind::Scene));
+	m_AssetFileSystem.RequestRefresh();
+	MarkSceneDirty();
+	AppendAssetLog(std::format("Saved prefab: {}", prefabPath.string()));
+	return true;
+}
+
+bool Engine::ApplyEntityToPrefabSource(EntityId entityId)
+{
+	if (!m_Project || m_SampleMode != Samples::Benchmark::SampleMode::ProjectScene)
+	{
+		AppendAssetLog("Apply to Prefab is only available in Project Scene.");
+		return false;
+	}
+	if (entityId == InvalidEntityId || !m_Scene.ContainsEntity(entityId))
+	{
+		AppendAssetLog("Apply to Prefab failed: invalid entity.");
+		return false;
+	}
+
+	const PrefabInstanceComponent* prefab = m_Scene.GetPrefabInstanceComponent(entityId);
+	if (!prefab || prefab->PrefabPath.empty())
+	{
+		AppendAssetLog("Apply to Prefab failed: entity has no prefab source path.");
+		return false;
+	}
+
+	ScenePersistence::PrefabSaveOptions options;
+	options.AmbientColor = m_AmbientColor;
+	options.AmbientIntensity = m_AmbientIntensity;
+	options.Exposure = m_Exposure;
+	options.Skybox = m_SkyboxSettings;
+	options.IncludePrefabInstanceComponent = false;
+
+	std::string errorMessage;
+	const std::filesystem::path prefabPath = prefab->PrefabPath.lexically_normal();
+	if (!ScenePersistence::PrefabService::SaveEntityAsPrefab(m_Scene, entityId, *m_Project, prefabPath, options, errorMessage))
+	{
+		AppendAssetLog(std::format("Apply to Prefab failed: {}", errorMessage));
+		return false;
+	}
+
+	static_cast<void>(DeclareResourceForPath(prefabPath, Resources::ResourceKind::Scene));
+	m_AssetFileSystem.RequestRefresh();
+	AppendAssetLog(std::format("Applied entity {} to prefab: {}", entityId, prefabPath.string()));
+	return true;
+}
+
+bool Engine::SavePrefabInspectionRoot(const std::filesystem::path& prefabPath, const ScenePersistence::LoadedSceneEntity& root)
+{
+	if (!m_Project || m_SampleMode != Samples::Benchmark::SampleMode::ProjectScene)
+	{
+		AppendAssetLog("Prefab property apply is only available in Project Scene.");
+		return false;
+	}
+	if (prefabPath.empty())
+	{
+		AppendAssetLog("Prefab property apply failed: empty prefab path.");
+		return false;
+	}
+
+	ScenePersistence::PrefabSaveOptions options;
+	options.AmbientColor = m_AmbientColor;
+	options.AmbientIntensity = m_AmbientIntensity;
+	options.Exposure = m_Exposure;
+	options.Skybox = m_SkyboxSettings;
+	options.IncludePrefabInstanceComponent = false;
+
+	std::string errorMessage;
+	const std::filesystem::path normalizedPrefabPath = prefabPath.lexically_normal();
+	if (!ScenePersistence::PrefabService::SaveLoadedEntityAsPrefab(root, *m_Project, normalizedPrefabPath, options, errorMessage))
+	{
+		AppendAssetLog(std::format("Prefab property apply failed: {}", errorMessage));
+		return false;
+	}
+
+	static_cast<void>(DeclareResourceForPath(normalizedPrefabPath, Resources::ResourceKind::Scene));
+	m_AssetFileSystem.RequestRefresh();
+	AppendAssetLog(std::format("Applied reflected prefab property to {}", normalizedPrefabPath.string()));
+	return true;
+}
+
+bool Engine::RevertEntityMeshToPrefabSource(
+	EntityId entityId,
+	const ScenePersistence::LoadedSceneEntity& prefabRoot,
+	const std::filesystem::path& prefabPath)
+{
+	if (!m_Project || m_SampleMode != Samples::Benchmark::SampleMode::ProjectScene)
+	{
+		AppendAssetLog("Prefab Mesh revert is only available in Project Scene.");
+		return false;
+	}
+	if (entityId == InvalidEntityId || !m_Scene.ContainsEntity(entityId))
+	{
+		AppendAssetLog("Prefab Mesh revert failed: invalid entity.");
+		return false;
+	}
+	if (!prefabRoot.HasMesh)
+	{
+		AppendAssetLog("Prefab Mesh revert failed: prefab source has no Mesh component.");
+		return false;
+	}
+
+	const std::optional<ScenePersistence::LoadedSceneEntity> beforeSnapshot = BuildLoadedSceneEntityFromEntity(entityId);
+	if (!beforeSnapshot || !beforeSnapshot->HasMesh)
+	{
+		AppendAssetLog("Prefab Mesh revert failed: current Entity has no restorable Mesh snapshot.");
+		return false;
+	}
+
+	ScenePersistence::LoadedSceneEntity afterSnapshot = prefabRoot;
+	afterSnapshot.Name = beforeSnapshot->Name;
+	afterSnapshot.HasTransform = beforeSnapshot->HasTransform;
+	afterSnapshot.Transform = beforeSnapshot->Transform;
+	afterSnapshot.HasAnimator = beforeSnapshot->HasAnimator;
+	afterSnapshot.AnimatorEnabled = beforeSnapshot->AnimatorEnabled;
+	afterSnapshot.Animator = beforeSnapshot->Animator;
+
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = "Revert Mesh from Prefab",
+		.Execute = [this, entityId, afterSnapshot, prefabPath]()
+		{
+			static_cast<void>(ApplyMeshSnapshotToEntity(entityId, afterSnapshot, "Reverted Mesh from prefab", prefabPath));
+		},
+		.Undo = [this, entityId, before = *beforeSnapshot]()
+		{
+			static_cast<void>(ApplyMeshSnapshotToEntity(entityId, before, "Undo Mesh prefab revert"));
+		}
+	});
+	return true;
+}
+
+Editor::MeshRestoreRuntimeStatus Engine::GetMeshRestoreRuntimeStatus(EntityId entityId) const
+{
+	const auto restoreIt = m_MeshRestoreRequests.find(entityId);
+	if (restoreIt == m_MeshRestoreRequests.end())
+	{
+		return {};
+	}
+
+	const MeshRestoreRequestState& state = restoreIt->second;
+	return Editor::MeshRestoreRuntimeStatus{
+		.HasStatus = true,
+		.Pending = state.Pending,
+		.Failed = state.Failed,
+		.Cancelled = state.Cancelled,
+		.Conflicted = state.Conflicted,
+		.Generation = state.Generation,
+		.SourcePath = state.SourcePath,
+		.SourcePrefabPath = state.SourcePrefabPath,
+		.ImportedVertexCount = state.ImportedVertexCount,
+		.ImportedIndexCount = state.ImportedIndexCount,
+		.ImportedMaterialCount = state.ImportedMaterialCount,
+		.MaterialDiffLines = state.MaterialDiffLines,
+		.MaterialDiffRows = state.MaterialDiffRows,
+		.Message = state.Message
+	};
+}
+
+bool Engine::CancelMeshRestore(EntityId entityId)
+{
+	const auto restoreIt = m_MeshRestoreRequests.find(entityId);
+	if (restoreIt == m_MeshRestoreRequests.end())
+	{
+		m_MeshRestoreConflictResults.erase(entityId);
+		return false;
+	}
+
+	MeshRestoreRequestState& state = restoreIt->second;
+	if (!state.Pending)
+	{
+		m_MeshRestoreRequests.erase(restoreIt);
+		m_MeshRestoreConflictResults.erase(entityId);
+		return true;
+	}
+
+	const uint64_t nextGeneration = ++m_MeshRestoreGenerations[entityId];
+	state.Generation = nextGeneration;
+	state.Pending = false;
+	state.Failed = false;
+	state.Cancelled = true;
+	state.Conflicted = false;
+	state.ImportedVertexCount = 0;
+	state.ImportedIndexCount = 0;
+	state.ImportedMaterialCount = 0;
+	state.MaterialDiffLines.clear();
+	state.MaterialDiffRows.clear();
+	state.Message = "Cancelled by editor. Any in-flight restore result will be discarded.";
+	m_MeshRestoreConflictResults.erase(entityId);
+	AppendAssetLog(std::format("Cancelled pending Mesh restore for entity {}.", entityId));
+	return true;
+}
+
+bool Engine::ApplyConflictedMeshRestore(EntityId entityId)
+{
+	const auto resultIt = m_MeshRestoreConflictResults.find(entityId);
+	if (resultIt == m_MeshRestoreConflictResults.end())
+	{
+		AppendAssetLog(std::format("Apply conflicted Mesh restore failed: no stored result for entity {}.", entityId));
+		return false;
+	}
+	if (!m_Scene.ContainsEntity(entityId))
+	{
+		m_MeshRestoreConflictResults.erase(resultIt);
+		m_MeshRestoreRequests.erase(entityId);
+		AppendAssetLog(std::format("Apply conflicted Mesh restore failed: entity {} no longer exists.", entityId));
+		return false;
+	}
+
+	Asset::AssetImportResult result = std::move(resultIt->second);
+	m_MeshRestoreConflictResults.erase(resultIt);
+	AppendAssetLog(std::format("Applying conflicted Mesh restore anyway for entity {}.", entityId));
+	ApplyImportedModel(std::move(result), true);
+	return true;
+}
+
+bool Engine::ReloadMeshRestoreFromPrefabSource(EntityId entityId)
+{
+	const auto restoreIt = m_MeshRestoreRequests.find(entityId);
+	if (restoreIt == m_MeshRestoreRequests.end() || restoreIt->second.SourcePrefabPath.empty())
+	{
+		AppendAssetLog(std::format("Reload Mesh restore source failed: entity {} has no source prefab path.", entityId));
+		return false;
+	}
+	if (!m_Project || !m_Scene.ContainsEntity(entityId))
+	{
+		AppendAssetLog(std::format("Reload Mesh restore source failed: invalid project or entity {}.", entityId));
+		return false;
+	}
+
+	const std::filesystem::path prefabPath = restoreIt->second.SourcePrefabPath;
+	ScenePersistence::LoadPrefabResult prefabResult = ScenePersistence::PrefabService::LoadPrefab(prefabPath, *m_Project);
+	if (!prefabResult.Success)
+	{
+		restoreIt->second.Pending = false;
+		restoreIt->second.Failed = true;
+		restoreIt->second.Cancelled = false;
+		restoreIt->second.Conflicted = false;
+		restoreIt->second.Message = std::format("Reload Prefab Source failed: {}", prefabResult.ErrorMessage);
+		AppendAssetLog(restoreIt->second.Message);
+		return false;
+	}
+
+	m_MeshRestoreConflictResults.erase(entityId);
+	AppendAssetLog(std::format("Reloading Mesh restore from updated prefab source: {}", prefabPath.string()));
+	return RevertEntityMeshToPrefabSource(entityId, prefabResult.Root, prefabPath);
+}
+
+bool Engine::ApplyMeshSnapshotToEntity(
+	EntityId entityId,
+	const ScenePersistence::LoadedSceneEntity& meshSnapshot,
+	std::string_view logLabel,
+	const std::filesystem::path& sourcePrefabPath)
+{
+	if (entityId == InvalidEntityId || !m_Scene.ContainsEntity(entityId))
+	{
+		AppendAssetLog("Mesh snapshot apply failed: invalid entity.");
+		return false;
+	}
+	if (!meshSnapshot.HasMesh)
+	{
+		AppendAssetLog("Mesh snapshot apply failed: snapshot has no Mesh component.");
+		return false;
+	}
+
+	ScenePersistence::LoadedSceneEntity restore = meshSnapshot;
+	if (const auto currentSnapshot = BuildLoadedSceneEntityFromEntity(entityId))
+	{
+		restore.Name = currentSnapshot->Name;
+		restore.HasTransform = true;
+		restore.Transform = currentSnapshot->Transform;
+		restore.HasAnimator = currentSnapshot->HasAnimator;
+		restore.AnimatorEnabled = currentSnapshot->AnimatorEnabled;
+		restore.Animator = currentSnapshot->Animator;
+	}
+
+	const auto cleanupRuntimeAssetLinks = [this, entityId]()
+	{
+		DestroyTextureResourcesForEntity(entityId);
+		for (const auto& removedSourcePath : m_RuntimeAssetRegistry.UnregisterEntity(entityId))
+		{
+			m_AssetHotReloadService.UnwatchLoadedAsset(removedSourcePath);
+		}
+	};
+
+	const std::string actionLabel = logLabel.empty() ? std::string("Applied Mesh snapshot") : std::string(logLabel);
+	if (restore.PrimitiveKind != Asset::PrimitiveMeshKind::None)
+	{
+		++m_MeshRestoreGenerations[entityId];
+		m_MeshRestoreRequests.erase(entityId);
+		m_MeshRestoreConflictResults.erase(entityId);
+		cleanupRuntimeAssetLinks();
+
+		if (!ApplyPrimitiveMeshToEntity(entityId, restore.PrimitiveKind, restore.Transform, false))
+		{
+			AppendAssetLog("Mesh snapshot apply failed: primitive mesh creation failed.");
+			return false;
+		}
+		if (!restore.MaterialOverrides.empty())
+		{
+			if (Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId))
+			{
+				ApplyMaterialOverrides(*meshAsset, restore.MaterialOverrides);
+				static_cast<void>(RefreshMaterialResourcesForEntity(entityId));
+			}
+		}
+		static_cast<void>(m_Scene.SetMeshEnabled(entityId, restore.MeshEnabled));
+		MarkPhysicsActorDirty(entityId);
+		MarkSceneDirty();
+		AppendAssetLog(std::format("{} for entity {} using primitive Mesh.", actionLabel, entityId));
+		return true;
+	}
+
+	if (!restore.MeshAssetPath.empty())
+	{
+		QueueModelImportForSceneEntity(restore, entityId, sourcePrefabPath);
+		MarkSceneDirty();
+		AppendAssetLog(std::format(
+			"{} queued for entity {}: {}",
+			actionLabel,
+			entityId,
+			restore.MeshAssetPath.string()));
+		return true;
+	}
+
+	++m_MeshRestoreGenerations[entityId];
+	m_MeshRestoreRequests.erase(entityId);
+	m_MeshRestoreConflictResults.erase(entityId);
+	cleanupRuntimeAssetLinks();
+	MeshComponent& mesh = m_Scene.EnsureMeshComponent(entityId);
+	mesh.Asset.reset();
+	mesh.MaterialTextures.clear();
+	static_cast<void>(m_Scene.SetMeshEnabled(entityId, restore.MeshEnabled));
+	m_RenderState.EntityMaterialTransparency.erase(entityId);
+	MarkPhysicsActorDirty(entityId);
+	MarkSceneDirty();
+	AppendAssetLog(std::format("{} for entity {} using empty Mesh component.", actionLabel, entityId));
+	return true;
+}
+
+bool Engine::LoadSceneReference(EntityId entityId, bool markDirty)
+{
+	if (!m_Project || m_SampleMode != Samples::Benchmark::SampleMode::ProjectScene)
+	{
+		AppendAssetLog("Scene reference load is only available in Project Scene.");
+		return false;
+	}
+	if (!m_Scene.ContainsEntity(entityId))
+	{
+		AppendAssetLog("Scene reference load failed: entity no longer exists.");
+		return false;
+	}
+
+	const SceneReferenceComponent* sceneReference = m_Scene.GetSceneReferenceComponent(entityId);
+	if (!sceneReference)
+	{
+		AppendAssetLog(std::format("Scene reference load failed: entity {} has no SceneReference component.", entityId));
+		return false;
+	}
+	if (!m_Scene.IsComponentEnabled<SceneReferenceComponent>(entityId))
+	{
+		AppendAssetLog(std::format("Scene reference load skipped: SceneReference component is disabled on entity {}.", entityId));
+		return false;
+	}
+	if (sceneReference->ScenePath.empty())
+	{
+		AppendAssetLog(std::format("Scene reference load failed: entity {} has no scene path.", entityId));
+		return false;
+	}
+	if (!sceneReference->LoadAdditively)
+	{
+		AppendAssetLog("Scene reference load skipped: Load Additively is disabled. Use Open Scene to replace the active scene.");
+		return false;
+	}
+
+	const std::filesystem::path scenePath = ResolveProjectScenePath(sceneReference->ScenePath);
+	std::error_code errorCode;
+	if (!std::filesystem::is_regular_file(scenePath, errorCode))
+	{
+		AppendAssetLog(std::format("Scene reference load failed: file not found {}", scenePath.string()));
+		return false;
+	}
+	if (!m_CurrentScenePath.empty() && std::filesystem::equivalent(scenePath, m_CurrentScenePath, errorCode))
+	{
+		AppendAssetLog("Scene reference load blocked: a scene cannot load itself as a child in v1.");
+		return false;
+	}
+
+	if (m_LoadedSceneReferenceEntities.contains(entityId))
+	{
+		static_cast<void>(UnloadSceneReference(entityId, markDirty));
+	}
+
+	const ScenePersistence::LoadSceneResult loadResult = ScenePersistence::ScenePersistenceService::LoadScene(scenePath, *m_Project);
+	if (!loadResult.Success)
+	{
+		AppendAssetLog(std::format("Scene reference load failed: {}", loadResult.ErrorMessage));
+		return false;
+	}
+	if (loadResult.Entities.empty())
+	{
+		AppendAssetLog(std::format("Scene reference load skipped: referenced scene has no entities {}", scenePath.string()));
+		return false;
+	}
+
+	std::vector<EntityId> createdEntityIds;
+	createdEntityIds.reserve(loadResult.Entities.size());
+	for (const ScenePersistence::LoadedSceneEntity& loadedEntity : loadResult.Entities)
+	{
+		createdEntityIds.push_back(CreateEntityFromLoadedSceneEntity(loadedEntity, {}));
+	}
+
+	for (size_t entityIndex = 0; entityIndex < loadResult.Entities.size(); ++entityIndex)
+	{
+		if (entityIndex >= createdEntityIds.size() || createdEntityIds[entityIndex] == InvalidEntityId)
+		{
+			continue;
+		}
+
+		const ScenePersistence::LoadedSceneEntity& loadedEntity = loadResult.Entities[entityIndex];
+		EntityId parentEntity = InvalidEntityId;
+		if (loadedEntity.HasHierarchy && loadedEntity.ParentIndex < createdEntityIds.size())
+		{
+			parentEntity = createdEntityIds[loadedEntity.ParentIndex];
+		}
+		if (parentEntity == InvalidEntityId)
+		{
+			parentEntity = entityId;
+		}
+		static_cast<void>(m_Scene.SetParentEntity(createdEntityIds[entityIndex], parentEntity, false));
+		if (loadedEntity.HasHierarchy)
+		{
+			m_Scene.EnsureHierarchyComponent(createdEntityIds[entityIndex]).Expanded = loadedEntity.HierarchyExpanded;
+		}
+	}
+
+	std::erase(createdEntityIds, InvalidEntityId);
+	std::filesystem::file_time_type lastWriteTime = {};
+	std::error_code writeTimeError;
+	lastWriteTime = std::filesystem::last_write_time(scenePath, writeTimeError);
+	m_LoadedSceneReferenceEntities[entityId] = LoadedSceneReferenceState{
+		.ScenePath = scenePath,
+		.LastWriteTime = writeTimeError ? std::filesystem::file_time_type{} : lastWriteTime,
+		.LoadedEntities = createdEntityIds,
+		.PendingExternalReload = false
+	};
+	m_Scene.UpdateWorldTransforms();
+	RebuildPhysicsWorldFromScene();
+	m_Scene.SetSelectedEntity(entityId);
+	if (markDirty)
+	{
+		MarkSceneDirty();
+	}
+	AppendAssetLog(std::format(
+		"Loaded scene reference: {} under entity {} ({} entity/entities)",
+		scenePath.string(),
+		entityId,
+		createdEntityIds.size()));
+	return true;
+}
+
+bool Engine::UnloadSceneReference(EntityId entityId, bool markDirty)
+{
+	const auto loadedIt = m_LoadedSceneReferenceEntities.find(entityId);
+	if (loadedIt == m_LoadedSceneReferenceEntities.end())
+	{
+		AppendAssetLog(std::format("Scene reference unload skipped: no loaded children tracked for entity {}.", entityId));
+		return false;
+	}
+
+	std::vector<EntityId> loadedEntityIds = std::move(loadedIt->second.LoadedEntities);
+	m_LoadedSceneReferenceEntities.erase(loadedIt);
+	size_t removedCount = 0;
+	const bool previousDirtyState = m_SceneDirty;
+	for (auto entityIt = loadedEntityIds.rbegin(); entityIt != loadedEntityIds.rend(); ++entityIt)
+	{
+		if (*entityIt != InvalidEntityId && m_Scene.ContainsEntity(*entityIt))
+		{
+			DeleteEntityFromHierarchy(*entityIt);
+			++removedCount;
+		}
+	}
+	if (m_Scene.ContainsEntity(entityId))
+	{
+		m_Scene.SetSelectedEntity(entityId);
+	}
+	RebuildPhysicsWorldFromScene();
+	if (markDirty)
+	{
+		MarkSceneDirty();
+	}
+	else
+	{
+		SetSceneDirty(previousDirtyState);
+	}
+	AppendAssetLog(std::format("Unloaded scene reference children from entity {} ({} removed)", entityId, removedCount));
+	return removedCount > 0;
+}
+
+bool Engine::InstantiatePrefabAsset(const std::filesystem::path& prefabPath)
+{
+	if (!m_Project || m_SampleMode != Samples::Benchmark::SampleMode::ProjectScene)
+	{
+		AppendAssetLog("Prefab instantiate is only available in Project Scene.");
+		return false;
+	}
+
+	ScenePersistence::LoadPrefabResult result = ScenePersistence::PrefabService::LoadPrefab(prefabPath, *m_Project);
+	if (!result.Success)
+	{
+		AppendAssetLog(std::format("Prefab instantiate failed: {}", result.ErrorMessage));
+		return false;
+	}
+
+	EntityId entityId = CreateEntityFromLoadedSceneEntity(result.Root, prefabPath);
+	if (TransformComponent* transform = m_Scene.GetTransformComponent(entityId))
+	{
+		const DirectX::XMFLOAT3 cameraPosition = m_SceneCamera.GetPosition();
+		const DirectX::XMFLOAT3 cameraForward = m_SceneCamera.GetForward();
+		const DirectX::XMVECTOR target = DirectX::XMVectorAdd(
+			DirectX::XMLoadFloat3(&cameraPosition),
+			DirectX::XMVectorScale(DirectX::XMVector3Normalize(DirectX::XMLoadFloat3(&cameraForward)), 5.0f));
+		DirectX::XMStoreFloat3(&transform->LocalTransform.Translation, target);
+		transform->UpdateWorld();
+	}
+
+	m_Scene.SetSelectedEntity(entityId);
+	MarkSceneDirty();
+	AppendAssetLog(std::format("Instantiated prefab entity {} from {}", entityId, prefabPath.string()));
+	return true;
+}
+
+bool Engine::CreateOrUpdateImportSettingsForAsset(const std::filesystem::path& assetPath)
+{
+	if (assetPath.empty())
+	{
+		return false;
+	}
+
+	Asset::AssetImportSettingsResult loadResult = Asset::AssetImportSettingsService::LoadOrDefault(assetPath);
+	Asset::AssetImportSettings settings = loadResult.Settings;
+	if (!loadResult.Success)
+	{
+		settings.SourcePath = assetPath;
+		AppendAssetLog(std::format("Import settings reset to defaults: {}", loadResult.ErrorMessage));
+	}
+
+	std::string errorMessage;
+	if (!Asset::AssetImportSettingsService::Save(settings, errorMessage))
+	{
+		AppendAssetLog(std::format("Import settings save failed: {}", errorMessage));
+		return false;
+	}
+
+	const std::filesystem::path settingsPath = Asset::AssetImportSettingsService::GetSettingsPathForAsset(assetPath);
+	m_AssetFileSystem.RequestRefresh();
+	AppendAssetLog(std::format("Import settings saved: {}", settingsPath.string()));
+	if (Asset::IsModelAssetPath(assetPath) && !m_RuntimeAssetRegistry.GetEntities(assetPath).empty())
+	{
+		QueueModelReload(assetPath, settingsPath);
+	}
+	else if (Asset::IsModelAssetPath(assetPath))
+	{
+		AppendAssetLog("Import settings will be applied the next time this model is imported.");
+	}
+	return true;
+}
+
+bool Engine::CreateProjectAsset(Editor::ProjectCreateAssetKind kind, const std::filesystem::path& targetDirectory)
+{
+	return CreateProjectAsset(kind, targetDirectory, {});
+}
+
+bool Engine::CreateProjectAsset(Editor::ProjectCreateAssetKind kind, const std::filesystem::path& targetDirectory, std::string_view requestedName)
+{
+	if (!m_Project)
+	{
+		AppendAssetLog("Create asset failed: no active project.");
+		return false;
+	}
+
+	const std::filesystem::path assetRoot = (m_Project->RootPath / m_Project->AssetRoot).lexically_normal();
+	std::filesystem::path directory = targetDirectory.empty() ? assetRoot : targetDirectory.lexically_normal();
+	std::error_code errorCode;
+	if (!std::filesystem::is_directory(directory, errorCode))
+	{
+		directory = directory.parent_path();
+	}
+	if (directory.empty())
+	{
+		directory = assetRoot;
+	}
+
+	const std::filesystem::path relativeDirectory = std::filesystem::relative(directory, assetRoot, errorCode);
+	if (errorCode || (!relativeDirectory.empty() && *relativeDirectory.begin() == ".."))
+	{
+		AppendAssetLog(std::format("Create asset failed: target is outside Assets {}", directory.string()));
+		return false;
+	}
+
+	std::filesystem::create_directories(directory, errorCode);
+	if (errorCode)
+	{
+		AppendAssetLog(std::format("Create asset failed: {}", errorCode.message()));
+		return false;
+	}
+
+	const auto makeUniquePath = [&directory](std::string_view baseName, std::string_view extension) -> std::filesystem::path
+	{
+		std::filesystem::path candidate = directory / std::filesystem::path(std::string(baseName)).concat(std::string(extension));
+		if (!std::filesystem::exists(candidate))
+		{
+			return candidate;
+		}
+		for (uint32_t suffix = 2; suffix < 10000; ++suffix)
+		{
+			candidate = directory / std::filesystem::path(std::format("{} {}{}", baseName, suffix, extension));
+			if (!std::filesystem::exists(candidate))
+			{
+				return candidate;
+			}
+		}
+		return {};
+	};
+
+	const auto defaultNameAndExtension = [](Editor::ProjectCreateAssetKind createKind) -> std::pair<std::string_view, std::string_view>
+	{
+		switch (createKind)
+		{
+		case Editor::ProjectCreateAssetKind::Folder:
+			return { "New Folder", "" };
+		case Editor::ProjectCreateAssetKind::Scene:
+			return { "New Scene", ".scene" };
+		case Editor::ProjectCreateAssetKind::Material:
+			return { "New Material", ".material" };
+		case Editor::ProjectCreateAssetKind::Skybox:
+			return { "New Skybox", ".skybox" };
+		case Editor::ProjectCreateAssetKind::Script:
+			return { "NewScript", ".cpp" };
+		case Editor::ProjectCreateAssetKind::Prefab:
+			return { "New Prefab", ".prefab" };
+		default:
+			return { "New Asset", "" };
+		}
+	};
+
+	const auto sanitizeProjectAssetName = [](std::string_view value, std::string_view fallback) -> std::string
+	{
+		while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
+		{
+			value.remove_prefix(1);
+		}
+		while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
+		{
+			value.remove_suffix(1);
+		}
+
+		std::string name(value.empty() ? fallback : value);
+		if (const std::filesystem::path namePath(name); namePath.has_extension())
+		{
+			name = namePath.stem().string();
+		}
+
+		static constexpr std::string_view kInvalidCharacters = "<>:\"/\\|?*";
+		for (char& character : name)
+		{
+			const auto unsignedCharacter = static_cast<unsigned char>(character);
+			if (unsignedCharacter < 32 || kInvalidCharacters.find(character) != std::string_view::npos)
+			{
+				character = '_';
+			}
+		}
+
+		while (!name.empty() && (name.back() == '.' || std::isspace(static_cast<unsigned char>(name.back()))))
+		{
+			name.pop_back();
+		}
+		while (!name.empty() && std::isspace(static_cast<unsigned char>(name.front())))
+		{
+			name.erase(name.begin());
+		}
+
+		return name.empty() ? std::string(fallback) : name;
+	};
+
+	const auto makeScriptTypeName = [](std::string value) -> std::string
+	{
+		for (char& character : value)
+		{
+			if (!std::isalnum(static_cast<unsigned char>(character)) && character != '_')
+			{
+				character = '_';
+			}
+		}
+		if (value.empty() || (!std::isalpha(static_cast<unsigned char>(value.front())) && value.front() != '_'))
+		{
+			value.insert(value.begin(), '_');
+		}
+		return value;
+	};
+
+	const auto [defaultBaseName, extension] = defaultNameAndExtension(kind);
+	const std::string baseName = sanitizeProjectAssetName(requestedName, defaultBaseName);
+	std::filesystem::path createdPath;
+	switch (kind)
+	{
+	case Editor::ProjectCreateAssetKind::Folder:
+		createdPath = makeUniquePath(baseName, "");
+		if (createdPath.empty())
+		{
+			AppendAssetLog("Create folder failed: could not allocate unique name.");
+			return false;
+		}
+		std::filesystem::create_directory(createdPath, errorCode);
+		break;
+	case Editor::ProjectCreateAssetKind::Scene:
+		createdPath = makeUniquePath(baseName, extension);
+		break;
+	case Editor::ProjectCreateAssetKind::Material:
+		createdPath = makeUniquePath(baseName, extension);
+		break;
+	case Editor::ProjectCreateAssetKind::Skybox:
+		createdPath = makeUniquePath(baseName, extension);
+		break;
+	case Editor::ProjectCreateAssetKind::Script:
+		createdPath = makeUniquePath(baseName, extension);
+		break;
+	case Editor::ProjectCreateAssetKind::Prefab:
+		createdPath = makeUniquePath(baseName, extension);
+		break;
+	default:
+		return false;
+	}
+
+	if (errorCode)
+	{
+		AppendAssetLog(std::format("Create asset failed: {}", errorCode.message()));
+		return false;
+	}
+	if (createdPath.empty())
+	{
+		AppendAssetLog("Create asset failed: could not allocate unique name.");
+		return false;
+	}
+
+	if (kind != Editor::ProjectCreateAssetKind::Folder)
+	{
+		std::ofstream file(createdPath, std::ios::trunc);
+		if (!file)
+		{
+			AppendAssetLog(std::format("Create asset failed: cannot write {}", createdPath.string()));
+			return false;
+		}
+		switch (kind)
+		{
+		case Editor::ProjectCreateAssetKind::Scene:
+			file << "{\n"
+				<< "  \"fileVersion\": 1,\n"
+				<< "  \"name\": \"" << createdPath.stem().string() << "\",\n"
+				<< "  \"lighting\": {\n"
+				<< "    \"ambientColor\": [0.62, 0.68, 0.78],\n"
+				<< "    \"ambientIntensity\": 0.35,\n"
+				<< "    \"exposure\": 1.0,\n"
+				<< "    \"skybox\": {\n"
+				<< "      \"enabled\": true,\n"
+				<< "      \"zenithColor\": [0.32, 0.55, 0.95],\n"
+				<< "      \"horizonColor\": [0.78, 0.88, 1.0],\n"
+				<< "      \"groundColor\": [0.34, 0.39, 0.46],\n"
+				<< "      \"sunColor\": [1.0, 0.86, 0.58],\n"
+				<< "      \"sunDirection\": [-0.35, 0.78, -0.42],\n"
+				<< "      \"intensity\": 1.0,\n"
+				<< "      \"horizonHeight\": -0.04,\n"
+				<< "      \"horizonBlend\": 1.35,\n"
+				<< "      \"sunSize\": 0.035,\n"
+				<< "      \"sunIntensity\": 1.15\n"
+				<< "    }\n"
+				<< "  },\n"
+				<< "  \"entities\": []\n"
+				<< "}\n";
+			break;
+		case Editor::ProjectCreateAssetKind::Material:
+			file << "{\n"
+				<< "  \"fileVersion\": 1,\n"
+				<< "  \"type\": \"Material\",\n"
+				<< "  \"shadingModel\": \"Phong\",\n"
+				<< "  \"baseColor\": [1.0, 1.0, 1.0, 1.0],\n"
+				<< "  \"useVertexColor\": false,\n"
+				<< "  \"shininess\": 32.0\n"
+				<< "}\n";
+			break;
+		case Editor::ProjectCreateAssetKind::Skybox:
+			file << Rendering::BuildSkyboxAssetJson(Rendering::SkyboxSettings{}) << '\n';
+			break;
+		case Editor::ProjectCreateAssetKind::Script:
+		{
+			const std::string scriptTypeName = makeScriptTypeName(createdPath.stem().string());
+			file << "// Native script placeholder.\n"
+				<< "// Register a matching NativeScriptDefinition in ScriptRuntime before use.\n\n"
+				<< "struct " << scriptTypeName << "\n"
+				<< "{\n"
+				<< "    void Start() {}\n"
+				<< "    void Update(float deltaTime) { (void)deltaTime; }\n"
+				<< "};\n";
+			break;
+		}
+		case Editor::ProjectCreateAssetKind::Prefab:
+			file << "{\n"
+				<< "  \"fileVersion\": 1,\n"
+				<< "  \"type\": \"Prefab\",\n"
+				<< "  \"root\": null\n"
+				<< "}\n";
+			break;
+		default:
+			break;
+		}
+	}
+
+	m_AssetFileSystem.RequestRefresh();
+	ConfigureResourceSystem();
+	AppendAssetLog(std::format("Created project asset: {}", createdPath.string()));
+	return true;
+}
+
+bool Engine::ApplySkyboxAsset(const std::filesystem::path& skyboxPath)
+{
+	if (BlockEditSceneMutationDuringPlay("Apply Skybox"))
+	{
+		return false;
+	}
+
+	const Rendering::SkyboxAssetLoadResult loadResult = Rendering::LoadSkyboxAsset(skyboxPath);
+	if (!loadResult.Success)
+	{
+		AppendAssetLog(std::format("Apply skybox failed: {}", loadResult.ErrorMessage));
+		return false;
+	}
+
+	m_SkyboxSettings = Rendering::ClampSkyboxSettings(loadResult.Settings);
+	MarkSceneDirty();
+	AppendAssetLog(std::format("Applied skybox: {}", skyboxPath.string()));
+	return true;
+}
+
+bool Engine::ExportProjectPackage()
+{
+	if (!m_Project)
+	{
+		AppendAssetLog("Export failed: no active project.");
+		return false;
+	}
+
+	Editor::ExportProfileSettings profile;
+	profile.OutputDirectory = (m_Project->RootPath / "Builds" / "Windows").lexically_normal();
+	return ExportProjectPackage(profile);
+}
+
+bool Engine::ExportProjectPackage(const Editor::ExportProfileSettings& profile)
+{
+	if (!m_Project)
+	{
+		AppendAssetLog("Export failed: no active project.");
+		return false;
+	}
+	if (!ConfirmSaveDirtyScene())
+	{
+		return false;
+	}
+
+	Projects::ProjectBuildRequest request;
+	request.Project = *m_Project;
+	request.OutputDirectory = profile.OutputDirectory.empty()
+		? (m_Project->RootPath / "Builds" / "Windows").lexically_normal()
+		: profile.OutputDirectory.lexically_normal();
+	request.CopyAssets = profile.CopyAssets;
+	request.CopyScenes = profile.CopyScenes;
+	request.WriteManifest = profile.WriteManifest;
+	Projects::ProjectBuildResult result = Projects::ProjectBuildService::BuildRuntimePackage(request);
+	if (!result.Success)
+	{
+		AppendAssetLog(std::format("Export failed: {}", result.ErrorMessage));
+		return false;
+	}
+
+	AppendAssetLog(std::format("Exported project package: {} ({} file(s))", result.OutputDirectory.string(), result.WrittenFiles.size()));
+	if (profile.RevealAfterExport)
+	{
+		RevealAssetPath(result.OutputDirectory);
+	}
+	return true;
+}
+
+bool Engine::RestoreSceneFromLoadResult(const ScenePersistence::LoadSceneResult& loadResult, const std::filesystem::path& scenePath, bool restoreDirtyState)
+{
+	if (!loadResult.Success)
+	{
+		return false;
+	}
+
+	ClearProjectSceneRuntimeState();
+	m_CurrentScenePath = scenePath.empty() ? GetDefaultScenePath() : std::filesystem::absolute(scenePath).lexically_normal();
+	m_SampleMode = Samples::Benchmark::SampleMode::ProjectScene;
+	m_LastSampleMode = m_SampleMode;
+	m_AmbientColor = loadResult.AmbientColor;
+	m_AmbientIntensity = loadResult.AmbientIntensity;
+	m_Exposure = loadResult.Exposure;
+	m_SkyboxSettings = loadResult.Skybox;
+
+	std::vector<EntityId> createdEntityIds;
+	createdEntityIds.reserve(loadResult.Entities.size());
+	for (const ScenePersistence::LoadedSceneEntity& loadedEntity : loadResult.Entities)
+	{
+		createdEntityIds.push_back(CreateEntityFromLoadedSceneEntity(loadedEntity, {}));
+	}
+	for (size_t entityIndex = 0; entityIndex < loadResult.Entities.size(); ++entityIndex)
+	{
+		const ScenePersistence::LoadedSceneEntity& loadedEntity = loadResult.Entities[entityIndex];
+		if (!loadedEntity.HasHierarchy || entityIndex >= createdEntityIds.size() || createdEntityIds[entityIndex] == InvalidEntityId)
+		{
+			continue;
+		}
+		EntityId parentEntityId = loadedEntity.ParentEntityId;
+		if (parentEntityId == InvalidEntityId && loadedEntity.ParentIndex < createdEntityIds.size())
+		{
+			parentEntityId = createdEntityIds[loadedEntity.ParentIndex];
+		}
+		if (parentEntityId != InvalidEntityId)
+		{
+			static_cast<void>(m_Scene.SetParentEntity(createdEntityIds[entityIndex], parentEntityId, false));
+		}
+		m_Scene.EnsureHierarchyComponent(createdEntityIds[entityIndex]).Expanded = loadedEntity.HierarchyExpanded;
+	}
+	m_Scene.UpdateWorldTransforms();
+
+	CreateEditorSceneEntities();
+	ProcessSceneReferenceAutoLoads(false);
+	SyncGameCameraFromSceneEntity();
+	RebuildPhysicsWorldFromScene();
+	SetSceneDirty(restoreDirtyState);
+	RebuildWindowTitleBase();
+	ResetFpsCounter();
+	return true;
+}
+
+void Engine::SetPlayModeEnabled(bool enabled)
+{
+	if (enabled)
+	{
+		if (m_PlayState == Editor::EditorPlayState::Paused)
+		{
+			SetPlayPaused(false);
+			return;
+		}
+		static_cast<void>(EnterPlayMode());
+		return;
+	}
+	static_cast<void>(ExitPlayMode());
+}
+
+void Engine::SetPlayPaused(bool paused)
+{
+	if (IsRuntimeMode())
+	{
+		return;
+	}
+
+	if (paused)
+	{
+		if (m_PlayState != Editor::EditorPlayState::Play)
+		{
+			return;
+		}
+		m_PlayState = Editor::EditorPlayState::Paused;
+		m_PlayStepRequested = false;
+		AppendAssetLog("Play mode paused.");
+		return;
+	}
+
+	if (m_PlayState != Editor::EditorPlayState::Paused)
+	{
+		return;
+	}
+	m_PlayState = Editor::EditorPlayState::Play;
+	m_PlayStepRequested = false;
+	AppendAssetLog("Play mode resumed.");
+}
+
+void Engine::StepPlayMode()
+{
+	if (IsRuntimeMode() || m_PlayState != Editor::EditorPlayState::Paused)
+	{
+		return;
+	}
+
+	m_PlayStepRequested = true;
+	AppendAssetLog("Play mode single-frame step requested.");
+}
+
+void Engine::ResetPlayRuntimeScene()
+{
+	if (IsRuntimeMode() || !m_PlayScene || !IsRuntimePlaying())
+	{
+		AppendAssetLog("Play runtime reset skipped: Play mode is not active.");
+		return;
+	}
+
+	m_SceneCommandBuffer.Clear();
+	m_PlayStepRequested = false;
+	m_PlayScene = m_Scene;
+	const std::unordered_set<EntityId> excludedEntities = BuildRuntimeExpandedSceneReferenceSet();
+	for (EntityId runtimeExpandedEntity : excludedEntities)
+	{
+		if (m_PlayScene->ContainsEntity(runtimeExpandedEntity))
+		{
+			static_cast<void>(m_PlayScene->DeleteEntity(runtimeExpandedEntity));
+		}
+	}
+	m_PlayScene->UpdateWorldTransforms();
+	m_ScriptRuntime.Reset();
+	m_RuntimeCommandStack.Clear();
+	SyncGameCameraFromSceneEntity();
+
+	if (m_PhysicsSimulationEnabled)
+	{
+		m_PhysicsSimulationSnapshot.clear();
+		for (const SceneEntity& entity : m_PlayScene->GetEntities())
+		{
+			if (const TransformComponent* transform = m_PlayScene->GetTransformComponent(entity.Id))
+			{
+				m_PhysicsSimulationSnapshot[entity.Id] = transform->LocalTransform;
+			}
+		}
+		RebuildPhysicsWorldFromScene();
+	}
+
+	AppendAssetLog(std::format(
+		"Play runtime scene reset from edit scene snapshot ({} entity/ies).",
+		m_PlayScene->GetEntities().size()));
+}
+
+bool Engine::EnterPlayMode()
+{
+	if (!m_Project || m_SampleMode != Samples::Benchmark::SampleMode::ProjectScene)
+	{
+		AppendAssetLog("Play mode is only available in Project Scene.");
+		return false;
+	}
+	if (m_PlayState == Editor::EditorPlayState::Play
+		|| m_PlayState == Editor::EditorPlayState::Paused
+		|| m_PlayState == Editor::EditorPlayState::EnteringPlay)
+	{
+		return true;
+	}
+	if (!ConfirmSaveDirtyScene())
+	{
+		AppendAssetLog("Play mode entry cancelled.");
+		return false;
+	}
+
+	m_PlayState = Editor::EditorPlayState::EnteringPlay;
+	m_PlayStepRequested = false;
+	m_PlayModeEditSceneSnapshot.reset();
+	m_PlayModeRestoreScenePath = m_CurrentScenePath.empty() ? GetDefaultScenePath() : m_CurrentScenePath;
+	m_PlayModeRestoreDirty = m_SceneDirty;
+	m_PlayModeSnapshotScenePath = (m_Project->RootPath / "Temp" / "PlayModeSnapshot.scene").lexically_normal();
+
+	const std::unordered_set<EntityId> excludedEntities = BuildRuntimeExpandedSceneReferenceSet();
+	std::string errorMessage;
+	if (!ScenePersistence::ScenePersistenceService::SaveScene(
+		m_Scene,
+		m_RenderState,
+		*m_Project,
+		m_PlayModeSnapshotScenePath,
+		m_AmbientColor,
+		m_AmbientIntensity,
+		m_Exposure,
+		m_SkyboxSettings,
+		errorMessage,
+		&excludedEntities))
+	{
+		m_PlayState = Editor::EditorPlayState::Edit;
+		AppendAssetLog(std::format("Play mode snapshot failed: {}", errorMessage));
+		return false;
+	}
+
+	ScenePersistence::LoadSceneResult editSnapshot = ScenePersistence::ScenePersistenceService::LoadScene(m_PlayModeSnapshotScenePath, *m_Project);
+	if (!editSnapshot.Success)
+	{
+		m_PlayState = Editor::EditorPlayState::Edit;
+		std::error_code errorCode;
+		std::filesystem::remove(m_PlayModeSnapshotScenePath, errorCode);
+		m_PlayModeSnapshotScenePath.clear();
+		m_PlayModeRestoreScenePath.clear();
+		m_PlayModeRestoreDirty = false;
+		AppendAssetLog(std::format("Play mode snapshot clone failed: {}", editSnapshot.ErrorMessage));
+		return false;
+	}
+	m_PlayModeEditSceneSnapshot = std::move(editSnapshot);
+	const size_t editSnapshotEntityCount = m_PlayModeEditSceneSnapshot->Entities.size();
+	m_PlayScene = m_Scene;
+	for (EntityId runtimeExpandedEntity : excludedEntities)
+	{
+		if (m_PlayScene->ContainsEntity(runtimeExpandedEntity))
+		{
+			static_cast<void>(m_PlayScene->DeleteEntity(runtimeExpandedEntity));
+		}
+	}
+	m_PlayScene->UpdateWorldTransforms();
+	m_EditorCommandStack.Clear();
+	m_RuntimeCommandStack.Clear();
+	m_ScriptRuntime.Reset();
+	m_PlayState = Editor::EditorPlayState::Play;
+	RebuildPhysicsWorldFromScene();
+	AppendAssetLog(std::format(
+		"Entered Play mode with runtime scene clone ({} edit entity/ies, file fallback: {})",
+		editSnapshotEntityCount,
+		m_PlayModeSnapshotScenePath.string()));
+	return true;
+}
+
+bool Engine::ExitPlayMode()
+{
+	if (m_PlayState == Editor::EditorPlayState::Edit)
+	{
+		return true;
+	}
+	if (!m_Project)
+	{
+		m_PlayState = Editor::EditorPlayState::Edit;
+		return false;
+	}
+
+	m_PlayState = Editor::EditorPlayState::ExitingPlay;
+	m_PlayScene.reset();
+	ScenePersistence::LoadSceneResult loadResult;
+	if (m_PlayModeEditSceneSnapshot)
+	{
+		loadResult = *m_PlayModeEditSceneSnapshot;
+	}
+	else
+	{
+		loadResult = ScenePersistence::ScenePersistenceService::LoadScene(m_PlayModeSnapshotScenePath, *m_Project);
+	}
+	if (!loadResult.Success)
+	{
+		m_PlayState = Editor::EditorPlayState::Edit;
+		AppendAssetLog(std::format("Play mode restore failed: {}", loadResult.ErrorMessage));
+		return false;
+	}
+
+	const std::filesystem::path restorePath = m_PlayModeRestoreScenePath.empty() ? GetDefaultScenePath() : m_PlayModeRestoreScenePath;
+	if (!RestoreSceneFromLoadResult(loadResult, restorePath, m_PlayModeRestoreDirty))
+	{
+		m_PlayState = Editor::EditorPlayState::Edit;
+		AppendAssetLog("Play mode restore failed: scene restore rejected snapshot.");
+		return false;
+	}
+
+	std::error_code errorCode;
+	std::filesystem::remove(m_PlayModeSnapshotScenePath, errorCode);
+	m_PlayModeSnapshotScenePath.clear();
+	m_PlayModeRestoreScenePath.clear();
+	m_PlayScene.reset();
+	m_PlayModeEditSceneSnapshot.reset();
+	m_RuntimeCommandStack.Clear();
+	m_PlayStepRequested = false;
+	m_PlayModeRestoreDirty = false;
+	m_ScriptRuntime.Reset();
+	m_PlayState = Editor::EditorPlayState::Edit;
+	AppendAssetLog("Exited Play mode; in-memory edit scene snapshot restored.");
+	return true;
+}
+
 bool Engine::ConfirmSaveDirtyScene()
 {
-	if (!m_SceneDirty || !m_Project || m_SampleMode != Samples::Benchmark::SampleMode::ProjectScene)
+	if (IsRuntimeMode() || !m_SceneDirty || !m_Project || m_SampleMode != Samples::Benchmark::SampleMode::ProjectScene)
 	{
 		return true;
 	}
@@ -1717,6 +4114,419 @@ std::filesystem::path Engine::GetDefaultScenePath() const
 	return (m_Project->RootPath / m_Project->StartupScene).lexically_normal();
 }
 
+std::filesystem::path Engine::ResolveProjectScenePath(const std::filesystem::path& scenePath) const
+{
+	if (scenePath.empty())
+	{
+		return {};
+	}
+	if (scenePath.is_absolute() || !m_Project)
+	{
+		return std::filesystem::absolute(scenePath).lexically_normal();
+	}
+
+	std::array candidates = {
+		(m_Project->RootPath / scenePath).lexically_normal(),
+		(m_Project->RootPath / m_Project->ScenesRoot / scenePath).lexically_normal(),
+		(m_Project->RootPath / m_Project->AssetRoot / scenePath).lexically_normal()
+	};
+	for (const std::filesystem::path& candidate : candidates)
+	{
+		std::error_code errorCode;
+		if (std::filesystem::is_regular_file(candidate, errorCode))
+		{
+			return std::filesystem::absolute(candidate).lexically_normal();
+		}
+	}
+	return std::filesystem::absolute(candidates.front()).lexically_normal();
+}
+
+std::unordered_set<EntityId> Engine::BuildRuntimeExpandedSceneReferenceSet() const
+{
+	std::unordered_set<EntityId> excludedEntities;
+	for (const auto& loadedSceneReference : m_LoadedSceneReferenceEntities)
+	{
+		for (EntityId loadedEntityId : loadedSceneReference.second.LoadedEntities)
+		{
+			if (loadedEntityId != InvalidEntityId && m_Scene.ContainsEntity(loadedEntityId))
+			{
+				excludedEntities.insert(loadedEntityId);
+			}
+		}
+	}
+	return excludedEntities;
+}
+
+Editor::SceneReferenceRuntimeStatus Engine::GetSceneReferenceRuntimeStatus(EntityId entityId) const
+{
+	Editor::SceneReferenceRuntimeStatus status;
+	const SceneReferenceComponent* sceneReference = m_Scene.GetSceneReferenceComponent(entityId);
+	if (!sceneReference)
+	{
+		status.StatusText = "No SceneReference component.";
+		return status;
+	}
+
+	status.ResolvedScenePath = ResolveProjectScenePath(sceneReference->ScenePath);
+	std::error_code errorCode;
+	status.FileExists = !status.ResolvedScenePath.empty() && std::filesystem::is_regular_file(status.ResolvedScenePath, errorCode);
+	if (const auto loadedIt = m_LoadedSceneReferenceEntities.find(entityId); loadedIt != m_LoadedSceneReferenceEntities.end())
+	{
+		status.Loaded = true;
+		status.Watching = loadedIt->second.LastWriteTime != std::filesystem::file_time_type{};
+		status.PendingExternalReload = loadedIt->second.PendingExternalReload;
+		const auto liveLoadedEntityCount = std::ranges::count_if(loadedIt->second.LoadedEntities, [this](EntityId loadedEntityId)
+			{
+				return loadedEntityId != InvalidEntityId && m_Scene.ContainsEntity(loadedEntityId);
+			});
+		status.LoadedEntityCount = static_cast<size_t>(liveLoadedEntityCount);
+		if (!loadedIt->second.ScenePath.empty())
+		{
+			status.ResolvedScenePath = loadedIt->second.ScenePath;
+		}
+		if (status.PendingExternalReload)
+		{
+			status.StatusText = "External file changed; reload is pending until the scene is saved or manually reloaded.";
+		}
+		else
+		{
+			status.StatusText = status.Watching
+				? "Loaded and watching for changes."
+				: "Loaded; file timestamp is not available.";
+		}
+		return status;
+	}
+
+	if (sceneReference->ScenePath.empty())
+	{
+		status.StatusText = "No scene path assigned.";
+	}
+	else if (!m_Scene.IsComponentEnabled<SceneReferenceComponent>(entityId))
+	{
+		status.StatusText = "SceneReference component is disabled.";
+	}
+	else if (!sceneReference->LoadAdditively)
+	{
+		status.StatusText = "Load Additively is off; Open Scene will replace the active scene.";
+	}
+	else if (!status.FileExists)
+	{
+		status.StatusText = "Referenced scene file was not found.";
+	}
+	else if (sceneReference->AutoLoad)
+	{
+		status.StatusText = "Auto Load is enabled; this reference will expand when the scene opens.";
+	}
+	else
+	{
+		status.StatusText = "Ready to load as nested scene children.";
+	}
+	return status;
+}
+
+Editor::NestedSceneChildStatus Engine::GetNestedSceneChildStatus(EntityId entityId) const
+{
+	Editor::NestedSceneChildStatus status;
+	for (const auto& [ownerEntity, loadedSceneReference] : m_LoadedSceneReferenceEntities)
+	{
+		if (std::ranges::find(loadedSceneReference.LoadedEntities, entityId) == loadedSceneReference.LoadedEntities.end())
+		{
+			continue;
+		}
+
+		const auto liveSiblingCount = std::ranges::count_if(loadedSceneReference.LoadedEntities, [this](EntityId loadedEntityId)
+			{
+				return loadedEntityId != InvalidEntityId && m_Scene.ContainsEntity(loadedEntityId);
+			});
+		status.IsNestedSceneChild = true;
+		status.OwnerEntity = ownerEntity;
+		status.SourceScenePath = loadedSceneReference.ScenePath;
+		status.SiblingCount = static_cast<size_t>(liveSiblingCount);
+		break;
+	}
+	return status;
+}
+
+bool Engine::MakeNestedSceneChildLocal(EntityId entityId)
+{
+	if (entityId == InvalidEntityId || !m_Scene.ContainsEntity(entityId))
+	{
+		AppendAssetLog("Make Local failed: entity no longer exists.");
+		return false;
+	}
+
+	auto ownerIt = std::ranges::find_if(m_LoadedSceneReferenceEntities, [entityId](const auto& loadedSceneReference)
+		{
+			return std::ranges::find(loadedSceneReference.second.LoadedEntities, entityId) != loadedSceneReference.second.LoadedEntities.end();
+		});
+	if (ownerIt == m_LoadedSceneReferenceEntities.end())
+	{
+		AppendAssetLog(std::format("Make Local skipped: entity {} is not a nested scene child.", entityId));
+		return false;
+	}
+
+	std::unordered_set<EntityId> trackedEntities(
+		ownerIt->second.LoadedEntities.begin(),
+		ownerIt->second.LoadedEntities.end());
+	std::unordered_set<EntityId> localEntities;
+	const auto collectTrackedSubtree = [this, &trackedEntities, &localEntities](auto&& self, EntityId currentEntity) -> void
+		{
+			if (currentEntity == InvalidEntityId ||
+				!m_Scene.ContainsEntity(currentEntity) ||
+				!trackedEntities.contains(currentEntity) ||
+				!localEntities.insert(currentEntity).second)
+			{
+				return;
+			}
+
+			for (const EntityId childEntity : m_Scene.GetChildEntities(currentEntity))
+			{
+				self(self, childEntity);
+			}
+		};
+	collectTrackedSubtree(collectTrackedSubtree, entityId);
+	if (localEntities.empty())
+	{
+		AppendAssetLog(std::format("Make Local skipped: entity {} has no tracked nested scene subtree.", entityId));
+		return false;
+	}
+
+	const EntityId ownerEntity = ownerIt->first;
+	const std::filesystem::path sourceScenePath = ownerIt->second.ScenePath;
+	std::erase_if(ownerIt->second.LoadedEntities, [&localEntities](EntityId loadedEntityId)
+		{
+			return localEntities.contains(loadedEntityId);
+		});
+	if (ownerIt->second.LoadedEntities.empty())
+	{
+		m_LoadedSceneReferenceEntities.erase(ownerIt);
+	}
+
+	m_Scene.SetSelectedEntity(entityId);
+	MarkSceneDirty();
+	AppendAssetLog(std::format(
+		"Made nested scene subtree local: entity {} from owner {} ({} entity/entities, source {})",
+		entityId,
+		ownerEntity,
+		localEntities.size(),
+		sourceScenePath.empty() ? std::string("<unknown>") : sourceScenePath.string()));
+	return true;
+}
+
+bool Engine::MakeNestedSceneChildLocalWithUndo(EntityId entityId)
+{
+	if (entityId == InvalidEntityId || !m_Scene.ContainsEntity(entityId))
+	{
+		AppendAssetLog("Make Local failed: entity no longer exists.");
+		return false;
+	}
+
+	const auto ownerIt = std::ranges::find_if(m_LoadedSceneReferenceEntities, [entityId](const auto& loadedSceneReference)
+		{
+			return std::ranges::find(loadedSceneReference.second.LoadedEntities, entityId) != loadedSceneReference.second.LoadedEntities.end();
+		});
+	if (ownerIt == m_LoadedSceneReferenceEntities.end())
+	{
+		AppendAssetLog(std::format("Make Local skipped: entity {} is not a nested scene child.", entityId));
+		return false;
+	}
+
+	std::unordered_set<EntityId> trackedEntities(ownerIt->second.LoadedEntities.begin(), ownerIt->second.LoadedEntities.end());
+	std::vector<EntityId> affectedEntities;
+	const auto collectTrackedSubtree = [this, &trackedEntities, &affectedEntities](auto&& self, EntityId currentEntity) -> void
+		{
+			if (currentEntity == InvalidEntityId ||
+				!m_Scene.ContainsEntity(currentEntity) ||
+				!trackedEntities.contains(currentEntity) ||
+				std::ranges::find(affectedEntities, currentEntity) != affectedEntities.end())
+			{
+				return;
+			}
+
+			affectedEntities.push_back(currentEntity);
+			for (const EntityId childEntity : m_Scene.GetChildEntities(currentEntity))
+			{
+				self(self, childEntity);
+			}
+		};
+	collectTrackedSubtree(collectTrackedSubtree, entityId);
+	if (affectedEntities.empty())
+	{
+		AppendAssetLog(std::format("Make Local skipped: entity {} has no tracked nested scene subtree.", entityId));
+		return false;
+	}
+
+	const EntityId ownerEntity = ownerIt->first;
+	const LoadedSceneReferenceState previousState = ownerIt->second;
+	const std::string* entityName = m_Scene.GetEntityName(entityId);
+	const std::string commandName = std::format(
+		"Make Local {}",
+		entityName && !entityName->empty() ? *entityName : std::format("Entity {}", entityId));
+
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = commandName,
+		.Execute = [this, entityId, ownerEntity, affectedEntities]()
+		{
+			const auto loadedIt = m_LoadedSceneReferenceEntities.find(ownerEntity);
+			if (loadedIt == m_LoadedSceneReferenceEntities.end())
+			{
+				AppendAssetLog(std::format("Make Local redo skipped: SceneReference owner {} is no longer tracking children.", ownerEntity));
+				return;
+			}
+
+			const std::unordered_set<EntityId> affectedSet(affectedEntities.begin(), affectedEntities.end());
+			std::erase_if(loadedIt->second.LoadedEntities, [&affectedSet](EntityId loadedEntityId)
+				{
+					return affectedSet.contains(loadedEntityId);
+				});
+			if (loadedIt->second.LoadedEntities.empty())
+			{
+				m_LoadedSceneReferenceEntities.erase(loadedIt);
+			}
+			if (m_Scene.ContainsEntity(entityId))
+			{
+				m_Scene.SetSelectedEntity(entityId);
+			}
+			MarkSceneDirty();
+			AppendAssetLog(std::format(
+				"Made nested scene subtree local: entity {} ({} entity/entities)",
+				entityId,
+				affectedEntities.size()));
+		},
+		.Undo = [this, entityId, ownerEntity, previousState]()
+		{
+			if (!m_Scene.ContainsEntity(ownerEntity))
+			{
+				AppendAssetLog(std::format("Undo Make Local skipped: SceneReference owner {} no longer exists.", ownerEntity));
+				return;
+			}
+
+			LoadedSceneReferenceState restoredState = previousState;
+			std::erase_if(restoredState.LoadedEntities, [this](EntityId loadedEntityId)
+				{
+					return loadedEntityId == InvalidEntityId || !m_Scene.ContainsEntity(loadedEntityId);
+				});
+			if (restoredState.LoadedEntities.empty())
+			{
+				m_LoadedSceneReferenceEntities.erase(ownerEntity);
+				AppendAssetLog("Undo Make Local skipped: no live nested scene children remain to track.");
+				return;
+			}
+
+			m_LoadedSceneReferenceEntities[ownerEntity] = std::move(restoredState);
+			if (m_Scene.ContainsEntity(entityId))
+			{
+				m_Scene.SetSelectedEntity(entityId);
+			}
+			MarkSceneDirty();
+			AppendAssetLog(std::format("Undo Make Local: entity {} is tracked as a nested scene child again.", entityId));
+		}
+	});
+	return true;
+}
+
+void Engine::ProcessSceneReferenceAutoLoads(bool markDirty)
+{
+	if (!m_Project || m_SampleMode != Samples::Benchmark::SampleMode::ProjectScene)
+	{
+		return;
+	}
+
+	std::vector<EntityId> autoLoadEntities;
+	for (const SceneEntity& entity : m_Scene.GetEntities())
+	{
+		const SceneReferenceComponent* sceneReference = m_Scene.GetSceneReferenceComponent(entity.Id);
+		if (!sceneReference ||
+			!m_Scene.IsComponentEnabled<SceneReferenceComponent>(entity.Id) ||
+			!sceneReference->AutoLoad ||
+			!sceneReference->LoadAdditively ||
+			sceneReference->ScenePath.empty())
+		{
+			continue;
+		}
+		autoLoadEntities.push_back(entity.Id);
+	}
+
+	size_t loadedCount = 0;
+	for (EntityId entityId : autoLoadEntities)
+	{
+		if (m_Scene.ContainsEntity(entityId) && LoadSceneReference(entityId, markDirty))
+		{
+			++loadedCount;
+		}
+	}
+	if (loadedCount > 0)
+	{
+		AppendAssetLog(std::format("SceneReference auto-load expanded {} reference(s).", loadedCount));
+	}
+}
+
+void Engine::UpdateSceneReferenceHotReload(float deltaTime)
+{
+	if (m_LoadedSceneReferenceEntities.empty() ||
+		!m_Project ||
+		m_SampleMode != Samples::Benchmark::SampleMode::ProjectScene ||
+		IsRuntimePlaying())
+	{
+		m_SceneReferenceHotReloadElapsedSeconds = 0.0f;
+		return;
+	}
+
+	m_SceneReferenceHotReloadElapsedSeconds += (std::max)(0.0f, deltaTime);
+	constexpr float kSceneReferenceHotReloadIntervalSeconds = 1.0f;
+	if (m_SceneReferenceHotReloadElapsedSeconds < kSceneReferenceHotReloadIntervalSeconds)
+	{
+		return;
+	}
+	m_SceneReferenceHotReloadElapsedSeconds = 0.0f;
+
+	std::vector<EntityId> reloadEntities;
+	for (auto& [entityId, state] : m_LoadedSceneReferenceEntities)
+	{
+		if (entityId == InvalidEntityId || !m_Scene.ContainsEntity(entityId) || state.ScenePath.empty())
+		{
+			continue;
+		}
+
+		if (state.PendingExternalReload)
+		{
+			if (!m_SceneDirty)
+			{
+				reloadEntities.push_back(entityId);
+			}
+			continue;
+		}
+
+		std::error_code errorCode;
+		const std::filesystem::file_time_type lastWriteTime = std::filesystem::last_write_time(state.ScenePath, errorCode);
+		if (errorCode || lastWriteTime == state.LastWriteTime)
+		{
+			continue;
+		}
+
+		state.LastWriteTime = lastWriteTime;
+		if (m_SceneDirty)
+		{
+			state.PendingExternalReload = true;
+			AppendAssetLog(std::format(
+				"Scene reference changed on disk; reload pending until dirty scene is saved or manual reload is requested: {}",
+				state.ScenePath.string()));
+			continue;
+		}
+		reloadEntities.push_back(entityId);
+	}
+
+	for (EntityId entityId : reloadEntities)
+	{
+		if (!m_Scene.ContainsEntity(entityId))
+		{
+			continue;
+		}
+		AppendAssetLog(std::format("Scene reference changed on disk, reloading entity {}.", entityId));
+		static_cast<void>(LoadSceneReference(entityId, false));
+	}
+}
+
 void Engine::ClearProjectSceneRuntimeState()
 {
 	SetPhysicsSimulationEnabled(false);
@@ -1729,7 +4539,16 @@ void Engine::ClearProjectSceneRuntimeState()
 	m_RuntimeAssetRegistry.Clear();
 	++m_AssetSceneGeneration;
 	m_RenderState.Reset();
+	m_EditorCommandStack.Clear();
+	m_RuntimeCommandStack.Clear();
+	m_ScriptRuntime.Reset();
 	m_Scene.Clear();
+	m_PlayScene.reset();
+	m_LoadedSceneReferenceEntities.clear();
+	m_MeshRestoreGenerations.clear();
+	m_MeshRestoreRequests.clear();
+	m_MeshRestoreConflictResults.clear();
+	m_PlayState = Editor::EditorPlayState::Edit;
 	m_SpiderEntity = InvalidEntityId;
 	m_GameCameraEntity = InvalidEntityId;
 	m_KeyLightEntity = InvalidEntityId;
@@ -1737,9 +4556,100 @@ void Engine::ClearProjectSceneRuntimeState()
 	m_PhysicsSimulationSnapshot.clear();
 }
 
+bool Engine::IsStaleMeshRestoreResult(const Asset::AssetImportResult& result) const
+{
+	if (!result.Restore.HasTargetEntity || result.Restore.RestoreGeneration == 0)
+	{
+		return false;
+	}
+
+	const auto generationIt = m_MeshRestoreGenerations.find(result.Restore.TargetEntity);
+	return generationIt == m_MeshRestoreGenerations.end() || generationIt->second != result.Restore.RestoreGeneration;
+}
+
+bool Engine::HasMeshRestoreConflict(const Asset::AssetImportResult& result, std::string& conflictReason) const
+{
+	if (!result.Restore.HasTargetEntity || result.Restore.RestoreGeneration == 0)
+	{
+		return false;
+	}
+
+	const auto restoreIt = m_MeshRestoreRequests.find(result.Restore.TargetEntity);
+	if (restoreIt == m_MeshRestoreRequests.end() || restoreIt->second.Generation != result.Restore.RestoreGeneration)
+	{
+		return false;
+	}
+
+	const MeshRestoreRequestState& state = restoreIt->second;
+	if (!state.Pending)
+	{
+		conflictReason = state.Cancelled
+			? "Mesh restore was cancelled before the import completed."
+			: "Mesh restore is no longer pending.";
+		return true;
+	}
+
+	if (!state.SourcePrefabPath.empty() && state.SourcePrefabWriteTime)
+	{
+		std::error_code writeTimeError;
+		const std::filesystem::file_time_type currentWriteTime = std::filesystem::last_write_time(state.SourcePrefabPath, writeTimeError);
+		if (writeTimeError)
+		{
+			conflictReason = std::format(
+				"Source prefab became unavailable while Mesh restore was importing: {}",
+				state.SourcePrefabPath.string());
+			return true;
+		}
+		if (currentWriteTime != *state.SourcePrefabWriteTime)
+		{
+			conflictReason = std::format(
+				"Source prefab changed on disk while Mesh restore was importing: {}",
+				state.SourcePrefabPath.string());
+			return true;
+		}
+	}
+
+	const std::string currentSignature = BuildMeshRestoreSignature(result.Restore.TargetEntity);
+	if (!state.ExpectedCurrentMeshSignature.empty() && currentSignature != state.ExpectedCurrentMeshSignature)
+	{
+		conflictReason = "Current Entity Mesh changed while restore import was running. Restore result was discarded.";
+		return true;
+	}
+
+	return false;
+}
+
+void Engine::MarkMeshRestoreFailed(const Asset::AssetImportResult& result)
+{
+	if (!result.Restore.HasTargetEntity || result.Restore.RestoreGeneration == 0)
+	{
+		return;
+	}
+
+	const EntityId entityId = result.Restore.TargetEntity;
+	if (IsStaleMeshRestoreResult(result))
+	{
+		return;
+	}
+
+	MeshRestoreRequestState& state = m_MeshRestoreRequests[entityId];
+	state.Generation = result.Restore.RestoreGeneration;
+	state.SourcePath = result.SourcePath;
+	state.Pending = false;
+	state.Failed = true;
+	state.Cancelled = false;
+	state.Conflicted = false;
+	state.ImportedVertexCount = 0;
+	state.ImportedIndexCount = 0;
+	state.ImportedMaterialCount = 0;
+	state.MaterialDiffLines.clear();
+	state.MaterialDiffRows.clear();
+	state.Message = result.ErrorMessage.empty() ? "Mesh restore import failed." : result.ErrorMessage;
+}
+
 void Engine::MarkSceneDirty()
 {
-	if (!m_Project || m_SampleMode != Samples::Benchmark::SampleMode::ProjectScene)
+	if (IsRuntimeMode() || !m_Project || m_SampleMode != Samples::Benchmark::SampleMode::ProjectScene)
 	{
 		return;
 	}
@@ -1761,14 +4671,262 @@ void Engine::SetSceneDirty(bool dirty)
 
 void Engine::MoveEntityInHierarchy(EntityId movedEntity, EntityId targetEntity, Editor::EntityDropPlacement placement)
 {
-	const bool moved = placement == Editor::EntityDropPlacement::Before
-		? m_Scene.MoveEntityBefore(movedEntity, targetEntity)
-		: m_Scene.MoveEntityAfter(movedEntity, targetEntity);
+	if (movedEntity == InvalidEntityId
+		|| targetEntity == InvalidEntityId
+		|| movedEntity == targetEntity
+		|| !m_Scene.ContainsEntity(movedEntity)
+		|| !m_Scene.ContainsEntity(targetEntity)
+		|| m_Scene.IsDescendantOf(targetEntity, movedEntity))
+	{
+		return;
+	}
+
+	bool moved = false;
+	if (placement == Editor::EntityDropPlacement::AsChild)
+	{
+		moved = m_Scene.SetParentEntity(movedEntity, targetEntity, true);
+	}
+	else
+	{
+		const EntityId targetParent = m_Scene.GetParentEntity(targetEntity);
+		static_cast<void>(m_Scene.SetParentEntity(movedEntity, targetParent, true));
+		moved = placement == Editor::EntityDropPlacement::Before
+			? m_Scene.MoveEntityBefore(movedEntity, targetEntity)
+			: m_Scene.MoveEntityAfter(movedEntity, targetEntity);
+	}
 	if (moved)
 	{
 		MarkSceneDirty();
-		AppendAssetLog(std::format("Moved entity {} {} entity {}", movedEntity, placement == Editor::EntityDropPlacement::Before ? "before" : "after", targetEntity));
+		const char* placementName = placement == Editor::EntityDropPlacement::Before
+			? "before"
+			: placement == Editor::EntityDropPlacement::After ? "after" : "under";
+		AppendAssetLog(std::format("Moved entity {} {} entity {}", movedEntity, placementName, targetEntity));
 	}
+}
+
+void Engine::MoveEntitiesInHierarchyWithUndo(std::vector<EntityId> movedEntities, EntityId targetEntity, Editor::EntityDropPlacement placement)
+{
+	if (BlockEditSceneMutationDuringPlay("Move Entity"))
+	{
+		return;
+	}
+
+	if (targetEntity == InvalidEntityId || !m_Scene.ContainsEntity(targetEntity))
+	{
+		return;
+	}
+
+	std::vector<EntityId> orderedMovedEntities;
+	for (const SceneEntity& entity : m_Scene.GetEntities())
+	{
+		if (entity.Id == targetEntity || std::ranges::find(movedEntities, entity.Id) == movedEntities.end())
+		{
+			continue;
+		}
+		if (!m_Scene.ContainsEntity(entity.Id) || m_Scene.IsDescendantOf(targetEntity, entity.Id))
+		{
+			return;
+		}
+		if (std::ranges::find(orderedMovedEntities, entity.Id) == orderedMovedEntities.end())
+		{
+			orderedMovedEntities.push_back(entity.Id);
+		}
+	}
+
+	std::erase_if(orderedMovedEntities, [this, &orderedMovedEntities](EntityId entityId)
+		{
+			const EntityId parentEntity = m_Scene.GetParentEntity(entityId);
+			return parentEntity != InvalidEntityId
+				&& std::ranges::find(orderedMovedEntities, parentEntity) != orderedMovedEntities.end();
+		});
+
+	if (orderedMovedEntities.empty())
+	{
+		return;
+	}
+
+	struct MoveRecord
+	{
+		EntityId Entity = InvalidEntityId;
+		EntityId PreviousParent = InvalidEntityId;
+		size_t PreviousIndex = static_cast<size_t>(-1);
+		Math::Transform PreviousLocalTransform = Math::Transform::Identity();
+	};
+
+	auto records = std::make_shared<std::vector<MoveRecord>>();
+	records->reserve(orderedMovedEntities.size());
+	for (EntityId entityId : orderedMovedEntities)
+	{
+		Math::Transform previousTransform = Math::Transform::Identity();
+		if (const TransformComponent* transform = m_Scene.GetTransformComponent(entityId))
+		{
+			previousTransform = transform->LocalTransform;
+		}
+		records->push_back(MoveRecord{
+			.Entity = entityId,
+			.PreviousParent = m_Scene.GetParentEntity(entityId),
+			.PreviousIndex = m_Scene.GetEntityIndex(entityId),
+			.PreviousLocalTransform = previousTransform
+		});
+	}
+
+	const auto applyMove = [this, records, targetEntity, placement]() -> bool
+	{
+		if (!m_Scene.ContainsEntity(targetEntity))
+		{
+			return false;
+		}
+
+		std::vector<EntityId> currentEntities;
+		currentEntities.reserve(records->size());
+		for (const MoveRecord& record : *records)
+		{
+			if (record.Entity != targetEntity && m_Scene.ContainsEntity(record.Entity))
+			{
+				currentEntities.push_back(record.Entity);
+			}
+		}
+		if (currentEntities.empty())
+		{
+			return false;
+		}
+
+		if (placement == Editor::EntityDropPlacement::AsChild)
+		{
+			EntityId insertAfter = targetEntity;
+			for (EntityId entityId : currentEntities)
+			{
+				static_cast<void>(m_Scene.SetParentEntity(entityId, targetEntity, true));
+				static_cast<void>(m_Scene.MoveEntityAfter(entityId, insertAfter));
+				insertAfter = entityId;
+			}
+		}
+		else
+		{
+			const EntityId targetParent = m_Scene.GetParentEntity(targetEntity);
+			if (placement == Editor::EntityDropPlacement::Before)
+			{
+				for (EntityId entityId : currentEntities)
+				{
+					static_cast<void>(m_Scene.SetParentEntity(entityId, targetParent, true));
+					static_cast<void>(m_Scene.MoveEntityBefore(entityId, targetEntity));
+				}
+			}
+			else
+			{
+				EntityId insertAfter = targetEntity;
+				for (EntityId entityId : currentEntities)
+				{
+					static_cast<void>(m_Scene.SetParentEntity(entityId, targetParent, true));
+					static_cast<void>(m_Scene.MoveEntityAfter(entityId, insertAfter));
+					insertAfter = entityId;
+				}
+			}
+		}
+
+		m_Scene.UpdateWorldTransforms();
+		return true;
+	};
+
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Move {} entities", records->size()),
+		.Execute = [this, records, targetEntity, placement, applyMove]()
+		{
+			if (applyMove())
+			{
+				MarkSceneDirty();
+				const char* placementName = placement == Editor::EntityDropPlacement::Before
+					? "before"
+					: placement == Editor::EntityDropPlacement::After ? "after" : "under";
+				AppendAssetLog(std::format("Moved {} selected entities {} entity {}", records->size(), placementName, targetEntity));
+			}
+		},
+		.Undo = [this, records]()
+		{
+			for (MoveRecord& record : *records)
+			{
+				if (!m_Scene.ContainsEntity(record.Entity))
+				{
+					continue;
+				}
+				if (TransformComponent* transform = m_Scene.GetTransformComponent(record.Entity))
+				{
+					transform->LocalTransform = record.PreviousLocalTransform;
+				}
+				static_cast<void>(m_Scene.SetParentEntity(record.Entity, record.PreviousParent, false));
+				static_cast<void>(m_Scene.MoveEntityToIndex(record.Entity, record.PreviousIndex));
+			}
+			m_Scene.UpdateWorldTransforms();
+			MarkSceneDirty();
+			AppendAssetLog(std::format("Undo move for {} selected entities", records->size()));
+		}
+	});
+}
+
+void Engine::SetEntitySceneVisibilityWithUndo(EntityId entityId, bool visible)
+{
+	if (!m_Scene.ContainsEntity(entityId))
+	{
+		return;
+	}
+
+	const bool previousVisible = m_Scene.IsEntityVisibleInScene(entityId);
+	if (previousVisible == visible)
+	{
+		return;
+	}
+
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = visible ? "Show Entity In Scene" : "Hide Entity In Scene",
+		.Execute = [this, entityId, visible]()
+		{
+			if (m_Scene.SetEntityVisibleInScene(entityId, visible))
+			{
+				MarkSceneDirty();
+				AppendAssetLog(std::format("{} entity {} in Scene View", visible ? "Showed" : "Hid", entityId));
+			}
+		},
+		.Undo = [this, entityId, previousVisible]()
+		{
+			if (m_Scene.SetEntityVisibleInScene(entityId, previousVisible))
+			{
+				MarkSceneDirty();
+			}
+		}
+	});
+}
+
+void Engine::SetEntityScenePickabilityWithUndo(EntityId entityId, bool pickable)
+{
+	if (!m_Scene.ContainsEntity(entityId))
+	{
+		return;
+	}
+
+	const bool previousPickable = m_Scene.IsEntityPickableInScene(entityId);
+	if (previousPickable == pickable)
+	{
+		return;
+	}
+
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = pickable ? "Enable Scene Picking" : "Disable Scene Picking",
+		.Execute = [this, entityId, pickable]()
+		{
+			if (m_Scene.SetEntityPickableInScene(entityId, pickable))
+			{
+				MarkSceneDirty();
+				AppendAssetLog(std::format("{} scene picking for entity {}", pickable ? "Enabled" : "Disabled", entityId));
+			}
+		},
+		.Undo = [this, entityId, previousPickable]()
+		{
+			if (m_Scene.SetEntityPickableInScene(entityId, previousPickable))
+			{
+				MarkSceneDirty();
+			}
+		}
+	});
 }
 
 void Engine::AlignGameCameraToSceneCamera()
@@ -1812,6 +4970,7 @@ void Engine::SetPhysicsSimulationEnabled(bool enabled)
 
 	if (enabled)
 	{
+		Scene& runtimeScene = GetRuntimeScene();
 		if (!m_PhysicsWorld.IsInitialized() && !m_PhysicsWorld.Initialize())
 		{
 			AppendAssetLog("Physics simulation failed to initialize PhysX.");
@@ -1819,9 +4978,9 @@ void Engine::SetPhysicsSimulationEnabled(bool enabled)
 		}
 
 		m_PhysicsSimulationSnapshot.clear();
-		for (const SceneEntity& entity : m_Scene.GetEntities())
+		for (const SceneEntity& entity : runtimeScene.GetEntities())
 		{
-			if (const TransformComponent* transform = m_Scene.GetTransformComponent(entity.Id))
+			if (const TransformComponent* transform = runtimeScene.GetTransformComponent(entity.Id))
 			{
 				m_PhysicsSimulationSnapshot[entity.Id] = transform->LocalTransform;
 			}
@@ -1830,15 +4989,15 @@ void Engine::SetPhysicsSimulationEnabled(bool enabled)
 		m_PhysicsSimulationEnabled = true;
 		uint32_t dynamicGravityActorCount = 0;
 		uint32_t staticColliderCount = 0;
-		for (const SceneEntity& entity : m_Scene.GetEntities())
+		for (const SceneEntity& entity : runtimeScene.GetEntities())
 		{
-			if (!m_Scene.GetColliderComponent(entity.Id) || !m_Scene.IsColliderEnabled(entity.Id))
+			if (!runtimeScene.GetColliderComponent(entity.Id) || !runtimeScene.IsColliderEnabled(entity.Id))
 			{
 				continue;
 			}
 
-			const RigidBodyComponent* rigidBody = m_Scene.GetRigidBodyComponent(entity.Id);
-			if (rigidBody && m_Scene.IsRigidBodyEnabled(entity.Id) && rigidBody->Type == Physics::RigidBodyType::Dynamic && rigidBody->UseGravity)
+			const RigidBodyComponent* rigidBody = runtimeScene.GetRigidBodyComponent(entity.Id);
+			if (rigidBody && runtimeScene.IsRigidBodyEnabled(entity.Id) && rigidBody->Type == Physics::RigidBodyType::Dynamic && rigidBody->UseGravity)
 			{
 				++dynamicGravityActorCount;
 			}
@@ -1860,9 +5019,10 @@ void Engine::SetPhysicsSimulationEnabled(bool enabled)
 
 	m_PhysicsSimulationEnabled = false;
 	m_PhysicsWorld.Clear();
+	Scene& runtimeScene = GetRuntimeScene();
 	for (const auto& [entityId, transformSnapshot] : m_PhysicsSimulationSnapshot)
 	{
-		if (TransformComponent* transform = m_Scene.GetTransformComponent(entityId))
+		if (TransformComponent* transform = runtimeScene.GetTransformComponent(entityId))
 		{
 			transform->LocalTransform = transformSnapshot;
 			transform->UpdateWorld();
@@ -1880,11 +5040,12 @@ void Engine::RebuildPhysicsWorldFromScene()
 		return;
 	}
 
-	for (const SceneEntity& entity : m_Scene.GetEntities())
+	Scene& runtimeScene = GetRuntimeScene();
+	for (const SceneEntity& entity : runtimeScene.GetEntities())
 	{
-		if (m_Scene.GetColliderComponent(entity.Id) && m_Scene.IsColliderEnabled(entity.Id))
+		if (runtimeScene.GetColliderComponent(entity.Id) && runtimeScene.IsColliderEnabled(entity.Id))
 		{
-			m_PhysicsWorld.CreateOrUpdateActor(entity.Id, m_Scene);
+			m_PhysicsWorld.CreateOrUpdateActor(entity.Id, runtimeScene);
 		}
 	}
 }
@@ -1896,13 +5057,14 @@ void Engine::MarkPhysicsActorDirty(EntityId entityId)
 		return;
 	}
 
-	if (!m_Scene.ContainsEntity(entityId) || !m_Scene.GetColliderComponent(entityId) || !m_Scene.IsColliderEnabled(entityId))
+	Scene& runtimeScene = GetRuntimeScene();
+	if (!runtimeScene.ContainsEntity(entityId) || !runtimeScene.GetColliderComponent(entityId) || !runtimeScene.IsColliderEnabled(entityId))
 	{
 		m_PhysicsWorld.RemoveActor(entityId);
 		return;
 	}
 
-	m_PhysicsWorld.CreateOrUpdateActor(entityId, m_Scene);
+	m_PhysicsWorld.CreateOrUpdateActor(entityId, runtimeScene);
 }
 
 void Engine::CreateDefaultColliderForPrimitive(EntityId entityId, Asset::PrimitiveMeshKind kind)
@@ -1948,7 +5110,35 @@ void Engine::CreateDefaultColliderForPrimitive(EntityId entityId, Asset::Primiti
 	MarkPhysicsActorDirty(entityId);
 }
 
-EntityId Engine::CreatePrimitiveEntity(Asset::PrimitiveMeshKind kind)
+void Engine::CreateGeneratedColliderForImportedModel(EntityId entityId, const BoundsComponent& bounds)
+{
+	if (!m_Scene.ContainsEntity(entityId) || m_Scene.GetColliderComponent(entityId))
+	{
+		return;
+	}
+
+	const DirectX::XMFLOAT3 size = {
+		(std::max)(bounds.LocalMax.x - bounds.LocalMin.x, 0.01f),
+		(std::max)(bounds.LocalMax.y - bounds.LocalMin.y, 0.01f),
+		(std::max)(bounds.LocalMax.z - bounds.LocalMin.z, 0.01f)
+	};
+	ColliderComponent& collider = m_Scene.EnsureColliderComponent(entityId);
+	collider.Shape = Physics::ColliderShape::Box;
+	collider.Size = size;
+	collider.Offset = {
+		(bounds.LocalMin.x + bounds.LocalMax.x) * 0.5f,
+		(bounds.LocalMin.y + bounds.LocalMax.y) * 0.5f,
+		(bounds.LocalMin.z + bounds.LocalMax.z) * 0.5f
+	};
+	collider.Radius = (std::max)((std::max)(size.x, size.z) * 0.5f, 0.01f);
+	collider.Height = (std::max)(size.y, 0.01f);
+	collider.IsTrigger = false;
+	static_cast<void>(m_Scene.EnsurePhysicsMaterialComponent(entityId));
+	MarkPhysicsActorDirty(entityId);
+	AppendAssetLog(std::format("Generated Box collider for imported model entity {}", entityId));
+}
+
+EntityId Engine::CreatePrimitiveEntity(Asset::PrimitiveMeshKind kind, EntityId parentEntity)
 {
 	if (kind == Asset::PrimitiveMeshKind::None)
 	{
@@ -1970,11 +5160,46 @@ EntityId Engine::CreatePrimitiveEntity(Asset::PrimitiveMeshKind kind)
 		static_cast<void>(m_Scene.DeleteEntity(entityId));
 		return InvalidEntityId;
 	}
+	if (parentEntity != InvalidEntityId && m_Scene.ContainsEntity(parentEntity))
+	{
+		static_cast<void>(m_Scene.SetParentEntity(entityId, parentEntity, true));
+	}
 
 	m_Scene.SetSelectedEntity(entityId);
 	MarkSceneDirty();
 	AppendAssetLog(std::format("Created primitive {} entity {}", primitiveName, entityId));
 	return entityId;
+}
+
+void Engine::CreatePrimitiveEntityWithUndo(Asset::PrimitiveMeshKind kind, EntityId parentEntity)
+{
+	if (BlockEditSceneMutationDuringPlay("Create Primitive"))
+	{
+		return;
+	}
+
+	if (kind == Asset::PrimitiveMeshKind::None)
+	{
+		return;
+	}
+
+	const std::string primitiveName(Asset::PrimitiveMeshKindToString(kind));
+	const auto createdEntity = std::make_shared<EntityId>(InvalidEntityId);
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Create {}", primitiveName),
+		.Execute = [this, kind, parentEntity, createdEntity]()
+		{
+			*createdEntity = CreatePrimitiveEntity(kind, parentEntity);
+		},
+		.Undo = [this, createdEntity]()
+		{
+			if (*createdEntity != InvalidEntityId && m_Scene.ContainsEntity(*createdEntity))
+			{
+				DeleteEntityFromHierarchy(*createdEntity);
+				*createdEntity = InvalidEntityId;
+			}
+		}
+	});
 }
 
 bool Engine::ApplyPrimitiveMeshToEntity(EntityId entityId, Asset::PrimitiveMeshKind kind, const Math::Transform& localTransform, bool createDefaultCollider)
@@ -2022,6 +5247,11 @@ bool Engine::ApplyPrimitiveMeshToEntity(EntityId entityId, Asset::PrimitiveMeshK
 
 void Engine::AddComponentToEntity(EntityId entityId, SceneComponentKind kind)
 {
+	if (BlockEditSceneMutationDuringPlay("Add Component"))
+	{
+		return;
+	}
+
 	if (!m_Scene.ContainsEntity(entityId))
 	{
 		return;
@@ -2102,6 +5332,69 @@ void Engine::AddComponentToEntity(EntityId entityId, SceneComponentKind kind)
 			added = true;
 		}
 		break;
+	case SceneComponentKind::PrefabInstance:
+		if (!m_Scene.GetPrefabInstanceComponent(entityId))
+		{
+			PrefabInstanceComponent& prefab = m_Scene.EnsurePrefabInstanceComponent(entityId);
+			if (const std::string* name = m_Scene.GetEntityName(entityId))
+			{
+				prefab.SourceName = *name;
+			}
+			added = true;
+		}
+		break;
+	case SceneComponentKind::SceneReference:
+		if (!m_Scene.GetSceneReferenceComponent(entityId))
+		{
+			static_cast<void>(m_Scene.EnsureSceneReferenceComponent(entityId));
+			added = true;
+		}
+		break;
+	case SceneComponentKind::Script:
+		if (!m_Scene.GetScriptComponent(entityId))
+		{
+			ScriptComponent& script = m_Scene.EnsureScriptComponent(entityId);
+			script.ClassName = "GameScript";
+			script.Language = ScriptLanguage::Native;
+			added = true;
+		}
+		break;
+	case SceneComponentKind::Sprite2D:
+		if (!m_Scene.GetSprite2DComponent(entityId))
+		{
+			static_cast<void>(m_Scene.EnsureSprite2DComponent(entityId));
+			added = true;
+		}
+		break;
+	case SceneComponentKind::UiElement:
+		if (!m_Scene.GetUiElementComponent(entityId))
+		{
+			static_cast<void>(m_Scene.EnsureUiElementComponent(entityId));
+			added = true;
+		}
+		break;
+	case SceneComponentKind::AudioSource:
+		if (!m_Scene.GetAudioSourceComponent(entityId))
+		{
+			static_cast<void>(m_Scene.EnsureAudioSourceComponent(entityId));
+			added = true;
+		}
+		break;
+	case SceneComponentKind::NavigationAgent:
+		if (!m_Scene.GetNavigationAgentComponent(entityId))
+		{
+			static_cast<void>(m_Scene.EnsureNavigationAgentComponent(entityId));
+			added = true;
+		}
+		break;
+	case SceneComponentKind::NetworkIdentity:
+		if (!m_Scene.GetNetworkIdentityComponent(entityId))
+		{
+			NetworkIdentityComponent& network = m_Scene.EnsureNetworkIdentityComponent(entityId);
+			network.NetworkId = (static_cast<uint64_t>(entityId) << 32u) | static_cast<uint64_t>(m_AssetSceneGeneration & 0xffffffffu);
+			added = true;
+		}
+		break;
 	default:
 		break;
 	}
@@ -2119,8 +5412,84 @@ void Engine::AddComponentToEntity(EntityId entityId, SceneComponentKind kind)
 	AppendAssetLog(std::format("Added {} component to entity {}", SceneComponentKindName(kind), entityId));
 }
 
+void Engine::AddComponentToEntityWithUndo(EntityId entityId, SceneComponentKind kind)
+{
+	if (BlockEditSceneMutationDuringPlay("Add Component"))
+	{
+		return;
+	}
+
+	if (!m_Scene.ContainsEntity(entityId))
+	{
+		return;
+	}
+
+	const bool alreadyHasComponent = [&]()
+	{
+		switch (kind)
+		{
+		case SceneComponentKind::Mesh:
+			return m_Scene.GetMeshComponent(entityId) != nullptr;
+		case SceneComponentKind::Animator:
+			return m_Scene.GetAnimatorComponent(entityId) != nullptr;
+		case SceneComponentKind::Camera:
+			return m_Scene.GetCameraComponent(entityId) != nullptr;
+		case SceneComponentKind::Light:
+			return m_Scene.GetLightComponent(entityId) != nullptr;
+		case SceneComponentKind::RigidBody:
+			return m_Scene.GetRigidBodyComponent(entityId) != nullptr;
+		case SceneComponentKind::Collider:
+			return m_Scene.GetColliderComponent(entityId) != nullptr;
+		case SceneComponentKind::PhysicsMaterial:
+			return m_Scene.GetPhysicsMaterialComponent(entityId) != nullptr;
+		case SceneComponentKind::PrefabInstance:
+			return m_Scene.GetPrefabInstanceComponent(entityId) != nullptr;
+		case SceneComponentKind::SceneReference:
+			return m_Scene.GetSceneReferenceComponent(entityId) != nullptr;
+		case SceneComponentKind::Script:
+			return m_Scene.GetScriptComponent(entityId) != nullptr;
+		case SceneComponentKind::Sprite2D:
+			return m_Scene.GetSprite2DComponent(entityId) != nullptr;
+		case SceneComponentKind::UiElement:
+			return m_Scene.GetUiElementComponent(entityId) != nullptr;
+		case SceneComponentKind::AudioSource:
+			return m_Scene.GetAudioSourceComponent(entityId) != nullptr;
+		case SceneComponentKind::NavigationAgent:
+			return m_Scene.GetNavigationAgentComponent(entityId) != nullptr;
+		case SceneComponentKind::NetworkIdentity:
+			return m_Scene.GetNetworkIdentityComponent(entityId) != nullptr;
+		default:
+			return true;
+		}
+	}();
+	if (alreadyHasComponent)
+	{
+		return;
+	}
+
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Add {} component", SceneComponentKindName(kind)),
+		.Execute = [this, entityId, kind]()
+		{
+			AddComponentToEntity(entityId, kind);
+		},
+		.Undo = [this, entityId, kind]()
+		{
+			if (m_Scene.ContainsEntity(entityId))
+			{
+				RemoveComponentFromEntity(entityId, kind);
+			}
+		}
+	});
+}
+
 void Engine::RemoveComponentFromEntity(EntityId entityId, SceneComponentKind kind)
 {
+	if (BlockEditSceneMutationDuringPlay("Remove Component"))
+	{
+		return;
+	}
+
 	if (!m_Scene.ContainsEntity(entityId))
 	{
 		return;
@@ -2170,6 +5539,31 @@ void Engine::RemoveComponentFromEntity(EntityId entityId, SceneComponentKind kin
 	case SceneComponentKind::PhysicsMaterial:
 		removed = m_Scene.RemovePhysicsMaterialComponent(entityId);
 		break;
+	case SceneComponentKind::PrefabInstance:
+		removed = m_Scene.RemovePrefabInstanceComponent(entityId);
+		break;
+	case SceneComponentKind::SceneReference:
+		removed = m_Scene.RemoveSceneReferenceComponent(entityId);
+		break;
+	case SceneComponentKind::Script:
+		m_ScriptRuntime.ClearEntity(entityId);
+		removed = m_Scene.RemoveScriptComponent(entityId);
+		break;
+	case SceneComponentKind::Sprite2D:
+		removed = m_Scene.RemoveSprite2DComponent(entityId);
+		break;
+	case SceneComponentKind::UiElement:
+		removed = m_Scene.RemoveUiElementComponent(entityId);
+		break;
+	case SceneComponentKind::AudioSource:
+		removed = m_Scene.RemoveAudioSourceComponent(entityId);
+		break;
+	case SceneComponentKind::NavigationAgent:
+		removed = m_Scene.RemoveNavigationAgentComponent(entityId);
+		break;
+	case SceneComponentKind::NetworkIdentity:
+		removed = m_Scene.RemoveNetworkIdentityComponent(entityId);
+		break;
 	default:
 		break;
 	}
@@ -2183,12 +5577,227 @@ void Engine::RemoveComponentFromEntity(EntityId entityId, SceneComponentKind kin
 	{
 		MarkPhysicsActorDirty(entityId);
 	}
+	if (kind == SceneComponentKind::Script)
+	{
+		m_ScriptRuntime.ClearEntity(entityId);
+	}
 	MarkSceneDirty();
 	AppendAssetLog(std::format("Removed {} component from entity {}", SceneComponentKindName(kind), entityId));
 }
 
+void Engine::RestoreComponentFromSnapshot(EntityId entityId, SceneComponentKind kind, const ScenePersistence::LoadedSceneEntity& snapshot)
+{
+	if (!m_Scene.ContainsEntity(entityId))
+	{
+		return;
+	}
+
+	switch (kind)
+	{
+	case SceneComponentKind::Mesh:
+		if (snapshot.HasMesh)
+		{
+			bool queuedModelRestore = false;
+			const Math::Transform transform = snapshot.HasTransform
+				? snapshot.Transform
+				: (m_Scene.GetTransformComponent(entityId) ? m_Scene.GetTransformComponent(entityId)->LocalTransform : Math::Transform::Identity());
+			if (snapshot.PrimitiveKind != Asset::PrimitiveMeshKind::None)
+			{
+				static_cast<void>(ApplyPrimitiveMeshToEntity(entityId, snapshot.PrimitiveKind, transform, false));
+				if (!snapshot.MaterialOverrides.empty())
+				{
+					if (Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId))
+					{
+						ApplyMaterialOverrides(*meshAsset, snapshot.MaterialOverrides);
+						static_cast<void>(RefreshMaterialResourcesForEntity(entityId));
+					}
+				}
+			}
+			else if (!snapshot.MeshAssetPath.empty())
+			{
+				static_cast<void>(m_Scene.SetMeshEnabled(entityId, snapshot.MeshEnabled));
+				QueueModelImportForSceneEntity(snapshot, entityId);
+				queuedModelRestore = true;
+			}
+			else
+			{
+				static_cast<void>(m_Scene.EnsureMeshComponent(entityId));
+			}
+			if (!queuedModelRestore)
+			{
+				static_cast<void>(m_Scene.SetMeshEnabled(entityId, snapshot.MeshEnabled));
+			}
+		}
+		if (snapshot.HasAnimator)
+		{
+			m_Scene.EnsureAnimatorComponent(entityId) = snapshot.Animator;
+			static_cast<void>(m_Scene.SetAnimatorEnabled(entityId, snapshot.AnimatorEnabled));
+		}
+		if (snapshot.HasTransform)
+		{
+			ApplyEntityTransform(entityId, snapshot.Transform, {});
+		}
+		break;
+	case SceneComponentKind::Animator:
+		if (snapshot.HasAnimator)
+		{
+			m_Scene.EnsureAnimatorComponent(entityId) = snapshot.Animator;
+			static_cast<void>(m_Scene.SetAnimatorEnabled(entityId, snapshot.AnimatorEnabled));
+		}
+		break;
+	case SceneComponentKind::Camera:
+		if (snapshot.HasCamera)
+		{
+			m_Scene.EnsureCameraComponent(entityId) = snapshot.Camera;
+			static_cast<void>(m_Scene.SetCameraEnabled(entityId, snapshot.CameraEnabled));
+			if (snapshot.Camera.IsGameCamera)
+			{
+				m_GameCameraEntity = entityId;
+			}
+		}
+		break;
+	case SceneComponentKind::Light:
+		if (snapshot.HasLight)
+		{
+			m_Scene.EnsureLightComponent(entityId) = snapshot.Light;
+			static_cast<void>(m_Scene.SetLightEnabled(entityId, snapshot.LightEnabled));
+			if (m_KeyLightEntity == InvalidEntityId)
+			{
+				m_KeyLightEntity = entityId;
+			}
+		}
+		break;
+	case SceneComponentKind::RigidBody:
+		if (snapshot.HasRigidBody)
+		{
+			m_Scene.EnsureRigidBodyComponent(entityId) = snapshot.RigidBody;
+			static_cast<void>(m_Scene.SetRigidBodyEnabled(entityId, snapshot.RigidBodyEnabled));
+			MarkPhysicsActorDirty(entityId);
+		}
+		break;
+	case SceneComponentKind::Collider:
+		if (snapshot.HasCollider)
+		{
+			m_Scene.EnsureColliderComponent(entityId) = snapshot.Collider;
+			static_cast<void>(m_Scene.SetColliderEnabled(entityId, snapshot.ColliderEnabled));
+			MarkPhysicsActorDirty(entityId);
+		}
+		break;
+	case SceneComponentKind::PhysicsMaterial:
+		if (snapshot.HasPhysicsMaterial)
+		{
+			m_Scene.EnsurePhysicsMaterialComponent(entityId) = snapshot.PhysicsMaterial;
+			static_cast<void>(m_Scene.SetPhysicsMaterialEnabled(entityId, snapshot.PhysicsMaterialEnabled));
+			MarkPhysicsActorDirty(entityId);
+		}
+		break;
+	case SceneComponentKind::PrefabInstance:
+		if (snapshot.HasPrefabInstance)
+		{
+			m_Scene.EnsurePrefabInstanceComponent(entityId) = snapshot.PrefabInstance;
+			static_cast<void>(m_Scene.SetComponentEnabled<PrefabInstanceComponent>(entityId, snapshot.PrefabInstanceEnabled));
+		}
+		break;
+	case SceneComponentKind::SceneReference:
+		if (snapshot.HasSceneReference)
+		{
+			m_Scene.EnsureSceneReferenceComponent(entityId) = snapshot.SceneReference;
+			static_cast<void>(m_Scene.SetComponentEnabled<SceneReferenceComponent>(entityId, snapshot.SceneReferenceEnabled));
+		}
+		break;
+	case SceneComponentKind::Script:
+		if (snapshot.HasScript)
+		{
+			m_Scene.EnsureScriptComponent(entityId) = snapshot.Script;
+			static_cast<void>(m_Scene.SetComponentEnabled<ScriptComponent>(entityId, snapshot.ScriptEnabled));
+		}
+		break;
+	case SceneComponentKind::Sprite2D:
+		if (snapshot.HasSprite2D)
+		{
+			m_Scene.EnsureSprite2DComponent(entityId) = snapshot.Sprite2D;
+			static_cast<void>(m_Scene.SetComponentEnabled<Sprite2DComponent>(entityId, snapshot.Sprite2DEnabled));
+		}
+		break;
+	case SceneComponentKind::UiElement:
+		if (snapshot.HasUiElement)
+		{
+			m_Scene.EnsureUiElementComponent(entityId) = snapshot.UiElement;
+			static_cast<void>(m_Scene.SetComponentEnabled<UiElementComponent>(entityId, snapshot.UiElementEnabled));
+		}
+		break;
+	case SceneComponentKind::AudioSource:
+		if (snapshot.HasAudioSource)
+		{
+			m_Scene.EnsureAudioSourceComponent(entityId) = snapshot.AudioSource;
+			static_cast<void>(m_Scene.SetComponentEnabled<AudioSourceComponent>(entityId, snapshot.AudioSourceEnabled));
+		}
+		break;
+	case SceneComponentKind::NavigationAgent:
+		if (snapshot.HasNavigationAgent)
+		{
+			m_Scene.EnsureNavigationAgentComponent(entityId) = snapshot.NavigationAgent;
+			static_cast<void>(m_Scene.SetComponentEnabled<NavigationAgentComponent>(entityId, snapshot.NavigationAgentEnabled));
+		}
+		break;
+	case SceneComponentKind::NetworkIdentity:
+		if (snapshot.HasNetworkIdentity)
+		{
+			m_Scene.EnsureNetworkIdentityComponent(entityId) = snapshot.NetworkIdentity;
+			static_cast<void>(m_Scene.SetComponentEnabled<NetworkIdentityComponent>(entityId, snapshot.NetworkIdentityEnabled));
+		}
+		break;
+	default:
+		break;
+	}
+
+	MarkSceneDirty();
+	AppendAssetLog(std::format("Restored {} component on entity {}", SceneComponentKindName(kind), entityId));
+}
+
+void Engine::RemoveComponentFromEntityWithUndo(EntityId entityId, SceneComponentKind kind)
+{
+	if (BlockEditSceneMutationDuringPlay("Remove Component"))
+	{
+		return;
+	}
+
+	if (!m_Scene.ContainsEntity(entityId) || !HasSceneComponentKind(entityId, kind))
+	{
+		return;
+	}
+
+	std::optional<ScenePersistence::LoadedSceneEntity> snapshot = BuildLoadedSceneEntityFromEntity(entityId);
+	if (!snapshot)
+	{
+		RemoveComponentFromEntity(entityId, kind);
+		return;
+	}
+
+	const auto componentSnapshot = std::make_shared<ScenePersistence::LoadedSceneEntity>(std::move(*snapshot));
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Remove {} component", SceneComponentKindName(kind)),
+		.Execute = [this, entityId, kind]()
+		{
+			if (m_Scene.ContainsEntity(entityId))
+			{
+				RemoveComponentFromEntity(entityId, kind);
+			}
+		},
+		.Undo = [this, entityId, kind, componentSnapshot]()
+		{
+			RestoreComponentFromSnapshot(entityId, kind, *componentSnapshot);
+		}
+	});
+}
+
 void Engine::SetComponentEnabledForEntity(EntityId entityId, SceneComponentKind kind, bool enabled)
 {
+	if (BlockEditSceneMutationDuringPlay("Set Component Enabled"))
+	{
+		return;
+	}
+
 	if (!m_Scene.ContainsEntity(entityId))
 	{
 		return;
@@ -2222,6 +5831,34 @@ void Engine::SetComponentEnabledForEntity(EntityId entityId, SceneComponentKind 
 	case SceneComponentKind::PhysicsMaterial:
 		changed = m_Scene.SetPhysicsMaterialEnabled(entityId, enabled);
 		break;
+	case SceneComponentKind::PrefabInstance:
+		changed = m_Scene.SetComponentEnabled<PrefabInstanceComponent>(entityId, enabled);
+		break;
+	case SceneComponentKind::SceneReference:
+		changed = m_Scene.SetComponentEnabled<SceneReferenceComponent>(entityId, enabled);
+		break;
+	case SceneComponentKind::Script:
+		changed = m_Scene.SetComponentEnabled<ScriptComponent>(entityId, enabled);
+		if (!enabled)
+		{
+			m_ScriptRuntime.ClearEntity(entityId);
+		}
+		break;
+	case SceneComponentKind::Sprite2D:
+		changed = m_Scene.SetComponentEnabled<Sprite2DComponent>(entityId, enabled);
+		break;
+	case SceneComponentKind::UiElement:
+		changed = m_Scene.SetComponentEnabled<UiElementComponent>(entityId, enabled);
+		break;
+	case SceneComponentKind::AudioSource:
+		changed = m_Scene.SetComponentEnabled<AudioSourceComponent>(entityId, enabled);
+		break;
+	case SceneComponentKind::NavigationAgent:
+		changed = m_Scene.SetComponentEnabled<NavigationAgentComponent>(entityId, enabled);
+		break;
+	case SceneComponentKind::NetworkIdentity:
+		changed = m_Scene.SetComponentEnabled<NetworkIdentityComponent>(entityId, enabled);
+		break;
 	default:
 		break;
 	}
@@ -2237,6 +5874,786 @@ void Engine::SetComponentEnabledForEntity(EntityId entityId, SceneComponentKind 
 	}
 	MarkSceneDirty();
 	AppendAssetLog(std::format("{} {} component on entity {}", enabled ? "Enabled" : "Disabled", SceneComponentKindName(kind), entityId));
+}
+
+bool Engine::HasSceneComponentKind(EntityId entityId, SceneComponentKind kind) const
+{
+	switch (kind)
+	{
+	case SceneComponentKind::Mesh:
+		return m_Scene.GetMeshComponent(entityId) != nullptr;
+	case SceneComponentKind::Animator:
+		return m_Scene.GetAnimatorComponent(entityId) != nullptr;
+	case SceneComponentKind::Camera:
+		return m_Scene.GetCameraComponent(entityId) != nullptr;
+	case SceneComponentKind::Light:
+		return m_Scene.GetLightComponent(entityId) != nullptr;
+	case SceneComponentKind::RigidBody:
+		return m_Scene.GetRigidBodyComponent(entityId) != nullptr;
+	case SceneComponentKind::Collider:
+		return m_Scene.GetColliderComponent(entityId) != nullptr;
+	case SceneComponentKind::PhysicsMaterial:
+		return m_Scene.GetPhysicsMaterialComponent(entityId) != nullptr;
+	case SceneComponentKind::PrefabInstance:
+		return m_Scene.GetPrefabInstanceComponent(entityId) != nullptr;
+	case SceneComponentKind::SceneReference:
+		return m_Scene.GetSceneReferenceComponent(entityId) != nullptr;
+	case SceneComponentKind::Script:
+		return m_Scene.GetScriptComponent(entityId) != nullptr;
+	case SceneComponentKind::Sprite2D:
+		return m_Scene.GetSprite2DComponent(entityId) != nullptr;
+	case SceneComponentKind::UiElement:
+		return m_Scene.GetUiElementComponent(entityId) != nullptr;
+	case SceneComponentKind::AudioSource:
+		return m_Scene.GetAudioSourceComponent(entityId) != nullptr;
+	case SceneComponentKind::NavigationAgent:
+		return m_Scene.GetNavigationAgentComponent(entityId) != nullptr;
+	case SceneComponentKind::NetworkIdentity:
+		return m_Scene.GetNetworkIdentityComponent(entityId) != nullptr;
+	default:
+		return false;
+	}
+}
+
+bool Engine::IsSceneComponentKindEnabled(EntityId entityId, SceneComponentKind kind) const
+{
+	switch (kind)
+	{
+	case SceneComponentKind::Mesh:
+		return m_Scene.IsMeshEnabled(entityId);
+	case SceneComponentKind::Animator:
+		return m_Scene.IsAnimatorEnabled(entityId);
+	case SceneComponentKind::Camera:
+		return m_Scene.IsCameraEnabled(entityId);
+	case SceneComponentKind::Light:
+		return m_Scene.IsLightEnabled(entityId);
+	case SceneComponentKind::RigidBody:
+		return m_Scene.IsRigidBodyEnabled(entityId);
+	case SceneComponentKind::Collider:
+		return m_Scene.IsColliderEnabled(entityId);
+	case SceneComponentKind::PhysicsMaterial:
+		return m_Scene.IsPhysicsMaterialEnabled(entityId);
+	case SceneComponentKind::PrefabInstance:
+		return m_Scene.IsComponentEnabled<PrefabInstanceComponent>(entityId);
+	case SceneComponentKind::SceneReference:
+		return m_Scene.IsComponentEnabled<SceneReferenceComponent>(entityId);
+	case SceneComponentKind::Script:
+		return m_Scene.IsComponentEnabled<ScriptComponent>(entityId);
+	case SceneComponentKind::Sprite2D:
+		return m_Scene.IsComponentEnabled<Sprite2DComponent>(entityId);
+	case SceneComponentKind::UiElement:
+		return m_Scene.IsComponentEnabled<UiElementComponent>(entityId);
+	case SceneComponentKind::AudioSource:
+		return m_Scene.IsComponentEnabled<AudioSourceComponent>(entityId);
+	case SceneComponentKind::NavigationAgent:
+		return m_Scene.IsComponentEnabled<NavigationAgentComponent>(entityId);
+	case SceneComponentKind::NetworkIdentity:
+		return m_Scene.IsComponentEnabled<NetworkIdentityComponent>(entityId);
+	default:
+		return false;
+	}
+}
+
+bool Engine::SceneComponentSnapshotHasKind(SceneComponentKind kind, const ScenePersistence::LoadedSceneEntity& snapshot) const
+{
+	switch (kind)
+	{
+	case SceneComponentKind::Mesh:
+		return snapshot.HasMesh;
+	case SceneComponentKind::Animator:
+		return snapshot.HasAnimator;
+	case SceneComponentKind::Camera:
+		return snapshot.HasCamera;
+	case SceneComponentKind::Light:
+		return snapshot.HasLight;
+	case SceneComponentKind::RigidBody:
+		return snapshot.HasRigidBody;
+	case SceneComponentKind::Collider:
+		return snapshot.HasCollider;
+	case SceneComponentKind::PhysicsMaterial:
+		return snapshot.HasPhysicsMaterial;
+	case SceneComponentKind::PrefabInstance:
+		return snapshot.HasPrefabInstance;
+	case SceneComponentKind::SceneReference:
+		return snapshot.HasSceneReference;
+	case SceneComponentKind::Script:
+		return snapshot.HasScript;
+	case SceneComponentKind::Sprite2D:
+		return snapshot.HasSprite2D;
+	case SceneComponentKind::UiElement:
+		return snapshot.HasUiElement;
+	case SceneComponentKind::AudioSource:
+		return snapshot.HasAudioSource;
+	case SceneComponentKind::NavigationAgent:
+		return snapshot.HasNavigationAgent;
+	case SceneComponentKind::NetworkIdentity:
+		return snapshot.HasNetworkIdentity;
+	default:
+		return false;
+	}
+}
+
+std::optional<ScenePersistence::LoadedSceneEntity> Engine::BuildDefaultComponentSnapshot(EntityId entityId, SceneComponentKind kind) const
+{
+	if (!m_Scene.ContainsEntity(entityId) || kind == SceneComponentKind::Mesh)
+	{
+		return std::nullopt;
+	}
+
+	ScenePersistence::LoadedSceneEntity snapshot;
+	if (const std::string* name = m_Scene.GetEntityName(entityId))
+	{
+		snapshot.Name = *name;
+	}
+
+	const bool currentEnabled = IsSceneComponentKindEnabled(entityId, kind);
+	switch (kind)
+	{
+	case SceneComponentKind::Animator:
+		snapshot.HasAnimator = true;
+		snapshot.AnimatorEnabled = currentEnabled;
+		snapshot.Animator = {};
+		break;
+	case SceneComponentKind::Camera:
+		snapshot.HasCamera = true;
+		snapshot.CameraEnabled = currentEnabled;
+		snapshot.Camera = {};
+		if (const CameraComponent* currentCamera = m_Scene.GetCameraComponent(entityId))
+		{
+			snapshot.Camera.IsGameCamera = currentCamera->IsGameCamera;
+		}
+		break;
+	case SceneComponentKind::Light:
+		snapshot.HasLight = true;
+		snapshot.LightEnabled = currentEnabled;
+		snapshot.Light = {};
+		snapshot.Light.Type = LightType::Directional;
+		snapshot.Light.Color = { 1.0f, 0.95f, 0.82f };
+		snapshot.Light.Intensity = 3.25f;
+		snapshot.Light.Range = 450.0f;
+		snapshot.Light.Enabled = true;
+		break;
+	case SceneComponentKind::RigidBody:
+		snapshot.HasRigidBody = true;
+		snapshot.RigidBodyEnabled = currentEnabled;
+		snapshot.RigidBody = {};
+		break;
+	case SceneComponentKind::Collider:
+		snapshot.HasCollider = true;
+		snapshot.ColliderEnabled = currentEnabled;
+		snapshot.Collider = {};
+		break;
+	case SceneComponentKind::PhysicsMaterial:
+		snapshot.HasPhysicsMaterial = true;
+		snapshot.PhysicsMaterialEnabled = currentEnabled;
+		snapshot.PhysicsMaterial = {};
+		break;
+	case SceneComponentKind::PrefabInstance:
+		snapshot.HasPrefabInstance = true;
+		snapshot.PrefabInstanceEnabled = currentEnabled;
+		snapshot.PrefabInstance = {};
+		if (const std::string* name = m_Scene.GetEntityName(entityId))
+		{
+			snapshot.PrefabInstance.SourceName = *name;
+		}
+		break;
+	case SceneComponentKind::SceneReference:
+		snapshot.HasSceneReference = true;
+		snapshot.SceneReferenceEnabled = currentEnabled;
+		snapshot.SceneReference = {};
+		break;
+	case SceneComponentKind::Script:
+		snapshot.HasScript = true;
+		snapshot.ScriptEnabled = currentEnabled;
+		snapshot.Script = {};
+		break;
+	case SceneComponentKind::Sprite2D:
+		snapshot.HasSprite2D = true;
+		snapshot.Sprite2DEnabled = currentEnabled;
+		snapshot.Sprite2D = {};
+		break;
+	case SceneComponentKind::UiElement:
+		snapshot.HasUiElement = true;
+		snapshot.UiElementEnabled = currentEnabled;
+		snapshot.UiElement = {};
+		break;
+	case SceneComponentKind::AudioSource:
+		snapshot.HasAudioSource = true;
+		snapshot.AudioSourceEnabled = currentEnabled;
+		snapshot.AudioSource = {};
+		break;
+	case SceneComponentKind::NavigationAgent:
+		snapshot.HasNavigationAgent = true;
+		snapshot.NavigationAgentEnabled = currentEnabled;
+		snapshot.NavigationAgent = {};
+		break;
+	case SceneComponentKind::NetworkIdentity:
+		snapshot.HasNetworkIdentity = true;
+		snapshot.NetworkIdentityEnabled = currentEnabled;
+		snapshot.NetworkIdentity = {};
+		snapshot.NetworkIdentity.NetworkId = (static_cast<uint64_t>(entityId) << 32u) | static_cast<uint64_t>(m_AssetSceneGeneration & 0xffffffffu);
+		break;
+	default:
+		return std::nullopt;
+	}
+
+	return snapshot;
+}
+
+void Engine::ApplyComponentSnapshotToEntity(
+	EntityId entityId,
+	SceneComponentKind kind,
+	const ScenePersistence::LoadedSceneEntity& snapshot,
+	std::string_view logLabel)
+{
+	if (!m_Scene.ContainsEntity(entityId))
+	{
+		return;
+	}
+
+	if (!SceneComponentSnapshotHasKind(kind, snapshot))
+	{
+		RemoveComponentFromEntity(entityId, kind);
+		return;
+	}
+
+	ScenePersistence::LoadedSceneEntity adjustedSnapshot = snapshot;
+	if (kind == SceneComponentKind::Camera && adjustedSnapshot.HasCamera)
+	{
+		const CameraComponent* currentCamera = m_Scene.GetCameraComponent(entityId);
+		adjustedSnapshot.Camera.IsGameCamera = currentCamera ? currentCamera->IsGameCamera : false;
+	}
+	if (kind == SceneComponentKind::NetworkIdentity && adjustedSnapshot.HasNetworkIdentity)
+	{
+		if (const NetworkIdentityComponent* currentNetwork = m_Scene.GetNetworkIdentityComponent(entityId);
+			currentNetwork && currentNetwork->NetworkId != 0)
+		{
+			adjustedSnapshot.NetworkIdentity.NetworkId = currentNetwork->NetworkId;
+		}
+		else
+		{
+			adjustedSnapshot.NetworkIdentity.NetworkId =
+				(static_cast<uint64_t>(entityId) << 32u) | static_cast<uint64_t>(m_AssetSceneGeneration & 0xffffffffu);
+		}
+	}
+
+	RestoreComponentFromSnapshot(entityId, kind, adjustedSnapshot);
+	if (!logLabel.empty())
+	{
+		AppendAssetLog(std::format("{} {} component on entity {}", logLabel, SceneComponentKindName(kind), entityId));
+	}
+}
+
+void Engine::ApplyComponentSnapshotToEntity(
+	Scene& targetScene,
+	EntityId entityId,
+	SceneComponentKind kind,
+	const ScenePersistence::LoadedSceneEntity& snapshot,
+	std::string_view logLabel,
+	bool markDirty)
+{
+	if (!targetScene.ContainsEntity(entityId) || !SceneComponentSnapshotHasKind(kind, snapshot))
+	{
+		return;
+	}
+
+	ScenePersistence::LoadedSceneEntity adjustedSnapshot = snapshot;
+	if (kind == SceneComponentKind::Camera && adjustedSnapshot.HasCamera)
+	{
+		const CameraComponent* currentCamera = targetScene.GetCameraComponent(entityId);
+		adjustedSnapshot.Camera.IsGameCamera = currentCamera ? currentCamera->IsGameCamera : false;
+	}
+	if (kind == SceneComponentKind::NetworkIdentity && adjustedSnapshot.HasNetworkIdentity)
+	{
+		if (const NetworkIdentityComponent* currentNetwork = targetScene.GetNetworkIdentityComponent(entityId);
+			currentNetwork && currentNetwork->NetworkId != 0)
+		{
+			adjustedSnapshot.NetworkIdentity.NetworkId = currentNetwork->NetworkId;
+		}
+		else
+		{
+			adjustedSnapshot.NetworkIdentity.NetworkId =
+				(static_cast<uint64_t>(entityId) << 32u) | static_cast<uint64_t>(m_AssetSceneGeneration & 0xffffffffu);
+		}
+	}
+
+	bool applied = false;
+	bool requiresPhysicsRebuild = false;
+	switch (kind)
+	{
+	case SceneComponentKind::Animator:
+		if (adjustedSnapshot.HasAnimator)
+		{
+			targetScene.EnsureAnimatorComponent(entityId) = adjustedSnapshot.Animator;
+			static_cast<void>(targetScene.SetAnimatorEnabled(entityId, adjustedSnapshot.AnimatorEnabled));
+			applied = true;
+		}
+		break;
+	case SceneComponentKind::Camera:
+		if (adjustedSnapshot.HasCamera)
+		{
+			targetScene.EnsureCameraComponent(entityId) = adjustedSnapshot.Camera;
+			static_cast<void>(targetScene.SetCameraEnabled(entityId, adjustedSnapshot.CameraEnabled));
+			if (IsGameCameraEntity(entityId))
+			{
+				SyncGameCameraFromSceneEntity();
+			}
+			applied = true;
+		}
+		break;
+	case SceneComponentKind::Light:
+		if (adjustedSnapshot.HasLight)
+		{
+			targetScene.EnsureLightComponent(entityId) = adjustedSnapshot.Light;
+			static_cast<void>(targetScene.SetLightEnabled(entityId, adjustedSnapshot.LightEnabled));
+			applied = true;
+		}
+		break;
+	case SceneComponentKind::RigidBody:
+		if (adjustedSnapshot.HasRigidBody)
+		{
+			targetScene.EnsureRigidBodyComponent(entityId) = adjustedSnapshot.RigidBody;
+			static_cast<void>(targetScene.SetRigidBodyEnabled(entityId, adjustedSnapshot.RigidBodyEnabled));
+			requiresPhysicsRebuild = true;
+			applied = true;
+		}
+		break;
+	case SceneComponentKind::Collider:
+		if (adjustedSnapshot.HasCollider)
+		{
+			targetScene.EnsureColliderComponent(entityId) = adjustedSnapshot.Collider;
+			static_cast<void>(targetScene.SetColliderEnabled(entityId, adjustedSnapshot.ColliderEnabled));
+			requiresPhysicsRebuild = true;
+			applied = true;
+		}
+		break;
+	case SceneComponentKind::PhysicsMaterial:
+		if (adjustedSnapshot.HasPhysicsMaterial)
+		{
+			targetScene.EnsurePhysicsMaterialComponent(entityId) = adjustedSnapshot.PhysicsMaterial;
+			static_cast<void>(targetScene.SetPhysicsMaterialEnabled(entityId, adjustedSnapshot.PhysicsMaterialEnabled));
+			requiresPhysicsRebuild = true;
+			applied = true;
+		}
+		break;
+	case SceneComponentKind::PrefabInstance:
+		if (adjustedSnapshot.HasPrefabInstance)
+		{
+			targetScene.EnsurePrefabInstanceComponent(entityId) = adjustedSnapshot.PrefabInstance;
+			static_cast<void>(targetScene.SetComponentEnabled<PrefabInstanceComponent>(entityId, adjustedSnapshot.PrefabInstanceEnabled));
+			applied = true;
+		}
+		break;
+	case SceneComponentKind::SceneReference:
+		if (adjustedSnapshot.HasSceneReference)
+		{
+			targetScene.EnsureSceneReferenceComponent(entityId) = adjustedSnapshot.SceneReference;
+			static_cast<void>(targetScene.SetComponentEnabled<SceneReferenceComponent>(entityId, adjustedSnapshot.SceneReferenceEnabled));
+			applied = true;
+		}
+		break;
+	case SceneComponentKind::Script:
+		if (adjustedSnapshot.HasScript)
+		{
+			targetScene.EnsureScriptComponent(entityId) = adjustedSnapshot.Script;
+			static_cast<void>(targetScene.SetComponentEnabled<ScriptComponent>(entityId, adjustedSnapshot.ScriptEnabled));
+			m_ScriptRuntime.ClearEntity(entityId);
+			applied = true;
+		}
+		break;
+	case SceneComponentKind::Sprite2D:
+		if (adjustedSnapshot.HasSprite2D)
+		{
+			targetScene.EnsureSprite2DComponent(entityId) = adjustedSnapshot.Sprite2D;
+			static_cast<void>(targetScene.SetComponentEnabled<Sprite2DComponent>(entityId, adjustedSnapshot.Sprite2DEnabled));
+			applied = true;
+		}
+		break;
+	case SceneComponentKind::UiElement:
+		if (adjustedSnapshot.HasUiElement)
+		{
+			targetScene.EnsureUiElementComponent(entityId) = adjustedSnapshot.UiElement;
+			static_cast<void>(targetScene.SetComponentEnabled<UiElementComponent>(entityId, adjustedSnapshot.UiElementEnabled));
+			applied = true;
+		}
+		break;
+	case SceneComponentKind::AudioSource:
+		if (adjustedSnapshot.HasAudioSource)
+		{
+			targetScene.EnsureAudioSourceComponent(entityId) = adjustedSnapshot.AudioSource;
+			static_cast<void>(targetScene.SetComponentEnabled<AudioSourceComponent>(entityId, adjustedSnapshot.AudioSourceEnabled));
+			applied = true;
+		}
+		break;
+	case SceneComponentKind::NavigationAgent:
+		if (adjustedSnapshot.HasNavigationAgent)
+		{
+			targetScene.EnsureNavigationAgentComponent(entityId) = adjustedSnapshot.NavigationAgent;
+			static_cast<void>(targetScene.SetComponentEnabled<NavigationAgentComponent>(entityId, adjustedSnapshot.NavigationAgentEnabled));
+			applied = true;
+		}
+		break;
+	case SceneComponentKind::NetworkIdentity:
+		if (adjustedSnapshot.HasNetworkIdentity)
+		{
+			targetScene.EnsureNetworkIdentityComponent(entityId) = adjustedSnapshot.NetworkIdentity;
+			static_cast<void>(targetScene.SetComponentEnabled<NetworkIdentityComponent>(entityId, adjustedSnapshot.NetworkIdentityEnabled));
+			applied = true;
+		}
+		break;
+	default:
+		break;
+	}
+
+	if (!applied)
+	{
+		return;
+	}
+
+	if (requiresPhysicsRebuild)
+	{
+		MarkPhysicsActorDirty(entityId);
+	}
+	if (markDirty)
+	{
+		MarkSceneDirty();
+	}
+	if (!logLabel.empty())
+	{
+		AppendAssetLog(std::format("{} {} component on entity {}", logLabel, SceneComponentKindName(kind), entityId));
+	}
+}
+
+void Engine::ResetComponentForEntityWithUndo(EntityId entityId, SceneComponentKind kind)
+{
+	if (BlockEditSceneMutationDuringPlay("Reset Component"))
+	{
+		return;
+	}
+
+	if (!m_Scene.ContainsEntity(entityId) || !HasSceneComponentKind(entityId, kind))
+	{
+		return;
+	}
+
+	std::optional<ScenePersistence::LoadedSceneEntity> beforeSnapshot = BuildLoadedSceneEntityFromEntity(entityId);
+	std::optional<ScenePersistence::LoadedSceneEntity> defaultSnapshot = BuildDefaultComponentSnapshot(entityId, kind);
+	if (!beforeSnapshot || !defaultSnapshot)
+	{
+		AppendAssetLog(std::format("Reset {} component is not available for entity {}", SceneComponentKindName(kind), entityId));
+		return;
+	}
+
+	const auto before = std::make_shared<ScenePersistence::LoadedSceneEntity>(std::move(*beforeSnapshot));
+	const auto after = std::make_shared<ScenePersistence::LoadedSceneEntity>(std::move(*defaultSnapshot));
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Reset {} component", SceneComponentKindName(kind)),
+		.Execute = [this, entityId, kind, after]()
+		{
+			ApplyComponentSnapshotToEntity(entityId, kind, *after, "Reset");
+		},
+		.Undo = [this, entityId, kind, before]()
+		{
+			ApplyComponentSnapshotToEntity(entityId, kind, *before, "Undo reset");
+		}
+	});
+}
+
+void Engine::PasteComponentValuesToEntityWithUndo(
+	EntityId entityId,
+	SceneComponentKind kind,
+	const ScenePersistence::LoadedSceneEntity& snapshot)
+{
+	if (BlockEditSceneMutationDuringPlay("Paste Component"))
+	{
+		return;
+	}
+
+	if (!m_Scene.ContainsEntity(entityId) || !SceneComponentSnapshotHasKind(kind, snapshot))
+	{
+		return;
+	}
+
+	std::optional<ScenePersistence::LoadedSceneEntity> beforeSnapshot = BuildLoadedSceneEntityFromEntity(entityId);
+	if (!beforeSnapshot)
+	{
+		return;
+	}
+
+	const auto before = std::make_shared<ScenePersistence::LoadedSceneEntity>(std::move(*beforeSnapshot));
+	const auto after = std::make_shared<ScenePersistence::LoadedSceneEntity>(snapshot);
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Paste {} component values", SceneComponentKindName(kind)),
+		.Execute = [this, entityId, kind, after]()
+		{
+			ApplyComponentSnapshotToEntity(entityId, kind, *after, "Pasted");
+		},
+		.Undo = [this, entityId, kind, before]()
+		{
+			if (SceneComponentSnapshotHasKind(kind, *before))
+			{
+				ApplyComponentSnapshotToEntity(entityId, kind, *before, "Undo paste");
+			}
+			else
+			{
+				RemoveComponentFromEntity(entityId, kind);
+			}
+		}
+	});
+}
+
+void Engine::CommitComponentBatchEdit(std::vector<Editor::ComponentEditRecord> records)
+{
+	if (m_PlayScene && IsRuntimePlaying())
+	{
+		std::erase_if(records, [this](const Editor::ComponentEditRecord& record)
+			{
+				return record.Entity == InvalidEntityId ||
+					!m_PlayScene->ContainsEntity(record.Entity) ||
+					!SceneComponentSnapshotHasKind(record.Kind, record.Before) ||
+					!SceneComponentSnapshotHasKind(record.Kind, record.After);
+			});
+		if (records.empty())
+		{
+			return;
+		}
+
+		const auto componentRecords = std::make_shared<std::vector<Editor::ComponentEditRecord>>(std::move(records));
+		m_RuntimeCommandStack.Execute(Editor::EditorCommand{
+			.Name = std::format("Runtime edit {} components", componentRecords->size()),
+			.Execute = [this, componentRecords]()
+			{
+				for (const Editor::ComponentEditRecord& record : *componentRecords)
+				{
+					ApplyComponentSnapshotToEntity(GetRuntimeScene(), record.Entity, record.Kind, record.After, {}, false);
+				}
+				AppendAssetLog(std::format("Applied runtime component edit for {} entities", componentRecords->size()));
+			},
+			.Undo = [this, componentRecords]()
+			{
+				for (const Editor::ComponentEditRecord& record : *componentRecords)
+				{
+					ApplyComponentSnapshotToEntity(GetRuntimeScene(), record.Entity, record.Kind, record.Before, {}, false);
+				}
+				AppendAssetLog(std::format("Undo runtime component edit for {} entities", componentRecords->size()));
+			}
+		});
+		return;
+	}
+
+	if (BlockEditSceneMutationDuringPlay("Edit Component"))
+	{
+		return;
+	}
+
+	std::erase_if(records, [this](const Editor::ComponentEditRecord& record)
+		{
+			return record.Entity == InvalidEntityId ||
+				!m_Scene.ContainsEntity(record.Entity) ||
+				!SceneComponentSnapshotHasKind(record.Kind, record.Before) ||
+				!SceneComponentSnapshotHasKind(record.Kind, record.After);
+		});
+	if (records.empty())
+	{
+		return;
+	}
+
+	const auto componentRecords = std::make_shared<std::vector<Editor::ComponentEditRecord>>(std::move(records));
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Edit {} components", componentRecords->size()),
+		.Execute = [this, componentRecords]()
+		{
+			for (const Editor::ComponentEditRecord& record : *componentRecords)
+			{
+				ApplyComponentSnapshotToEntity(record.Entity, record.Kind, record.After, {});
+			}
+			AppendAssetLog(std::format("Applied component edit for {} entities", componentRecords->size()));
+		},
+		.Undo = [this, componentRecords]()
+		{
+			for (const Editor::ComponentEditRecord& record : *componentRecords)
+			{
+				ApplyComponentSnapshotToEntity(record.Entity, record.Kind, record.Before, {});
+			}
+			AppendAssetLog(std::format("Undo component edit for {} entities", componentRecords->size()));
+		}
+	});
+}
+
+void Engine::SetComponentEnabledForEntityWithUndo(EntityId entityId, SceneComponentKind kind, bool enabled)
+{
+	if (BlockEditSceneMutationDuringPlay("Set Component Enabled"))
+	{
+		return;
+	}
+
+	if (!m_Scene.ContainsEntity(entityId) || !HasSceneComponentKind(entityId, kind))
+	{
+		return;
+	}
+
+	const bool beforeEnabled = IsSceneComponentKindEnabled(entityId, kind);
+	if (beforeEnabled == enabled)
+	{
+		return;
+	}
+
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("{} {} component", enabled ? "Enable" : "Disable", SceneComponentKindName(kind)),
+		.Execute = [this, entityId, kind, enabled]()
+		{
+			SetComponentEnabledForEntity(entityId, kind, enabled);
+		},
+		.Undo = [this, entityId, kind, beforeEnabled]()
+		{
+			SetComponentEnabledForEntity(entityId, kind, beforeEnabled);
+		}
+	});
+}
+
+void Engine::ApplyEntityTransform(EntityId entityId, const Math::Transform& transformValue, std::string_view logLabel)
+{
+	ApplyEntityTransform(m_Scene, entityId, transformValue, logLabel, true);
+}
+
+void Engine::ApplyEntityTransform(Scene& targetScene, EntityId entityId, const Math::Transform& transformValue, std::string_view logLabel, bool markDirty)
+{
+	TransformComponent* transform = targetScene.GetTransformComponent(entityId);
+	if (!transform)
+	{
+		return;
+	}
+
+	transform->LocalTransform = transformValue;
+	transform->LocalTransform.Rotation = Math::NormalizeQuaternionOrIdentity(transform->LocalTransform.Rotation);
+	transform->UpdateWorld();
+	MarkPhysicsActorDirty(entityId);
+	if (markDirty)
+	{
+		MarkSceneDirty();
+	}
+	if (!logLabel.empty())
+	{
+		AppendAssetLog(std::format("{} entity {}", logLabel, entityId));
+	}
+}
+
+void Engine::CommitTransformEdit(EntityId entityId, const Math::Transform& beforeTransform, const Math::Transform& afterTransform)
+{
+	if (m_PlayScene && IsRuntimePlaying())
+	{
+		if (!m_PlayScene->ContainsEntity(entityId))
+		{
+			return;
+		}
+
+		m_RuntimeCommandStack.Execute(Editor::EditorCommand{
+			.Name = std::format("Runtime transform entity {}", entityId),
+			.Execute = [this, entityId, afterTransform]()
+			{
+				ApplyEntityTransform(GetRuntimeScene(), entityId, afterTransform, "Applied runtime transform edit for", false);
+			},
+			.Undo = [this, entityId, beforeTransform]()
+			{
+				ApplyEntityTransform(GetRuntimeScene(), entityId, beforeTransform, "Undo runtime transform edit for", false);
+			}
+		});
+		return;
+	}
+
+	if (BlockEditSceneMutationDuringPlay("Edit Transform"))
+	{
+		return;
+	}
+
+	if (!m_Scene.ContainsEntity(entityId))
+	{
+		return;
+	}
+
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Transform entity {}", entityId),
+		.Execute = [this, entityId, afterTransform]()
+		{
+			ApplyEntityTransform(entityId, afterTransform, "Applied transform edit for");
+		},
+		.Undo = [this, entityId, beforeTransform]()
+		{
+			ApplyEntityTransform(entityId, beforeTransform, "Undo transform edit for");
+		}
+	});
+}
+
+void Engine::CommitTransformBatchEdit(std::vector<Editor::TransformEditRecord> records)
+{
+	if (m_PlayScene && IsRuntimePlaying())
+	{
+		std::erase_if(records, [this](const Editor::TransformEditRecord& record)
+			{
+				return record.Entity == InvalidEntityId || !m_PlayScene->ContainsEntity(record.Entity);
+			});
+		if (records.empty())
+		{
+			return;
+		}
+
+		const auto transformRecords = std::make_shared<std::vector<Editor::TransformEditRecord>>(std::move(records));
+		m_RuntimeCommandStack.Execute(Editor::EditorCommand{
+			.Name = std::format("Runtime transform {} entities", transformRecords->size()),
+			.Execute = [this, transformRecords]()
+			{
+				for (const Editor::TransformEditRecord& record : *transformRecords)
+				{
+					ApplyEntityTransform(GetRuntimeScene(), record.Entity, record.After, {}, false);
+				}
+				AppendAssetLog(std::format("Applied runtime transform edit for {} entities", transformRecords->size()));
+			},
+			.Undo = [this, transformRecords]()
+			{
+				for (const Editor::TransformEditRecord& record : *transformRecords)
+				{
+					ApplyEntityTransform(GetRuntimeScene(), record.Entity, record.Before, {}, false);
+				}
+				AppendAssetLog(std::format("Undo runtime transform edit for {} entities", transformRecords->size()));
+			}
+		});
+		return;
+	}
+
+	if (BlockEditSceneMutationDuringPlay("Edit Transform"))
+	{
+		return;
+	}
+
+	std::erase_if(records, [this](const Editor::TransformEditRecord& record)
+		{
+			return record.Entity == InvalidEntityId || !m_Scene.ContainsEntity(record.Entity);
+		});
+	if (records.empty())
+	{
+		return;
+	}
+
+	const auto transformRecords = std::make_shared<std::vector<Editor::TransformEditRecord>>(std::move(records));
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Transform {} entities", transformRecords->size()),
+		.Execute = [this, transformRecords]()
+		{
+			for (const Editor::TransformEditRecord& record : *transformRecords)
+			{
+				ApplyEntityTransform(record.Entity, record.After, {});
+			}
+			AppendAssetLog(std::format("Applied transform edit for {} entities", transformRecords->size()));
+		},
+		.Undo = [this, transformRecords]()
+		{
+			for (const Editor::TransformEditRecord& record : *transformRecords)
+			{
+				ApplyEntityTransform(record.Entity, record.Before, {});
+			}
+			AppendAssetLog(std::format("Undo transform edit for {} entities", transformRecords->size()));
+		}
+	});
 }
 
 std::filesystem::path Engine::NormalizeTexturePathForProject(const std::filesystem::path& texturePath)
@@ -2309,8 +6726,13 @@ std::filesystem::path Engine::NormalizeTexturePathForProject(const std::filesyst
 
 bool Engine::RefreshMaterialResourcesForEntity(EntityId entityId)
 {
-	Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId);
-	std::vector<CpuMaterialTexture>* materialTextures = m_Scene.GetMaterialTextures(entityId);
+	return RefreshMaterialResourcesForEntity(m_Scene, entityId, true, true);
+}
+
+bool Engine::RefreshMaterialResourcesForEntity(Scene& targetScene, EntityId entityId, bool markDirty, bool updateRegistry)
+{
+	Asset::StaticMeshAsset* meshAsset = targetScene.GetMeshAsset(entityId);
+	std::vector<CpuMaterialTexture>* materialTextures = targetScene.GetMaterialTextures(entityId);
 	if (!meshAsset || !materialTextures)
 	{
 		return false;
@@ -2331,7 +6753,7 @@ bool Engine::RefreshMaterialResourcesForEntity(EntityId entityId)
 	}
 
 	m_RenderState.EntityMaterialTransparency[entityId] = materialTransparency;
-	if (entityId == m_Scene.GetPrimaryRenderableEntity())
+	if (entityId == targetScene.GetPrimaryRenderableEntity())
 	{
 		m_RenderState.PrimaryMaterialTransparency = materialTransparency;
 	}
@@ -2342,19 +6764,27 @@ bool Engine::RefreshMaterialResourcesForEntity(EntityId entityId)
 		return false;
 	}
 
-	if (!meshAsset->SourcePath.empty())
+	if (updateRegistry && !meshAsset->SourcePath.empty())
 	{
-		const std::vector<std::filesystem::path> watchedTexturePaths = CollectWatchedTexturePaths(*materialTextures);
+		const std::vector<std::filesystem::path> watchedTexturePaths = CollectWatchedAssetPaths(meshAsset->SourcePath, *materialTextures);
 		m_RuntimeAssetRegistry.RegisterEntity(meshAsset->SourcePath, entityId, watchedTexturePaths, "Material Edited");
 		m_AssetHotReloadService.WatchLoadedAsset(meshAsset->SourcePath, watchedTexturePaths);
 	}
 
-	MarkSceneDirty();
+	if (markDirty)
+	{
+		MarkSceneDirty();
+	}
 	return true;
 }
 
 void Engine::SetMaterialShadingModel(EntityId entityId, size_t materialIndex, Asset::MaterialShadingModel model)
 {
+	if (BlockEditSceneMutationDuringPlay("Set Material Shading Model"))
+	{
+		return;
+	}
+
 	Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId);
 	if (!meshAsset || materialIndex >= meshAsset->Materials.size())
 	{
@@ -2370,8 +6800,77 @@ void Engine::SetMaterialShadingModel(EntityId entityId, size_t materialIndex, As
 		Asset::MaterialShadingModelName(model)));
 }
 
+void Engine::SetMaterialShadingModelWithUndo(EntityId entityId, size_t materialIndex, Asset::MaterialShadingModel model)
+{
+	if (m_PlayScene && IsRuntimePlaying())
+	{
+		Asset::StaticMeshAsset* meshAsset = m_PlayScene->GetMeshAsset(entityId);
+		if (!meshAsset || materialIndex >= meshAsset->Materials.size())
+		{
+			return;
+		}
+
+		const Asset::StaticMeshMaterial beforeMaterial = meshAsset->Materials[materialIndex];
+		if (beforeMaterial.ShadingModel == model)
+		{
+			return;
+		}
+
+		Asset::StaticMeshMaterial afterMaterial = beforeMaterial;
+		afterMaterial.ShadingModel = model;
+		m_RuntimeCommandStack.Execute(Editor::EditorCommand{
+			.Name = "Runtime material shading model",
+			.Execute = [this, entityId, materialIndex, afterMaterial]()
+			{
+				ApplyMaterialSnapshot(GetRuntimeScene(), entityId, materialIndex, afterMaterial, "Applied runtime material shading model", false, false);
+			},
+			.Undo = [this, entityId, materialIndex, beforeMaterial]()
+			{
+				ApplyMaterialSnapshot(GetRuntimeScene(), entityId, materialIndex, beforeMaterial, "Undo runtime material shading model", false, false);
+			}
+		});
+		return;
+	}
+
+	if (BlockEditSceneMutationDuringPlay("Set Material Shading Model"))
+	{
+		return;
+	}
+
+	Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId);
+	if (!meshAsset || materialIndex >= meshAsset->Materials.size())
+	{
+		return;
+	}
+
+	const Asset::StaticMeshMaterial beforeMaterial = meshAsset->Materials[materialIndex];
+	if (beforeMaterial.ShadingModel == model)
+	{
+		return;
+	}
+
+	Asset::StaticMeshMaterial afterMaterial = beforeMaterial;
+	afterMaterial.ShadingModel = model;
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = "Change material shading model",
+		.Execute = [this, entityId, materialIndex, afterMaterial]()
+		{
+			ApplyMaterialSnapshot(entityId, materialIndex, afterMaterial, "Applied material shading model");
+		},
+		.Undo = [this, entityId, materialIndex, beforeMaterial]()
+		{
+			ApplyMaterialSnapshot(entityId, materialIndex, beforeMaterial, "Undo material shading model");
+		}
+	});
+}
+
 void Engine::AssignMaterialTexture(EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot, const std::filesystem::path& texturePath)
 {
+	if (BlockEditSceneMutationDuringPlay("Assign Material Texture"))
+	{
+		return;
+	}
+
 	if (Asset::ClassifyAssetPath(texturePath) != Asset::AssetFileKind::Image)
 	{
 		AppendAssetLog(std::format("Texture assignment ignored: unsupported image path {}", texturePath.string()));
@@ -2402,8 +6901,196 @@ void Engine::AssignMaterialTexture(EntityId entityId, size_t materialIndex, Asse
 		projectTexturePath.string()));
 }
 
+void Engine::AssignMaterialTextureWithUndo(EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot, const std::filesystem::path& texturePath)
+{
+	if (BlockEditSceneMutationDuringPlay("Assign Material Texture"))
+	{
+		return;
+	}
+
+	if (Asset::ClassifyAssetPath(texturePath) != Asset::AssetFileKind::Image)
+	{
+		AppendAssetLog(std::format("Texture assignment ignored: unsupported image path {}", texturePath.string()));
+		return;
+	}
+
+	Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId);
+	if (!meshAsset || materialIndex >= meshAsset->Materials.size())
+	{
+		return;
+	}
+
+	const Asset::StaticMeshMaterial beforeMaterial = meshAsset->Materials[materialIndex];
+	const std::filesystem::path projectTexturePath = NormalizeTexturePathForProject(texturePath);
+	Asset::StaticMeshMaterial afterMaterial = beforeMaterial;
+	Asset::SetMaterialTexturePath(afterMaterial, slot, projectTexturePath, true);
+	if (slot == Asset::MaterialTextureSlot::BaseColor)
+	{
+		afterMaterial.ImportedDiffuseTint = afterMaterial.DiffuseColor;
+		afterMaterial.DiffuseColor = { 1.0f, 1.0f, 1.0f, afterMaterial.Opacity };
+		afterMaterial.UseVertexColor = false;
+	}
+
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Assign {} texture", Asset::MaterialTextureSlotName(slot)),
+		.Execute = [this, entityId, materialIndex, afterMaterial]()
+		{
+			ApplyMaterialSnapshot(entityId, materialIndex, afterMaterial, "Applied material texture assignment");
+		},
+		.Undo = [this, entityId, materialIndex, beforeMaterial]()
+		{
+			ApplyMaterialSnapshot(entityId, materialIndex, beforeMaterial, "Undo material texture assignment");
+		}
+	});
+}
+
+void Engine::AssignMaterialTexturesWithUndo(EntityId entityId, size_t materialIndex, const std::vector<Editor::MaterialTextureAssignment>& assignments)
+{
+	if (BlockEditSceneMutationDuringPlay("Assign Material Texture"))
+	{
+		return;
+	}
+
+	Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId);
+	if (!meshAsset || materialIndex >= meshAsset->Materials.size())
+	{
+		return;
+	}
+
+	const Asset::StaticMeshMaterial beforeMaterial = meshAsset->Materials[materialIndex];
+	Asset::StaticMeshMaterial afterMaterial = beforeMaterial;
+	size_t appliedCount = 0;
+	for (const Editor::MaterialTextureAssignment& assignment : assignments)
+	{
+		if (assignment.Slot == Asset::MaterialTextureSlot::Count ||
+			Asset::ClassifyAssetPath(assignment.Path) != Asset::AssetFileKind::Image)
+		{
+			continue;
+		}
+
+		const std::filesystem::path projectTexturePath = NormalizeTexturePathForProject(assignment.Path);
+		Asset::SetMaterialTexturePath(afterMaterial, assignment.Slot, projectTexturePath, true);
+		if (assignment.Slot == Asset::MaterialTextureSlot::BaseColor)
+		{
+			afterMaterial.ImportedDiffuseTint = afterMaterial.DiffuseColor;
+			afterMaterial.DiffuseColor = { 1.0f, 1.0f, 1.0f, afterMaterial.Opacity };
+			afterMaterial.UseVertexColor = false;
+		}
+		++appliedCount;
+	}
+
+	if (appliedCount == 0)
+	{
+		AppendAssetLog(std::format("Material texture batch assignment ignored - Entity={} Material={}", entityId, materialIndex));
+		return;
+	}
+
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Auto remap {} material textures", appliedCount),
+		.Execute = [this, entityId, materialIndex, afterMaterial]()
+		{
+			ApplyMaterialSnapshot(entityId, materialIndex, afterMaterial, "Applied material texture auto remap");
+		},
+		.Undo = [this, entityId, materialIndex, beforeMaterial]()
+		{
+			ApplyMaterialSnapshot(entityId, materialIndex, beforeMaterial, "Undo material texture auto remap");
+		}
+	});
+}
+
+void Engine::AssignMaterialTextureBatchWithUndo(EntityId entityId, const std::vector<Editor::MaterialTextureBatchAssignment>& batchAssignments)
+{
+	if (BlockEditSceneMutationDuringPlay("Assign Material Texture"))
+	{
+		return;
+	}
+
+	Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId);
+	if (!meshAsset)
+	{
+		return;
+	}
+
+	struct MaterialBatchRecord
+	{
+		size_t MaterialIndex = static_cast<size_t>(-1);
+		Asset::StaticMeshMaterial Before;
+		Asset::StaticMeshMaterial After;
+		size_t AppliedSlotCount = 0;
+	};
+
+	std::vector<MaterialBatchRecord> records;
+	size_t appliedSlotCount = 0;
+	for (const Editor::MaterialTextureBatchAssignment& batch : batchAssignments)
+	{
+		if (batch.MaterialIndex >= meshAsset->Materials.size() || batch.Assignments.empty())
+		{
+			continue;
+		}
+
+		MaterialBatchRecord record;
+		record.MaterialIndex = batch.MaterialIndex;
+		record.Before = meshAsset->Materials[batch.MaterialIndex];
+		record.After = record.Before;
+
+		for (const Editor::MaterialTextureAssignment& assignment : batch.Assignments)
+		{
+			if (assignment.Slot == Asset::MaterialTextureSlot::Count ||
+				Asset::ClassifyAssetPath(assignment.Path) != Asset::AssetFileKind::Image)
+			{
+				continue;
+			}
+
+			const std::filesystem::path projectTexturePath = NormalizeTexturePathForProject(assignment.Path);
+			Asset::SetMaterialTexturePath(record.After, assignment.Slot, projectTexturePath, true);
+			if (assignment.Slot == Asset::MaterialTextureSlot::BaseColor)
+			{
+				record.After.ImportedDiffuseTint = record.After.DiffuseColor;
+				record.After.DiffuseColor = { 1.0f, 1.0f, 1.0f, record.After.Opacity };
+				record.After.UseVertexColor = false;
+			}
+			++record.AppliedSlotCount;
+		}
+
+		if (record.AppliedSlotCount > 0)
+		{
+			appliedSlotCount += record.AppliedSlotCount;
+			records.push_back(std::move(record));
+		}
+	}
+
+	if (records.empty())
+	{
+		AppendAssetLog(std::format("Material texture mesh batch assignment ignored - Entity={}", entityId));
+		return;
+	}
+
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Auto remap {} textures across {} materials", appliedSlotCount, records.size()),
+		.Execute = [this, entityId, records]()
+		{
+			for (const MaterialBatchRecord& record : records)
+			{
+				ApplyMaterialSnapshot(entityId, record.MaterialIndex, record.After, "Applied mesh texture auto remap");
+			}
+		},
+		.Undo = [this, entityId, records]()
+		{
+			for (const MaterialBatchRecord& record : records)
+			{
+				ApplyMaterialSnapshot(entityId, record.MaterialIndex, record.Before, "Undo mesh texture auto remap");
+			}
+		}
+	});
+}
+
 void Engine::ClearMaterialTexture(EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot)
 {
+	if (BlockEditSceneMutationDuringPlay("Clear Material Texture"))
+	{
+		return;
+	}
+
 	Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId);
 	if (!meshAsset || materialIndex >= meshAsset->Materials.size())
 	{
@@ -2424,17 +7111,68 @@ void Engine::ClearMaterialTexture(EntityId entityId, size_t materialIndex, Asset
 		Asset::MaterialTextureSlotName(slot)));
 }
 
+void Engine::ClearMaterialTextureWithUndo(EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot)
+{
+	if (BlockEditSceneMutationDuringPlay("Clear Material Texture"))
+	{
+		return;
+	}
+
+	Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId);
+	if (!meshAsset || materialIndex >= meshAsset->Materials.size())
+	{
+		return;
+	}
+
+	const Asset::StaticMeshMaterial beforeMaterial = meshAsset->Materials[materialIndex];
+	Asset::StaticMeshMaterial afterMaterial = beforeMaterial;
+	Asset::SetMaterialTexturePath(afterMaterial, slot, {});
+	if (slot == Asset::MaterialTextureSlot::BaseColor)
+	{
+		afterMaterial.UseVertexColor = true;
+	}
+
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Clear {} texture", Asset::MaterialTextureSlotName(slot)),
+		.Execute = [this, entityId, materialIndex, afterMaterial]()
+		{
+			ApplyMaterialSnapshot(entityId, materialIndex, afterMaterial, "Applied material texture clear");
+		},
+		.Undo = [this, entityId, materialIndex, beforeMaterial]()
+		{
+			ApplyMaterialSnapshot(entityId, materialIndex, beforeMaterial, "Undo material texture clear");
+		}
+	});
+}
+
 void Engine::BrowseMaterialTexture(EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot)
 {
 	const std::optional<std::filesystem::path> selectedPath = ShowOpenTextureDialog();
 	if (selectedPath)
 	{
-		AssignMaterialTexture(entityId, materialIndex, slot, *selectedPath);
+		AssignMaterialTextureWithUndo(entityId, materialIndex, slot, *selectedPath);
 	}
 }
 
 void Engine::MarkMaterialEdited(EntityId entityId, size_t materialIndex)
 {
+	if (m_PlayScene && IsRuntimePlaying())
+	{
+		Asset::StaticMeshAsset* meshAsset = m_PlayScene->GetMeshAsset(entityId);
+		if (!meshAsset || materialIndex >= meshAsset->Materials.size())
+		{
+			return;
+		}
+
+		static_cast<void>(RefreshMaterialResourcesForEntity(*m_PlayScene, entityId, false, false));
+		return;
+	}
+
+	if (BlockEditSceneMutationDuringPlay("Edit Material"))
+	{
+		return;
+	}
+
 	Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId);
 	if (!meshAsset || materialIndex >= meshAsset->Materials.size())
 	{
@@ -2444,31 +7182,220 @@ void Engine::MarkMaterialEdited(EntityId entityId, size_t materialIndex)
 	static_cast<void>(RefreshMaterialResourcesForEntity(entityId));
 }
 
+void Engine::ApplyMaterialSnapshot(EntityId entityId, size_t materialIndex, const Asset::StaticMeshMaterial& material, std::string_view logLabel)
+{
+	if (BlockEditSceneMutationDuringPlay("Apply Material Snapshot"))
+	{
+		return;
+	}
+
+	ApplyMaterialSnapshot(m_Scene, entityId, materialIndex, material, logLabel, true, true);
+}
+
+void Engine::ApplyMaterialSnapshot(Scene& targetScene, EntityId entityId, size_t materialIndex, const Asset::StaticMeshMaterial& material, std::string_view logLabel, bool markDirty, bool updateRegistry)
+{
+	Asset::StaticMeshAsset* meshAsset = targetScene.GetMeshAsset(entityId);
+	if (!meshAsset || materialIndex >= meshAsset->Materials.size())
+	{
+		return;
+	}
+
+	meshAsset->Materials[materialIndex] = material;
+	static_cast<void>(RefreshMaterialResourcesForEntity(targetScene, entityId, markDirty, updateRegistry));
+	if (!logLabel.empty())
+	{
+		AppendAssetLog(std::format("{} - Entity={} Material={}", logLabel, entityId, materialIndex));
+	}
+}
+
+void Engine::CommitMaterialEdit(EntityId entityId, size_t materialIndex, const Asset::StaticMeshMaterial& beforeMaterial, const Asset::StaticMeshMaterial& afterMaterial)
+{
+	if (m_PlayScene && IsRuntimePlaying())
+	{
+		Asset::StaticMeshAsset* meshAsset = m_PlayScene->GetMeshAsset(entityId);
+		if (!meshAsset || materialIndex >= meshAsset->Materials.size())
+		{
+			return;
+		}
+
+		m_RuntimeCommandStack.Execute(Editor::EditorCommand{
+			.Name = "Runtime edit material",
+			.Execute = [this, entityId, materialIndex, afterMaterial]()
+			{
+				ApplyMaterialSnapshot(GetRuntimeScene(), entityId, materialIndex, afterMaterial, "Applied runtime material edit", false, false);
+			},
+			.Undo = [this, entityId, materialIndex, beforeMaterial]()
+			{
+				ApplyMaterialSnapshot(GetRuntimeScene(), entityId, materialIndex, beforeMaterial, "Undo runtime material edit", false, false);
+			}
+		});
+		return;
+	}
+
+	if (BlockEditSceneMutationDuringPlay("Edit Material"))
+	{
+		return;
+	}
+
+	Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(entityId);
+	if (!meshAsset || materialIndex >= meshAsset->Materials.size())
+	{
+		return;
+	}
+
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = "Edit material",
+		.Execute = [this, entityId, materialIndex, afterMaterial]()
+		{
+			ApplyMaterialSnapshot(entityId, materialIndex, afterMaterial, "Applied material edit");
+		},
+		.Undo = [this, entityId, materialIndex, beforeMaterial]()
+		{
+			ApplyMaterialSnapshot(entityId, materialIndex, beforeMaterial, "Undo material edit");
+		}
+	});
+}
+
+void Engine::CommitMaterialBatchEdit(std::vector<Editor::MaterialEditRecord> records)
+{
+	if (m_PlayScene && IsRuntimePlaying())
+	{
+		std::erase_if(records, [this](const Editor::MaterialEditRecord& record)
+			{
+				const Asset::StaticMeshAsset* meshAsset = m_PlayScene->GetMeshAsset(record.Entity);
+				return record.Entity == InvalidEntityId ||
+					!meshAsset ||
+					record.MaterialIndex >= meshAsset->Materials.size();
+			});
+		if (records.empty())
+		{
+			return;
+		}
+
+		const auto materialRecords = std::make_shared<std::vector<Editor::MaterialEditRecord>>(std::move(records));
+		m_RuntimeCommandStack.Execute(Editor::EditorCommand{
+			.Name = std::format("Runtime edit {} materials", materialRecords->size()),
+			.Execute = [this, materialRecords]()
+			{
+				for (const Editor::MaterialEditRecord& record : *materialRecords)
+				{
+					ApplyMaterialSnapshot(GetRuntimeScene(), record.Entity, record.MaterialIndex, record.After, {}, false, false);
+				}
+				AppendAssetLog(std::format("Applied runtime material scalar edit for {} materials", materialRecords->size()));
+			},
+			.Undo = [this, materialRecords]()
+			{
+				for (const Editor::MaterialEditRecord& record : *materialRecords)
+				{
+					ApplyMaterialSnapshot(GetRuntimeScene(), record.Entity, record.MaterialIndex, record.Before, {}, false, false);
+				}
+				AppendAssetLog(std::format("Undo runtime material scalar edit for {} materials", materialRecords->size()));
+			}
+		});
+		return;
+	}
+
+	if (BlockEditSceneMutationDuringPlay("Edit Material"))
+	{
+		return;
+	}
+
+	std::erase_if(records, [this](const Editor::MaterialEditRecord& record)
+		{
+			const Asset::StaticMeshAsset* meshAsset = m_Scene.GetMeshAsset(record.Entity);
+			return record.Entity == InvalidEntityId ||
+				!meshAsset ||
+				record.MaterialIndex >= meshAsset->Materials.size();
+		});
+	if (records.empty())
+	{
+		return;
+	}
+
+	const auto materialRecords = std::make_shared<std::vector<Editor::MaterialEditRecord>>(std::move(records));
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Edit {} materials", materialRecords->size()),
+		.Execute = [this, materialRecords]()
+		{
+			for (const Editor::MaterialEditRecord& record : *materialRecords)
+			{
+				ApplyMaterialSnapshot(record.Entity, record.MaterialIndex, record.After, {});
+			}
+			AppendAssetLog(std::format("Applied material scalar edit for {} materials", materialRecords->size()));
+		},
+		.Undo = [this, materialRecords]()
+		{
+			for (const Editor::MaterialEditRecord& record : *materialRecords)
+			{
+				ApplyMaterialSnapshot(record.Entity, record.MaterialIndex, record.Before, {});
+			}
+			AppendAssetLog(std::format("Undo material scalar edit for {} materials", materialRecords->size()));
+		}
+	});
+}
+
 void Engine::RenameEntityFromHierarchy(EntityId entityId, std::string_view name)
 {
+	if (BlockEditSceneMutationDuringPlay("Rename Entity"))
+	{
+		return;
+	}
+
 	if (name.empty())
 	{
 		return;
 	}
 
-	if (m_Scene.RenameEntity(entityId, name))
-	{
-		MarkSceneDirty();
-		AppendAssetLog(std::format("Renamed entity {} to {}", entityId, name));
-	}
-}
-
-void Engine::DuplicateEntityFromHierarchy(EntityId entityId)
-{
 	if (!m_Scene.ContainsEntity(entityId))
 	{
 		return;
 	}
 
+	const std::string* currentName = m_Scene.GetEntityName(entityId);
+	const std::string beforeName = currentName ? *currentName : "Entity";
+	const std::string afterName(name);
+	if (beforeName == afterName)
+	{
+		return;
+	}
+
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Rename {}", beforeName),
+		.Execute = [this, entityId, afterName]()
+		{
+			if (m_Scene.RenameEntity(entityId, afterName))
+			{
+				MarkSceneDirty();
+				AppendAssetLog(std::format("Renamed entity {} to {}", entityId, afterName));
+			}
+		},
+		.Undo = [this, entityId, beforeName]()
+		{
+			if (m_Scene.RenameEntity(entityId, beforeName))
+			{
+				MarkSceneDirty();
+				AppendAssetLog(std::format("Undo rename entity {} to {}", entityId, beforeName));
+			}
+		}
+	});
+}
+
+EntityId Engine::DuplicateEntityFromHierarchy(EntityId entityId)
+{
+	if (BlockEditSceneMutationDuringPlay("Duplicate Entity"))
+	{
+		return InvalidEntityId;
+	}
+
+	if (!m_Scene.ContainsEntity(entityId))
+	{
+		return InvalidEntityId;
+	}
+
 	const EntityId duplicateEntityId = m_Scene.DuplicateEntity(entityId, MakeDuplicateEntityName(entityId), { 0.75f, 0.0f, 0.75f });
 	if (duplicateEntityId == InvalidEntityId)
 	{
-		return;
+		return InvalidEntityId;
 	}
 
 	if (entityId == m_GameCameraEntity)
@@ -2513,7 +7440,7 @@ void Engine::DuplicateEntityFromHierarchy(EntityId entityId)
 	{
 		const auto* materialTextures = m_Scene.GetMaterialTextures(duplicateEntityId);
 		std::vector<std::filesystem::path> watchedTexturePaths = materialTextures
-			? CollectWatchedTexturePaths(*materialTextures)
+			? CollectWatchedAssetPaths(*sourcePath, *materialTextures)
 			: std::vector<std::filesystem::path>{};
 		m_RuntimeAssetRegistry.RegisterEntity(*sourcePath, duplicateEntityId, watchedTexturePaths, "Duplicated");
 		m_AssetHotReloadService.WatchLoadedAsset(*sourcePath, watchedTexturePaths);
@@ -2523,13 +7450,220 @@ void Engine::DuplicateEntityFromHierarchy(EntityId entityId)
 	m_Scene.SetSelectedEntity(duplicateEntityId);
 	MarkSceneDirty();
 	AppendAssetLog(std::format("Duplicated entity {} -> {}", entityId, duplicateEntityId));
+	return duplicateEntityId;
+}
+
+void Engine::DuplicateEntityFromHierarchyWithUndo(EntityId entityId)
+{
+	if (BlockEditSceneMutationDuringPlay("Duplicate Entity"))
+	{
+		return;
+	}
+
+	if (!m_Scene.ContainsEntity(entityId))
+	{
+		return;
+	}
+
+	const auto duplicatedEntity = std::make_shared<EntityId>(InvalidEntityId);
+	const auto duplicateSnapshot = std::make_shared<std::optional<ScenePersistence::LoadedSceneEntity>>();
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Duplicate entity {}", entityId),
+		.Execute = [this, entityId, duplicatedEntity, duplicateSnapshot]()
+		{
+			if (*duplicateSnapshot)
+			{
+				*duplicatedEntity = CreateEntityFromLoadedSceneEntity(**duplicateSnapshot, {});
+				m_Scene.SetSelectedEntity(*duplicatedEntity);
+				MarkSceneDirty();
+				AppendAssetLog(std::format("Reduplicated entity snapshot -> {}", *duplicatedEntity));
+				return;
+			}
+
+			*duplicatedEntity = DuplicateEntityFromHierarchy(entityId);
+			if (*duplicatedEntity != InvalidEntityId)
+			{
+				*duplicateSnapshot = BuildLoadedSceneEntityFromEntity(*duplicatedEntity);
+			}
+		},
+		.Undo = [this, duplicatedEntity]()
+		{
+			if (*duplicatedEntity != InvalidEntityId && m_Scene.ContainsEntity(*duplicatedEntity))
+			{
+				DeleteEntityFromHierarchy(*duplicatedEntity);
+				*duplicatedEntity = InvalidEntityId;
+			}
+		}
+	});
+}
+
+void Engine::DuplicateEntitiesFromHierarchyWithUndo(std::vector<EntityId> entityIds)
+{
+	if (BlockEditSceneMutationDuringPlay("Duplicate Entity"))
+	{
+		return;
+	}
+
+	std::vector<EntityId> orderedEntityIds;
+	for (const SceneEntity& entity : m_Scene.GetEntities())
+	{
+		if (std::ranges::find(entityIds, entity.Id) != entityIds.end()
+			&& std::ranges::find(orderedEntityIds, entity.Id) == orderedEntityIds.end())
+		{
+			orderedEntityIds.push_back(entity.Id);
+		}
+	}
+	if (orderedEntityIds.empty())
+	{
+		return;
+	}
+	if (orderedEntityIds.size() == 1)
+	{
+		DuplicateEntityFromHierarchyWithUndo(orderedEntityIds.front());
+		return;
+	}
+
+	struct DuplicateRecord
+	{
+		EntityId SourceEntity = InvalidEntityId;
+		EntityId SnapshotEntity = InvalidEntityId;
+		EntityId CurrentEntity = InvalidEntityId;
+		std::optional<ScenePersistence::LoadedSceneEntity> Snapshot;
+	};
+
+	auto records = std::make_shared<std::vector<DuplicateRecord>>();
+	records->reserve(orderedEntityIds.size());
+	for (EntityId entityId : orderedEntityIds)
+	{
+		records->push_back(DuplicateRecord{ .SourceEntity = entityId });
+	}
+
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Duplicate {} entities", records->size()),
+		.Execute = [this, records]()
+		{
+			const bool restoreFromSnapshots = std::ranges::all_of(*records, [](const DuplicateRecord& record)
+				{
+					return record.Snapshot.has_value();
+				});
+			std::unordered_map<EntityId, EntityId> sourceToDuplicate;
+			std::unordered_map<EntityId, EntityId> snapshotToRestored;
+
+			for (DuplicateRecord& record : *records)
+			{
+				if (restoreFromSnapshots)
+				{
+					record.CurrentEntity = CreateEntityFromLoadedSceneEntity(*record.Snapshot, {});
+					if (record.SnapshotEntity != InvalidEntityId && record.CurrentEntity != InvalidEntityId)
+					{
+						snapshotToRestored[record.SnapshotEntity] = record.CurrentEntity;
+					}
+				}
+				else if (m_Scene.ContainsEntity(record.SourceEntity))
+				{
+					record.CurrentEntity = DuplicateEntityFromHierarchy(record.SourceEntity);
+					if (record.CurrentEntity != InvalidEntityId)
+					{
+						sourceToDuplicate[record.SourceEntity] = record.CurrentEntity;
+					}
+				}
+			}
+
+			for (DuplicateRecord& record : *records)
+			{
+				if (record.CurrentEntity == InvalidEntityId || !m_Scene.ContainsEntity(record.CurrentEntity))
+				{
+					continue;
+				}
+
+				if (restoreFromSnapshots && record.Snapshot && record.Snapshot->HasHierarchy)
+				{
+					EntityId parentEntity = record.Snapshot->ParentEntityId;
+					if (const auto remappedParentIt = snapshotToRestored.find(parentEntity); remappedParentIt != snapshotToRestored.end())
+					{
+						parentEntity = remappedParentIt->second;
+					}
+					if (parentEntity != InvalidEntityId && m_Scene.ContainsEntity(parentEntity))
+					{
+						static_cast<void>(m_Scene.SetParentEntity(record.CurrentEntity, parentEntity, false));
+					}
+					m_Scene.EnsureHierarchyComponent(record.CurrentEntity).Expanded = record.Snapshot->HierarchyExpanded;
+				}
+				else if (!restoreFromSnapshots)
+				{
+					const EntityId sourceParent = m_Scene.GetParentEntity(record.SourceEntity);
+					if (const auto remappedParentIt = sourceToDuplicate.find(sourceParent); remappedParentIt != sourceToDuplicate.end())
+					{
+						static_cast<void>(m_Scene.SetParentEntity(record.CurrentEntity, remappedParentIt->second, true));
+					}
+				}
+			}
+
+			if (!restoreFromSnapshots)
+			{
+				for (DuplicateRecord& record : *records)
+				{
+					if (record.CurrentEntity != InvalidEntityId && m_Scene.ContainsEntity(record.CurrentEntity))
+					{
+						record.SnapshotEntity = record.CurrentEntity;
+						record.Snapshot = BuildLoadedSceneEntityFromEntity(record.CurrentEntity);
+					}
+				}
+			}
+
+			for (auto recordIt = records->rbegin(); recordIt != records->rend(); ++recordIt)
+			{
+				if (recordIt->CurrentEntity != InvalidEntityId && m_Scene.ContainsEntity(recordIt->CurrentEntity))
+				{
+					m_Scene.SetSelectedEntity(recordIt->CurrentEntity);
+					break;
+				}
+			}
+			m_Scene.UpdateWorldTransforms();
+			MarkSceneDirty();
+			AppendAssetLog(std::format("Duplicated {} selected entities", records->size()));
+		},
+		.Undo = [this, records]()
+		{
+			for (auto recordIt = records->rbegin(); recordIt != records->rend(); ++recordIt)
+			{
+				if (recordIt->CurrentEntity != InvalidEntityId && m_Scene.ContainsEntity(recordIt->CurrentEntity))
+				{
+					DeleteEntityFromHierarchy(recordIt->CurrentEntity);
+					recordIt->CurrentEntity = InvalidEntityId;
+				}
+			}
+		}
+	});
 }
 
 void Engine::DeleteEntityFromHierarchy(EntityId entityId)
 {
+	if (BlockEditSceneMutationDuringPlay("Delete Entity"))
+	{
+		return;
+	}
+
 	if (!m_Scene.ContainsEntity(entityId))
 	{
 		return;
+	}
+
+	if (const auto loadedIt = m_LoadedSceneReferenceEntities.find(entityId); loadedIt != m_LoadedSceneReferenceEntities.end())
+	{
+		std::vector<EntityId> loadedEntityIds = loadedIt->second.LoadedEntities;
+		m_LoadedSceneReferenceEntities.erase(loadedIt);
+		for (auto childIt = loadedEntityIds.rbegin(); childIt != loadedEntityIds.rend(); ++childIt)
+		{
+			if (*childIt != InvalidEntityId && *childIt != entityId && m_Scene.ContainsEntity(*childIt))
+			{
+				DeleteEntityFromHierarchy(*childIt);
+			}
+		}
+	}
+	for (auto& loadedSceneReference : m_LoadedSceneReferenceEntities)
+	{
+		std::erase(loadedSceneReference.second.LoadedEntities, entityId);
 	}
 
 	const bool wasPrimaryRenderable = m_Scene.GetPrimaryRenderableEntity() == entityId;
@@ -2539,6 +7673,7 @@ void Engine::DeleteEntityFromHierarchy(EntityId entityId)
 
 	DestroyTextureResourcesForEntity(entityId);
 	m_PhysicsWorld.RemoveActor(entityId);
+	m_ScriptRuntime.ClearEntity(entityId);
 	for (const auto& removedSourcePath : m_RuntimeAssetRegistry.UnregisterEntity(entityId))
 	{
 		m_AssetHotReloadService.UnwatchLoadedAsset(removedSourcePath);
@@ -2572,6 +7707,203 @@ void Engine::DeleteEntityFromHierarchy(EntityId entityId)
 
 	MarkSceneDirty();
 	AppendAssetLog(std::format("Deleted entity {}", entityId));
+}
+
+void Engine::DeleteEntityFromHierarchyWithUndo(EntityId entityId)
+{
+	if (BlockEditSceneMutationDuringPlay("Delete Entity"))
+	{
+		return;
+	}
+
+	if (!m_Scene.ContainsEntity(entityId))
+	{
+		return;
+	}
+
+	std::optional<ScenePersistence::LoadedSceneEntity> snapshot = BuildLoadedSceneEntityFromEntity(entityId);
+	if (!snapshot)
+	{
+		DeleteEntityFromHierarchy(entityId);
+		return;
+	}
+
+	const auto currentEntity = std::make_shared<EntityId>(entityId);
+	const auto deletedSnapshot = std::make_shared<ScenePersistence::LoadedSceneEntity>(std::move(*snapshot));
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Delete entity {}", entityId),
+		.Execute = [this, currentEntity]()
+		{
+			if (*currentEntity != InvalidEntityId && m_Scene.ContainsEntity(*currentEntity))
+			{
+				DeleteEntityFromHierarchy(*currentEntity);
+				*currentEntity = InvalidEntityId;
+			}
+		},
+		.Undo = [this, currentEntity, deletedSnapshot]()
+		{
+			*currentEntity = CreateEntityFromLoadedSceneEntity(*deletedSnapshot, {});
+			m_Scene.SetSelectedEntity(*currentEntity);
+			MarkSceneDirty();
+			AppendAssetLog(std::format("Restored deleted entity {}", *currentEntity));
+		}
+	});
+}
+
+void Engine::DeleteEntitiesFromHierarchyWithUndo(std::vector<EntityId> entityIds)
+{
+	if (BlockEditSceneMutationDuringPlay("Delete Entity"))
+	{
+		return;
+	}
+
+	struct DeletedRecord
+	{
+		EntityId OriginalEntity = InvalidEntityId;
+		EntityId CurrentEntity = InvalidEntityId;
+		size_t OriginalIndex = static_cast<size_t>(-1);
+		ScenePersistence::LoadedSceneEntity Snapshot;
+	};
+
+	auto records = std::make_shared<std::vector<DeletedRecord>>();
+	for (const SceneEntity& entity : m_Scene.GetEntities())
+	{
+		if (std::ranges::find(entityIds, entity.Id) == entityIds.end())
+		{
+			continue;
+		}
+		if (std::ranges::any_of(*records, [entityId = entity.Id](const DeletedRecord& record)
+			{
+				return record.OriginalEntity == entityId;
+			}))
+		{
+			continue;
+		}
+
+		std::optional<ScenePersistence::LoadedSceneEntity> snapshot = BuildLoadedSceneEntityFromEntity(entity.Id);
+		if (snapshot)
+		{
+			records->push_back(DeletedRecord{
+				.OriginalEntity = entity.Id,
+				.CurrentEntity = entity.Id,
+				.OriginalIndex = m_Scene.GetEntityIndex(entity.Id),
+				.Snapshot = std::move(*snapshot)
+			});
+		}
+	}
+	if (records->empty())
+	{
+		return;
+	}
+	if (records->size() == 1)
+	{
+		DeleteEntityFromHierarchyWithUndo(records->front().OriginalEntity);
+		return;
+	}
+
+	m_EditorCommandStack.Execute(Editor::EditorCommand{
+		.Name = std::format("Delete {} entities", records->size()),
+		.Execute = [this, records]()
+		{
+			for (auto recordIt = records->rbegin(); recordIt != records->rend(); ++recordIt)
+			{
+				if (recordIt->CurrentEntity != InvalidEntityId && m_Scene.ContainsEntity(recordIt->CurrentEntity))
+				{
+					DeleteEntityFromHierarchy(recordIt->CurrentEntity);
+					recordIt->CurrentEntity = InvalidEntityId;
+				}
+			}
+		},
+		.Undo = [this, records]()
+		{
+			std::unordered_map<EntityId, EntityId> originalToRestored;
+			for (DeletedRecord& record : *records)
+			{
+				record.CurrentEntity = CreateEntityFromLoadedSceneEntity(record.Snapshot, {});
+				if (record.CurrentEntity != InvalidEntityId)
+				{
+					originalToRestored[record.OriginalEntity] = record.CurrentEntity;
+				}
+			}
+
+			for (DeletedRecord& record : *records)
+			{
+				if (record.CurrentEntity == InvalidEntityId || !m_Scene.ContainsEntity(record.CurrentEntity))
+				{
+					continue;
+				}
+
+				if (record.Snapshot.HasHierarchy)
+				{
+					EntityId parentEntity = record.Snapshot.ParentEntityId;
+					if (const auto remappedParentIt = originalToRestored.find(parentEntity); remappedParentIt != originalToRestored.end())
+					{
+						parentEntity = remappedParentIt->second;
+					}
+					if (parentEntity != InvalidEntityId && m_Scene.ContainsEntity(parentEntity))
+					{
+						static_cast<void>(m_Scene.SetParentEntity(record.CurrentEntity, parentEntity, false));
+					}
+					m_Scene.EnsureHierarchyComponent(record.CurrentEntity).Expanded = record.Snapshot.HierarchyExpanded;
+				}
+				static_cast<void>(m_Scene.MoveEntityToIndex(record.CurrentEntity, record.OriginalIndex));
+			}
+
+			if (!records->empty() && records->front().CurrentEntity != InvalidEntityId)
+			{
+				m_Scene.SetSelectedEntity(records->front().CurrentEntity);
+			}
+			m_Scene.UpdateWorldTransforms();
+			MarkSceneDirty();
+			AppendAssetLog(std::format("Restored {} deleted entities", records->size()));
+		}
+	});
+}
+
+void Engine::UndoEditorCommand()
+{
+	if (m_PlayScene && IsRuntimePlaying())
+	{
+		if (m_RuntimeCommandStack.CanUndo())
+		{
+			m_RuntimeCommandStack.Undo();
+		}
+		return;
+	}
+
+	if (BlockEditSceneMutationDuringPlay("Undo"))
+	{
+		return;
+	}
+
+	if (!m_EditorCommandStack.CanUndo())
+	{
+		return;
+	}
+	m_EditorCommandStack.Undo();
+}
+
+void Engine::RedoEditorCommand()
+{
+	if (m_PlayScene && IsRuntimePlaying())
+	{
+		if (m_RuntimeCommandStack.CanRedo())
+		{
+			m_RuntimeCommandStack.Redo();
+		}
+		return;
+	}
+
+	if (BlockEditSceneMutationDuringPlay("Redo"))
+	{
+		return;
+	}
+
+	if (!m_EditorCommandStack.CanRedo())
+	{
+		return;
+	}
+	m_EditorCommandStack.Redo();
 }
 
 std::string Engine::MakeDuplicateEntityName(EntityId entityId) const
@@ -2611,11 +7943,14 @@ void Engine::RemoveEntityFromRenderState(EntityId entityId)
 	std::erase(m_RenderState.RenderEntities, entityId);
 	m_RenderState.TransparentEntities.erase(entityId);
 	m_RenderState.EntityMaterialTransparency.erase(entityId);
+	m_MeshRestoreGenerations.erase(entityId);
+	m_MeshRestoreRequests.erase(entityId);
+	m_MeshRestoreConflictResults.erase(entityId);
 }
 
 void Engine::UploadEntityGeometry(EntityId entityId)
 {
-	const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+	const Asset::StaticMeshAsset* meshAsset = GetRuntimeScene().GetMeshAsset(entityId);
 	if (!meshAsset || !m_StaticMeshRenderer.VertexBuffer || !m_StaticMeshRenderer.IndexBuffer)
 	{
 		return;
@@ -2646,7 +7981,23 @@ bool Engine::Init()
 	InitializeJobSystem();
 	DragAcceptFiles(m_hMainWnd, TRUE);
 
-	if (m_StartupOptions.ProjectFilePath)
+	if (m_StartupOptions.RuntimePackageManifestPath)
+	{
+		Projects::RuntimePackageResult runtimeResult = Projects::ProjectBuildService::LoadRuntimePackage(*m_StartupOptions.RuntimePackageManifestPath);
+		if (!runtimeResult.Success)
+		{
+			const std::wstring message(runtimeResult.ErrorMessage.begin(), runtimeResult.ErrorMessage.end());
+			MessageBoxW(m_hMainWnd, message.c_str(), L"Runtime Package Error", MB_OK | MB_ICONERROR);
+			return false;
+		}
+
+		m_Project = std::move(runtimeResult.Descriptor);
+		m_SampleMode = Samples::Benchmark::SampleMode::ProjectScene;
+		m_LastSampleMode = m_SampleMode;
+		m_AssetFileSystem.SetRootPath(m_Project->RootPath / m_Project->AssetRoot);
+		AppendAssetLog(std::format("Runtime package loaded: {}", runtimeResult.ManifestPath.string()));
+	}
+	else if (m_StartupOptions.ProjectFilePath)
 	{
 		Projects::ProjectResult projectResult = Projects::ProjectService::LoadProject(*m_StartupOptions.ProjectFilePath);
 		if (!projectResult.Success)
@@ -2688,6 +8039,12 @@ bool Engine::Init()
 		{
 			InitializeProjectScene();
 			SetSceneDirty(false);
+		}
+		if (IsRuntimeMode())
+		{
+			m_PlayState = Editor::EditorPlayState::Play;
+			SetPhysicsSimulationEnabled(true);
+			AppendAssetLog("Runtime player mode active.");
 		}
 	}
 	else
@@ -2801,10 +8158,14 @@ void Engine::Update(float deltaTime)
 	m_PhaseScheduler.BeginFrame(m_JobSystem.GetFrameIndex());
 	m_LastDeltaTime = deltaTime;
 	RunFramePhases(deltaTime);
+	GetRuntimeScene().UpdateWorldTransforms();
+	UpdateSceneReferenceHotReload(deltaTime);
+	UpdateAutosave(deltaTime);
 }
 
 void Engine::RunFramePhases(float deltaTime)
 {
+	Scene& runtimeScene = GetRuntimeScene();
 	m_PhaseScheduler.RunPhase(Jobs::FramePhase::BeginFrame, [this](Jobs::FramePhaseScheduler&)
 		{
 			ProcessPendingGraphicsApiSwitch();
@@ -2823,8 +8184,13 @@ void Engine::RunFramePhases(float deltaTime)
 			}
 		});
 
-	m_PhaseScheduler.RunPhase(Jobs::FramePhase::Start, [this](Jobs::FramePhaseScheduler&)
+	m_PhaseScheduler.RunPhase(Jobs::FramePhase::Start, [this, deltaTime, &runtimeScene](Jobs::FramePhaseScheduler&)
 		{
+			if (m_PlayState == Editor::EditorPlayState::Paused && !m_PlayStepRequested)
+			{
+				return;
+			}
+
 			if (m_LastSampleMode != m_SampleMode)
 			{
 				if (m_PhysicsSimulationEnabled && m_SampleMode != Samples::Benchmark::SampleMode::ProjectScene)
@@ -2846,6 +8212,16 @@ void Engine::RunFramePhases(float deltaTime)
 				FramePrimaryRenderableCamera();
 				FramePrimaryRenderableCamera(m_SceneCamera);
 				m_LastSampleMode = m_SampleMode;
+			}
+
+			if (m_SampleMode == Samples::Benchmark::SampleMode::ProjectScene)
+			{
+				m_ScriptRuntime.RunStart(
+					runtimeScene,
+					m_SceneCommandBuffer,
+					deltaTime,
+					m_JobSystem.GetFrameIndex(),
+					IsRuntimePlaying());
 			}
 		});
 
@@ -2876,17 +8252,61 @@ void Engine::RunFramePhases(float deltaTime)
 	}
 
 	m_PhaseScheduler.RunPhase(Jobs::FramePhase::FixedUpdate, [](Jobs::FramePhaseScheduler&) {});
-	m_PhaseScheduler.RunPhase(Jobs::FramePhase::Update, [](Jobs::FramePhaseScheduler&) {});
-	m_PhaseScheduler.RunPhase(Jobs::FramePhase::LateUpdate, [](Jobs::FramePhaseScheduler&) {});
+	m_PhaseScheduler.RunPhase(Jobs::FramePhase::Update, [this, deltaTime, &runtimeScene](Jobs::FramePhaseScheduler& scheduler)
+		{
+			if (m_PlayState == Editor::EditorPlayState::Paused && !m_PlayStepRequested)
+			{
+				return;
+			}
+
+			if (m_SampleMode == Samples::Benchmark::SampleMode::ProjectScene)
+			{
+				m_ScriptRuntime.ScheduleUpdate(
+					runtimeScene,
+					scheduler,
+					m_SceneCommandBuffer,
+					deltaTime,
+					m_JobSystem.GetFrameIndex(),
+					IsRuntimePlaying());
+			}
+		});
+	m_PhaseScheduler.RunPhase(Jobs::FramePhase::LateUpdate, [this, deltaTime, &runtimeScene](Jobs::FramePhaseScheduler& scheduler)
+		{
+			if (m_PlayState == Editor::EditorPlayState::Paused && !m_PlayStepRequested)
+			{
+				return;
+			}
+
+			if (m_SampleMode == Samples::Benchmark::SampleMode::ProjectScene)
+			{
+				m_ScriptRuntime.ScheduleLateUpdate(
+					runtimeScene,
+					scheduler,
+					m_SceneCommandBuffer,
+					deltaTime,
+					m_JobSystem.GetFrameIndex(),
+					IsRuntimePlaying());
+			}
+		});
 	m_PhaseScheduler.RunPhase(Jobs::FramePhase::Animation, [this, deltaTime](Jobs::FramePhaseScheduler&)
 		{
-			UpdateAnimatedMesh(deltaTime);
+			if (m_PlayState == Editor::EditorPlayState::Paused && !m_PlayStepRequested)
+			{
+				return;
+			}
+
+			UpdateAnimatedMesh(GetRuntimeScene(), deltaTime);
 		});
 	m_PhaseScheduler.RunPhase(Jobs::FramePhase::Physics, [this, deltaTime](Jobs::FramePhaseScheduler&)
 		{
+			if (m_PlayState == Editor::EditorPlayState::Paused && !m_PlayStepRequested)
+			{
+				return;
+			}
+
 			if (m_SampleMode == Samples::Benchmark::SampleMode::ProjectScene && m_PhysicsSimulationEnabled)
 			{
-				m_PhysicsWorld.Step(m_Scene, deltaTime);
+				m_PhysicsWorld.Step(GetRuntimeScene(), deltaTime);
 			}
 		});
 	m_PhaseScheduler.RunPhase(Jobs::FramePhase::RenderPrepare, [](Jobs::FramePhaseScheduler&) {});
@@ -2894,15 +8314,47 @@ void Engine::RunFramePhases(float deltaTime)
 		{
 			m_SceneCommandBuffer.ExecuteAndClear();
 		});
-	m_PhaseScheduler.RunPhase(Jobs::FramePhase::EndFrame, [this](Jobs::FramePhaseScheduler&)
+	m_PhaseScheduler.RunPhase(Jobs::FramePhase::EndFrame, [this, deltaTime, &runtimeScene](Jobs::FramePhaseScheduler& scheduler)
 		{
+			if (m_PlayState == Editor::EditorPlayState::Paused && !m_PlayStepRequested)
+			{
+				for (std::string& error : m_JobSystem.ConsumeErrors())
+				{
+					AppendAssetLog(std::move(error));
+				}
+				for (std::string& log : m_ScriptRuntime.ConsumeLogs())
+				{
+					AppendAssetLog(std::move(log));
+				}
+				return;
+			}
+
+			if (m_SampleMode == Samples::Benchmark::SampleMode::ProjectScene)
+			{
+				m_ScriptRuntime.ScheduleEndFrame(
+					runtimeScene,
+					scheduler,
+					m_SceneCommandBuffer,
+					deltaTime,
+					m_JobSystem.GetFrameIndex(),
+					IsRuntimePlaying());
+			}
 			for (std::string& error : m_JobSystem.ConsumeErrors())
 			{
 				AppendAssetLog(std::move(error));
 			}
+			for (std::string& log : m_ScriptRuntime.ConsumeLogs())
+			{
+				AppendAssetLog(std::move(log));
+			}
 		});
 
 	m_PhaseScheduler.EndFrame();
+	if (m_PlayState == Editor::EditorPlayState::Paused && m_PlayStepRequested)
+	{
+		m_PlayStepRequested = false;
+		AppendAssetLog("Play mode single-frame step completed.");
+	}
 }
 
 void Engine::Render()
@@ -2951,16 +8403,48 @@ void Engine::Render()
 		{
 			static_cast<void>(UpdateDeferredLightBuffer());
 		});
-	const size_t editorFramePass = m_RenderGraph.AddPass("Build Editor DockSpace", Rendering::RenderPassKind::Editor, "ImGui");
-	MeasureRenderGraphPass(m_RenderGraph, editorFramePass, [this]()
-		{
-			BeginEditorFrame();
-			UpdateViewportCameraLenses();
-			m_ShadowFrameData = Rendering::ShadowSystem::BuildDirectionalShadowFrameData(m_Scene, ResolveKeyLightEntity(), m_Camera, m_ShadowSettings);
-		});
-	RenderWorldViewport(m_EditorLayer.GetSceneViewport(), m_SceneCamera, "Scene View", false);
-	RenderWorldViewport(m_EditorLayer.GetGameViewport(), m_Camera, "Game View", true);
-	RenderEditorDrawData();
+	if (IsRuntimeMode())
+	{
+		const size_t runtimeFramePass = m_RenderGraph.AddPass("Build Runtime Player Frame", Rendering::RenderPassKind::Setup, "Runtime");
+		MeasureRenderGraphPass(m_RenderGraph, runtimeFramePass, [this]()
+			{
+				Scene& runtimeScene = GetRuntimeScene();
+				SyncGameCameraFromSceneEntity();
+				const float aspect = static_cast<float>((std::max)(m_ClientWidth, 1)) / static_cast<float>((std::max)(m_ClientHeight, 1));
+				if (CameraComponent* camera = runtimeScene.GetCameraComponent(m_GameCameraEntity);
+					camera && runtimeScene.IsCameraEnabled(m_GameCameraEntity))
+				{
+					m_Camera.SetLens(camera->FovY, aspect, camera->NearZ, camera->FarZ);
+				}
+				else
+				{
+					m_Camera.SetLens(DirectX::XM_PIDIV4, aspect, 0.1f, 1000.0f);
+				}
+				m_ShadowFrameData = Rendering::ShadowSystem::BuildDirectionalShadowFrameData(runtimeScene, ResolveKeyLightEntity(), m_Camera, m_ShadowSettings);
+			});
+		Editor::ViewportPanelState runtimeViewport;
+		runtimeViewport.Left = 0.0f;
+		runtimeViewport.Top = 0.0f;
+		runtimeViewport.Width = static_cast<float>(m_ClientWidth);
+		runtimeViewport.Height = static_cast<float>(m_ClientHeight);
+		runtimeViewport.IsVisible = true;
+		runtimeViewport.IsHovered = true;
+		runtimeViewport.IsFocused = true;
+		RenderWorldViewport(runtimeViewport, m_Camera, "Runtime Game View", true);
+	}
+	else
+	{
+		const size_t editorFramePass = m_RenderGraph.AddPass("Build Editor DockSpace", Rendering::RenderPassKind::Editor, "ImGui");
+		MeasureRenderGraphPass(m_RenderGraph, editorFramePass, [this]()
+			{
+				BeginEditorFrame();
+				UpdateViewportCameraLenses();
+				m_ShadowFrameData = Rendering::ShadowSystem::BuildDirectionalShadowFrameData(m_Scene, ResolveKeyLightEntity(), m_Camera, m_ShadowSettings);
+			});
+		RenderWorldViewport(m_EditorLayer.GetSceneViewport(), m_SceneCamera, "Scene View", false);
+		RenderWorldViewport(m_EditorLayer.GetGameViewport(), m_Camera, "Game View", true);
+		RenderEditorDrawData();
+	}
 
 	// 백버퍼를 Present 상태로 전환
 	const size_t endBackBufferPass = m_RenderGraph.AddPass("BackBuffer RenderTarget->Present", Rendering::RenderPassKind::Present, "Swapchain");
@@ -3024,7 +8508,7 @@ void Engine::OnResize()
 			}
 		}
 
-		if (!CreateImGuiResources())
+		if (!IsRuntimeMode() && !CreateImGuiResources())
 		{
 			LogEngineTrace("OnResize failed to recreate ImGui resources.");
 		}
@@ -3127,7 +8611,7 @@ bool Engine::SwitchGraphicsAPI(GraphicsAPI api)
 		return false;
 	}
 
-	if (!CreateImGuiResources())
+	if (!IsRuntimeMode() && !CreateImGuiResources())
 	{
 		LogEngineTrace("SwitchGraphicsAPI failed during ImGui initialization.");
 		ShutdownGraphics();
@@ -3229,6 +8713,7 @@ void Engine::InitializeProjectScene()
 	m_AmbientColor = { 0.62f, 0.68f, 0.78f };
 	m_AmbientIntensity = 0.35f;
 	m_Exposure = 1.0f;
+	m_SkyboxSettings = Rendering::SkyboxSettings{};
 	m_MaterialDebugView = MaterialDebugView::Lit;
 	m_Camera.LookAt(
 		{ 0.0f, 2.5f, -8.0f },
@@ -3250,12 +8735,13 @@ void Engine::SyncRuntimeCameraToGameCameraEntity()
 		return;
 	}
 
-	TransformComponent& transform = m_Scene.EnsureTransformComponent(m_GameCameraEntity);
+	Scene& runtimeScene = GetRuntimeScene();
+	TransformComponent& transform = runtimeScene.EnsureTransformComponent(m_GameCameraEntity);
 	transform.LocalTransform = m_Camera.GetTransform();
 	transform.LocalTransform.Scale = Math::OneVector3();
 	transform.UpdateWorld();
 
-	CameraComponent& camera = m_Scene.EnsureCameraComponent(m_GameCameraEntity);
+	CameraComponent& camera = runtimeScene.EnsureCameraComponent(m_GameCameraEntity);
 	camera.FovY = m_Camera.GetFovY();
 	camera.NearZ = m_Camera.GetNearZ();
 	camera.FarZ = m_Camera.GetFarZ();
@@ -3264,10 +8750,11 @@ void Engine::SyncRuntimeCameraToGameCameraEntity()
 
 void Engine::SyncGameCameraFromSceneEntity()
 {
+	Scene& runtimeScene = GetRuntimeScene();
 	if (m_GameCameraEntity == InvalidEntityId
-		|| !m_Scene.ContainsEntity(m_GameCameraEntity)
-		|| !m_Scene.IsCameraEnabled(m_GameCameraEntity)
-		|| !m_Scene.GetCameraComponent(m_GameCameraEntity))
+		|| !runtimeScene.ContainsEntity(m_GameCameraEntity)
+		|| !runtimeScene.IsCameraEnabled(m_GameCameraEntity)
+		|| !runtimeScene.GetCameraComponent(m_GameCameraEntity))
 	{
 		return;
 	}
@@ -3278,13 +8765,13 @@ void Engine::SyncGameCameraFromSceneEntity()
 	const float previousNearZ = m_Camera.GetNearZ();
 	const float previousFarZ = m_Camera.GetFarZ();
 
-	if (TransformComponent* transform = m_Scene.GetTransformComponent(m_GameCameraEntity))
+	if (TransformComponent* transform = runtimeScene.GetTransformComponent(m_GameCameraEntity))
 	{
 		transform->UpdateWorld();
 		m_Camera.SetTransform(transform->WorldTransform);
 	}
 
-	if (CameraComponent* camera = m_Scene.GetCameraComponent(m_GameCameraEntity))
+	if (CameraComponent* camera = runtimeScene.GetCameraComponent(m_GameCameraEntity))
 	{
 		const float aspect = m_Camera.GetAspect();
 		const float fovY = std::clamp(camera->FovY, DirectX::XMConvertToRadians(1.0f), DirectX::XMConvertToRadians(179.0f));
@@ -3313,6 +8800,42 @@ void Engine::SyncGameCameraFromSceneEntity()
 	{
 		m_BenchmarkRunner.SetSpawnView(m_Camera);
 	}
+}
+
+bool Engine::IsRuntimeMode() const noexcept
+{
+	return m_StartupOptions.RuntimePackageManifestPath.has_value();
+}
+
+Scene& Engine::GetRuntimeScene() noexcept
+{
+	return m_PlayScene ? *m_PlayScene : m_Scene;
+}
+
+const Scene& Engine::GetRuntimeScene() const noexcept
+{
+	return m_PlayScene ? *m_PlayScene : m_Scene;
+}
+
+bool Engine::IsRuntimePlaying() const noexcept
+{
+	return IsRuntimeMode()
+		|| m_PlayState == Editor::EditorPlayState::Play
+		|| m_PlayState == Editor::EditorPlayState::Paused;
+}
+
+bool Engine::BlockEditSceneMutationDuringPlay(std::string_view action)
+{
+	if (!IsRuntimePlaying())
+	{
+		return false;
+	}
+
+	const std::string_view actionLabel = action.empty() ? std::string_view("Edit-scene mutation") : action;
+	AppendAssetLog(std::format(
+		"{} skipped: Play mode is editing the runtime scene clone only; edit-scene changes are locked until Stop.",
+		actionLabel));
+	return true;
 }
 
 bool Engine::IsGameCameraEntity(EntityId entityId) const noexcept
@@ -3947,7 +9470,7 @@ void Engine::DestroyTextureResources()
 
 bool Engine::CreateTextureResourcesForEntity(EntityId entityId)
 {
-	const auto* materialTextures = GetMaterialTextures(entityId);
+	const auto* materialTextures = GetRuntimeScene().GetMaterialTextures(entityId);
 	if (!materialTextures)
 	{
 		return false;
@@ -4706,7 +10229,8 @@ void Engine::BeginEditorFrame()
 
 	const EntityId keyLightEntity = ResolveKeyLightEntity();
 	float keyLightIntensity = 3.25f;
-	if (const LightComponent* keyLight = m_Scene.GetLightComponent(keyLightEntity))
+	Scene& runtimeScene = GetRuntimeScene();
+	if (const LightComponent* keyLight = runtimeScene.GetLightComponent(keyLightEntity))
 	{
 		keyLightIntensity = keyLight->Intensity;
 	}
@@ -4714,7 +10238,7 @@ void Engine::BeginEditorFrame()
 	const bool hdrTargetAvailable =
 		(m_Graphics.CurrentApi == GraphicsAPI::DirectX12 && m_StaticMeshRenderer.Dx12.Deferred.HdrColorTexture != nullptr) ||
 		(m_Graphics.CurrentApi == GraphicsAPI::Vulkan && m_StaticMeshRenderer.Vulkan.Deferred.HdrColorImage != VK_NULL_HANDLE);
-	const uint32_t sceneLightCount = RenderSystem::CountSceneRenderableLights(m_Scene);
+	const uint32_t sceneLightCount = RenderSystem::CountSceneRenderableLights(runtimeScene);
 	const bool usesFallbackLight = sceneLightCount == 0;
 	const uint32_t effectiveForwardLightCount = usesFallbackLight
 		? 1u
@@ -4724,12 +10248,15 @@ void Engine::BeginEditorFrame()
 		: 0u;
 	const Rendering::RenderFrameStats& lastRenderStats = m_LastCompletedRenderFrameStats;
 
+	const bool canControlProjectPlayMode = m_Project.has_value()
+		&& m_SampleMode == Samples::Benchmark::SampleMode::ProjectScene
+		&& !IsRuntimeMode();
 	Editor::EditorContext editorContext{
 		.CurrentApi = m_Graphics.CurrentApi,
 		.CurrentRenderMode = m_RenderMode,
 		.SceneCamera = m_SceneCamera,
 		.GameCamera = m_Camera,
-		.ActiveScene = m_Scene,
+		.ActiveScene = runtimeScene,
 		.SampleMode = m_SampleMode,
 		.BenchmarkRunner = m_BenchmarkRunner,
 		.ShowDemoWindow = m_ShowImGuiDemoWindow,
@@ -4742,6 +10269,7 @@ void Engine::BeginEditorFrame()
 		.AssetLogLines = &m_AssetLogLines,
 		.MemoryStats = Memory::GetStats(),
 		.JobStats = m_JobSystem.GetStats(),
+		.ScriptStats = m_ScriptRuntime.GetStats(),
 		.ResourceStats = m_ResourceManager.GetStats(),
 		.MaterialStats = BuildSceneMaterialResourceStats(),
 		.ShaderVariantStats = m_ShaderVariantCache.GetStats(),
@@ -4767,11 +10295,25 @@ void Engine::BeginEditorFrame()
 		.DeferredFullTileLightCount = lastRenderStats.DeferredFullTileLightCount,
 		.ProjectRefreshInProgress = m_AssetFileSystem.IsRefreshInProgress(),
 		.IsSceneDirty = m_SceneDirty,
-		.CanEditProjectScene = m_Project.has_value() && m_SampleMode == Samples::Benchmark::SampleMode::ProjectScene,
+		.CanEditProjectScene = canControlProjectPlayMode && !IsRuntimePlaying(),
+		.CanControlPlayMode = canControlProjectPlayMode,
+		.ActiveSceneIsRuntimeClone = m_PlayScene.has_value(),
 		.PhysicsSimulationEnabled = m_PhysicsSimulationEnabled,
+		.AutosaveEnabled = m_AutosaveEnabled,
+		.AutosaveLastSucceeded = m_LastAutosaveSucceeded,
+		.AutosaveIntervalSeconds = m_AutosaveIntervalSeconds,
+		.AutosaveElapsedSeconds = m_AutosaveElapsedSeconds,
+		.AutosavePath = m_LastAutosavePath,
+		.AutosaveStatusMessage = m_AutosaveStatusMessage,
+		.PlayState = m_PlayState,
+		.CanUndo = m_PlayScene && IsRuntimePlaying() ? m_RuntimeCommandStack.CanUndo() : m_EditorCommandStack.CanUndo(),
+		.CanRedo = m_PlayScene && IsRuntimePlaying() ? m_RuntimeCommandStack.CanRedo() : m_EditorCommandStack.CanRedo(),
+		.UndoLabel = m_PlayScene && IsRuntimePlaying() ? m_RuntimeCommandStack.GetUndoLabel() : m_EditorCommandStack.GetUndoLabel(),
+		.RedoLabel = m_PlayScene && IsRuntimePlaying() ? m_RuntimeCommandStack.GetRedoLabel() : m_EditorCommandStack.GetRedoLabel(),
 		.AmbientColor = m_AmbientColor,
 		.AmbientIntensity = m_AmbientIntensity,
 		.Exposure = m_Exposure,
+		.Skybox = m_SkyboxSettings,
 		.KeyLightIntensity = keyLightIntensity,
 		.DebugView = m_MaterialDebugView,
 		.ViewFrustumCullingEnabled = m_ViewFrustumCullingEnabled,
@@ -4803,7 +10345,19 @@ void Engine::BeginEditorFrame()
 		},
 		.OnOpenScene = [this](const std::filesystem::path& path)
 		{
-			static_cast<void>(OpenSceneFromPath(path, true));
+			static_cast<void>(OpenSceneFromPath(ResolveProjectScenePath(path), true));
+		},
+		.OnSaveSelectedPrefab = [this]()
+		{
+			static_cast<void>(SaveSelectedEntityAsPrefab());
+		},
+		.OnExportProject = [this]()
+		{
+			static_cast<void>(ExportProjectPackage());
+		},
+		.OnExportProjectProfile = [this](const Editor::ExportProfileSettings& profile) -> bool
+		{
+			return ExportProjectPackage(profile);
 		},
 		.OnRevealProject = [this]()
 		{
@@ -4815,6 +10369,38 @@ void Engine::BeginEditorFrame()
 		.OnExit = [this]()
 		{
 			SendMessageW(m_hMainWnd, WM_CLOSE, 0, 0);
+		},
+		.OnUndo = [this]()
+		{
+			UndoEditorCommand();
+		},
+		.OnRedo = [this]()
+		{
+			RedoEditorCommand();
+		},
+		.OnPlayModeChanged = [this](bool enabled)
+		{
+			SetPlayModeEnabled(enabled);
+		},
+		.OnPlayPausedChanged = [this](bool paused)
+		{
+			SetPlayPaused(paused);
+		},
+		.OnPlayStep = [this]()
+		{
+			StepPlayMode();
+		},
+		.OnResetPlayRuntimeScene = [this]()
+		{
+			ResetPlayRuntimeScene();
+		},
+		.OnAutosaveEnabledChanged = [this](bool enabled)
+		{
+			SetAutosaveEnabled(enabled);
+		},
+		.OnAutosaveIntervalChanged = [this](float intervalSeconds)
+		{
+			SetAutosaveInterval(intervalSeconds);
 		},
 		.OnFrameSelected = [this]()
 		{
@@ -4840,6 +10426,24 @@ void Engine::BeginEditorFrame()
 		{
 			RevealAssetPath(path);
 		},
+		.OnAssetImportSettingsRequested = [this](const std::filesystem::path& path)
+		{
+			static_cast<void>(CreateOrUpdateImportSettingsForAsset(path));
+		},
+		.OnAssetReimportRequested = [this](const std::filesystem::path& path)
+		{
+			if (!Asset::IsModelAssetPath(path))
+			{
+				AppendAssetLog(std::format("Reimport ignored: not a model asset {}", path.string()));
+				return;
+			}
+			if (m_RuntimeAssetRegistry.GetEntities(path).empty())
+			{
+				AppendAssetLog(std::format("Reimport skipped: model is not loaded in the current scene {}", path.string()));
+				return;
+			}
+			QueueModelReload(path, path);
+		},
 		.OnModelDrop = [this](const std::filesystem::path& path, Editor::AssetDropTarget target)
 		{
 			QueueModelImportFromDrop(path, target);
@@ -4849,49 +10453,201 @@ void Engine::BeginEditorFrame()
 			m_AssetFileSystem.RequestRefresh();
 			ConfigureResourceSystem();
 		},
+		.OnLoadPrefabForInspection = [this](
+			const std::filesystem::path& prefabPath,
+			ScenePersistence::LoadedSceneEntity& root,
+			std::string& errorMessage) -> bool
+		{
+			if (!m_Project)
+			{
+				errorMessage = "Prefab inspection requires a loaded project.";
+				return false;
+			}
+			ScenePersistence::LoadPrefabResult result = ScenePersistence::PrefabService::LoadPrefab(prefabPath, *m_Project);
+			if (!result.Success)
+			{
+				errorMessage = result.ErrorMessage;
+				return false;
+			}
+			root = std::move(result.Root);
+			return true;
+		},
+		.OnApplyEntityToPrefab = [this](EntityId entityId) -> bool
+		{
+			return ApplyEntityToPrefabSource(entityId);
+		},
+		.OnSavePrefabInspectionRoot = [this](
+			const std::filesystem::path& prefabPath,
+			const ScenePersistence::LoadedSceneEntity& root) -> bool
+		{
+			return SavePrefabInspectionRoot(prefabPath, root);
+		},
+		.OnRevertMeshToPrefabSource = [this](
+			EntityId entityId,
+			const ScenePersistence::LoadedSceneEntity& prefabRoot,
+			const std::filesystem::path& prefabPath) -> bool
+		{
+			return RevertEntityMeshToPrefabSource(entityId, prefabRoot, prefabPath);
+		},
+		.OnGetMeshRestoreStatus = [this](EntityId entityId) -> Editor::MeshRestoreRuntimeStatus
+		{
+			return GetMeshRestoreRuntimeStatus(entityId);
+		},
+		.OnCancelMeshRestore = [this](EntityId entityId) -> bool
+		{
+			return CancelMeshRestore(entityId);
+		},
+		.OnApplyConflictedMeshRestore = [this](EntityId entityId) -> bool
+		{
+			return ApplyConflictedMeshRestore(entityId);
+		},
+		.OnReloadMeshRestoreFromPrefabSource = [this](EntityId entityId) -> bool
+		{
+			return ReloadMeshRestoreFromPrefabSource(entityId);
+		},
+		.OnLoadSceneReference = [this](EntityId entityId) -> bool
+		{
+			return LoadSceneReference(entityId);
+		},
+		.OnUnloadSceneReference = [this](EntityId entityId) -> bool
+		{
+			return UnloadSceneReference(entityId);
+		},
+		.OnGetSceneReferenceStatus = [this](EntityId entityId) -> Editor::SceneReferenceRuntimeStatus
+		{
+			return GetSceneReferenceRuntimeStatus(entityId);
+		},
+		.OnGetNestedSceneChildStatus = [this](EntityId entityId) -> Editor::NestedSceneChildStatus
+		{
+			return GetNestedSceneChildStatus(entityId);
+		},
+		.OnMakeNestedSceneChildLocal = [this](EntityId entityId) -> bool
+		{
+			return MakeNestedSceneChildLocalWithUndo(entityId);
+		},
+		.OnCreateProjectAsset = [this](Editor::ProjectCreateAssetKind kind, const std::filesystem::path& targetDirectory)
+		{
+			static_cast<void>(CreateProjectAsset(kind, targetDirectory));
+		},
+		.OnCreateNamedProjectAsset = [this](Editor::ProjectCreateAssetKind kind, const std::filesystem::path& targetDirectory, std::string_view requestedName)
+		{
+			static_cast<void>(CreateProjectAsset(kind, targetDirectory, requestedName));
+		},
 		.OnRenameEntity = [this](EntityId entityId, std::string_view name)
 		{
 			RenameEntityFromHierarchy(entityId, name);
 		},
 		.OnDuplicateEntity = [this](EntityId entityId)
 		{
-			DuplicateEntityFromHierarchy(entityId);
+			DuplicateEntityFromHierarchyWithUndo(entityId);
+		},
+		.OnDuplicateEntities = [this](std::vector<EntityId> entityIds)
+		{
+			DuplicateEntitiesFromHierarchyWithUndo(std::move(entityIds));
 		},
 		.OnDeleteEntity = [this](EntityId entityId)
 		{
-			DeleteEntityFromHierarchy(entityId);
+			DeleteEntityFromHierarchyWithUndo(entityId);
 		},
-		.OnCreatePrimitive = [this](Asset::PrimitiveMeshKind kind)
+		.OnDeleteEntities = [this](std::vector<EntityId> entityIds)
 		{
-			static_cast<void>(CreatePrimitiveEntity(kind));
+			DeleteEntitiesFromHierarchyWithUndo(std::move(entityIds));
+		},
+		.OnEntitySceneVisibilityChanged = [this](EntityId entityId, bool visible)
+		{
+			SetEntitySceneVisibilityWithUndo(entityId, visible);
+		},
+		.OnEntityScenePickabilityChanged = [this](EntityId entityId, bool pickable)
+		{
+			SetEntityScenePickabilityWithUndo(entityId, pickable);
+		},
+		.OnCreateEmptyEntity = [this](EntityId parentEntity)
+		{
+			CreateEmptySceneEntityWithUndo("Entity", parentEntity);
+		},
+		.OnCreateCameraEntity = [this](EntityId parentEntity)
+		{
+			CreateCameraSceneEntityWithUndo(parentEntity);
+		},
+		.OnCreateLightEntity = [this](EntityId parentEntity)
+		{
+			CreateLightSceneEntityWithUndo(parentEntity);
+		},
+		.OnCreatePrimitive = [this](Asset::PrimitiveMeshKind kind, EntityId parentEntity)
+		{
+			CreatePrimitiveEntityWithUndo(kind, parentEntity);
+		},
+		.OnCreateEmptyParentForEntity = [this](EntityId childEntity)
+		{
+			CreateEmptyParentForEntityWithUndo(childEntity);
 		},
 		.OnMoveEntity = [this](EntityId movedEntity, EntityId targetEntity, Editor::EntityDropPlacement placement)
 		{
-			MoveEntityInHierarchy(movedEntity, targetEntity, placement);
+			MoveEntitiesInHierarchyWithUndo({ movedEntity }, targetEntity, placement);
+		},
+		.OnMoveEntities = [this](std::vector<EntityId> movedEntities, EntityId targetEntity, Editor::EntityDropPlacement placement)
+		{
+			MoveEntitiesInHierarchyWithUndo(std::move(movedEntities), targetEntity, placement);
 		},
 		.OnComponentAdded = [this](EntityId entityId, SceneComponentKind kind)
 		{
-			AddComponentToEntity(entityId, kind);
+			AddComponentToEntityWithUndo(entityId, kind);
 		},
 		.OnComponentRemoved = [this](EntityId entityId, SceneComponentKind kind)
 		{
-			RemoveComponentFromEntity(entityId, kind);
+			RemoveComponentFromEntityWithUndo(entityId, kind);
 		},
 		.OnComponentEnabledChanged = [this](EntityId entityId, SceneComponentKind kind, bool enabled)
 		{
-			SetComponentEnabledForEntity(entityId, kind, enabled);
+			SetComponentEnabledForEntityWithUndo(entityId, kind, enabled);
+		},
+		.OnComponentReset = [this](EntityId entityId, SceneComponentKind kind)
+		{
+			ResetComponentForEntityWithUndo(entityId, kind);
+		},
+		.OnComponentPaste = [this](EntityId entityId, SceneComponentKind kind, const ScenePersistence::LoadedSceneEntity& snapshot)
+		{
+			PasteComponentValuesToEntityWithUndo(entityId, kind, snapshot);
+		},
+		.OnTransformEditCommitted = [this](EntityId entityId, const Math::Transform& beforeTransform, const Math::Transform& afterTransform)
+		{
+			CommitTransformEdit(entityId, beforeTransform, afterTransform);
+		},
+		.OnTransformBatchEditCommitted = [this](std::vector<Editor::TransformEditRecord> records)
+		{
+			CommitTransformBatchEdit(std::move(records));
+		},
+		.OnComponentBatchEditCommitted = [this](std::vector<Editor::ComponentEditRecord> records)
+		{
+			CommitComponentBatchEdit(std::move(records));
+		},
+		.OnMaterialEditCommitted = [this](EntityId entityId, size_t materialIndex, const Asset::StaticMeshMaterial& beforeMaterial, const Asset::StaticMeshMaterial& afterMaterial)
+		{
+			CommitMaterialEdit(entityId, materialIndex, beforeMaterial, afterMaterial);
+		},
+		.OnMaterialBatchEditCommitted = [this](std::vector<Editor::MaterialEditRecord> records)
+		{
+			CommitMaterialBatchEdit(std::move(records));
 		},
 		.OnMaterialShadingModelChanged = [this](EntityId entityId, size_t materialIndex, Asset::MaterialShadingModel model)
 		{
-			SetMaterialShadingModel(entityId, materialIndex, model);
+			SetMaterialShadingModelWithUndo(entityId, materialIndex, model);
 		},
 		.OnMaterialTextureAssigned = [this](EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot, const std::filesystem::path& path)
 		{
-			AssignMaterialTexture(entityId, materialIndex, slot, path);
+			AssignMaterialTextureWithUndo(entityId, materialIndex, slot, path);
+		},
+		.OnMaterialTexturesAssigned = [this](EntityId entityId, size_t materialIndex, const std::vector<Editor::MaterialTextureAssignment>& assignments)
+		{
+			AssignMaterialTexturesWithUndo(entityId, materialIndex, assignments);
+		},
+		.OnMaterialTextureBatchAssigned = [this](EntityId entityId, const std::vector<Editor::MaterialTextureBatchAssignment>& batchAssignments)
+		{
+			AssignMaterialTextureBatchWithUndo(entityId, batchAssignments);
 		},
 		.OnMaterialTextureCleared = [this](EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot)
 		{
-			ClearMaterialTexture(entityId, materialIndex, slot);
+			ClearMaterialTextureWithUndo(entityId, materialIndex, slot);
 		},
 		.OnMaterialTextureBrowseRequested = [this](EntityId entityId, size_t materialIndex, Asset::MaterialTextureSlot slot)
 		{
@@ -4920,6 +10676,11 @@ void Engine::BeginEditorFrame()
 			m_Exposure = std::clamp(exposure, 0.05f, 8.0f);
 			MarkSceneDirty();
 		},
+		.OnSkyboxSettingsChanged = [this](const Rendering::SkyboxSettings& skybox)
+		{
+			m_SkyboxSettings = Rendering::ClampSkyboxSettings(skybox);
+			MarkSceneDirty();
+		},
 		.OnKeyLightIntensityChanged = [this](float intensity)
 		{
 			if (LightComponent* light = m_Scene.GetLightComponent(ResolveKeyLightEntity()))
@@ -4943,7 +10704,10 @@ void Engine::BeginEditorFrame()
 		},
 		.OnSceneEdited = [this]()
 		{
-			MarkSceneDirty();
+			if (!IsRuntimePlaying())
+			{
+				MarkSceneDirty();
+			}
 		},
 		.OnPhysicsSimulationChanged = [this](bool enabled)
 		{
@@ -5105,6 +10869,52 @@ void Engine::RenderWorldViewport(const Editor::ViewportPanelState& viewport, con
 	m_Graphics.CommandList->SetVertexBuffer(m_StaticMeshRenderer.VertexBuffer.get());
 	m_Graphics.CommandList->SetIndexBuffer(m_StaticMeshRenderer.IndexBuffer.get());
 
+	const std::array<float, 4> skyClearColor = BuildSkyClearColor(m_SkyboxSettings);
+	if (m_Graphics.CurrentApi == GraphicsAPI::DirectX12)
+	{
+		auto native = static_cast<ID3D12GraphicsCommandList*>(m_Graphics.CommandList->GetNativeResource());
+		if (native)
+		{
+			D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv = {};
+			backBufferRtv.ptr = reinterpret_cast<SIZE_T>(m_Graphics.Device->GetCurrentBackBufferRTV());
+			const D3D12_RECT clearRect = {
+				.left = left,
+				.top = top,
+				.right = right,
+				.bottom = bottom
+			};
+			native->ClearRenderTargetView(backBufferRtv, skyClearColor.data(), 1, &clearRect);
+		}
+	}
+	else if (auto commandList = dynamic_cast<VulkanCommandList*>(m_Graphics.CommandList.get()))
+	{
+		commandList->BeginSwapchainRenderPassForExternalCommands();
+		auto commandBuffer = reinterpret_cast<VkCommandBuffer>(m_Graphics.CommandList->GetNativeResource());
+		if (commandBuffer != VK_NULL_HANDLE)
+		{
+			VkClearAttachment clearAttachment = {};
+			clearAttachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			clearAttachment.colorAttachment = 0;
+			clearAttachment.clearValue.color.float32[0] = skyClearColor[0];
+			clearAttachment.clearValue.color.float32[1] = skyClearColor[1];
+			clearAttachment.clearValue.color.float32[2] = skyClearColor[2];
+			clearAttachment.clearValue.color.float32[3] = skyClearColor[3];
+
+			const VkClearRect clearRect = {
+				.rect = {
+					.offset = { static_cast<int32_t>(left), static_cast<int32_t>(top) },
+					.extent = {
+						static_cast<uint32_t>(right - left),
+						static_cast<uint32_t>(bottom - top)
+					}
+				},
+				.baseArrayLayer = 0,
+				.layerCount = 1
+			};
+			vkCmdClearAttachments(commandBuffer, 1, &clearAttachment, 1, &clearRect);
+		}
+	}
+
 	if (m_Graphics.CurrentApi == GraphicsAPI::DirectX12)
 	{
 		if (m_RenderMode == RenderMode::Deferred)
@@ -5130,6 +10940,11 @@ void Engine::RenderWorldViewport(const Editor::ViewportPanelState& viewport, con
 		}
 		else
 		{
+			const size_t skyboxPass = m_RenderGraph.AddPass("DX12 Procedural Skybox", Rendering::RenderPassKind::Clear, label, "Fullscreen procedural sky", m_SkyboxSettings.Enabled);
+			MeasureRenderGraphPass(m_RenderGraph, skyboxPass, [this, &viewport, &camera]()
+				{
+					DrawDx12Skybox(viewport, camera);
+				});
 			const size_t forwardPass = m_RenderGraph.AddPass("DX12 Forward Mesh", Rendering::RenderPassKind::Geometry, label);
 			MeasureRenderGraphPass(m_RenderGraph, forwardPass, [this, &camera]()
 				{
@@ -5162,6 +10977,11 @@ void Engine::RenderWorldViewport(const Editor::ViewportPanelState& viewport, con
 		}
 		else
 		{
+			const size_t skyboxPass = m_RenderGraph.AddPass("Vulkan Procedural Skybox", Rendering::RenderPassKind::Clear, label, "Fullscreen procedural sky", m_SkyboxSettings.Enabled);
+			MeasureRenderGraphPass(m_RenderGraph, skyboxPass, [this, &viewport, &camera]()
+				{
+					DrawVulkanSkybox(viewport, camera);
+				});
 			const size_t forwardPass = m_RenderGraph.AddPass("Vulkan Forward Mesh", Rendering::RenderPassKind::Geometry, label);
 			MeasureRenderGraphPass(m_RenderGraph, forwardPass, [this, &camera]()
 				{
@@ -5184,18 +11004,19 @@ void Engine::RenderWorldViewport(const Editor::ViewportPanelState& viewport, con
 
 void Engine::ResetRenderFrameStats()
 {
+	const Scene& runtimeScene = GetRuntimeScene();
 	m_RenderFrameStats = {};
 	m_RenderFrameStats.FrameIndex = m_JobSystem.GetFrameIndex();
 	m_RenderFrameStats.RenderEntityCount = static_cast<uint32_t>(m_RenderState.RenderEntities.size());
 
 	for (EntityId entityId : m_RenderState.RenderEntities)
 	{
-		if (!m_Scene.IsMeshEnabled(entityId))
+		if (!runtimeScene.IsMeshEnabled(entityId))
 		{
 			continue;
 		}
 
-		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+		const Asset::StaticMeshAsset* meshAsset = runtimeScene.GetMeshAsset(entityId);
 		if (!meshAsset)
 		{
 			continue;
@@ -5234,13 +11055,18 @@ void Engine::ResetViewCullingCache()
 
 void Engine::BuildViewportVisibleRenderList(const Camera& camera, bool isGameView)
 {
+	const Scene& runtimeScene = GetRuntimeScene();
 	m_ViewportVisibleRenderEntities.clear();
 	m_ViewportVisibleRenderEntities.reserve(m_RenderState.RenderEntities.size());
 	const uint32_t requestCountBefore = m_RenderFrameStats.ViewCullingRequestCount;
 	const uint32_t culledCountBefore = m_RenderFrameStats.ViewCulledEntityCount;
 	for (EntityId entityId : m_RenderState.RenderEntities)
 	{
-		if (entityId == InvalidEntityId || !m_Scene.IsMeshEnabled(entityId) || !GetMeshAsset(entityId))
+		if (entityId == InvalidEntityId || !runtimeScene.IsMeshEnabled(entityId) || !runtimeScene.GetMeshAsset(entityId))
+		{
+			continue;
+		}
+		if (!isGameView && !runtimeScene.IsEntityVisibleInScene(entityId))
 		{
 			continue;
 		}
@@ -5288,8 +11114,9 @@ bool Engine::ShouldSubmitEntityForCamera(EntityId entityId, const Camera& camera
 	++m_RenderFrameStats.ViewCullingCacheMissCount;
 	++m_RenderFrameStats.ViewCullingTestCount;
 
-	const TransformComponent* transform = m_Scene.GetTransformComponent(entityId);
-	const BoundsComponent* bounds = m_Scene.GetBoundsComponent(entityId);
+	const Scene& runtimeScene = GetRuntimeScene();
+	const TransformComponent* transform = runtimeScene.GetTransformComponent(entityId);
+	const BoundsComponent* bounds = runtimeScene.GetBoundsComponent(entityId);
 	if (!transform || !bounds)
 	{
 		m_ViewCullingCache[entityId] = true;
@@ -5890,7 +11717,75 @@ bool Engine::CreateDx12TriangleResources()
 		return false;
 	}
 
+	if (!CreateDx12SkyboxResources())
+	{
+		return false;
+	}
+
 	return CreateDx12DeferredResources();
+}
+
+bool Engine::CreateDx12SkyboxResources()
+{
+	auto dx12Device = dynamic_cast<DX12Device*>(m_Graphics.Device.get());
+	if (!dx12Device)
+	{
+		return false;
+	}
+
+	const std::string skyboxShaderSource = ShaderUtils::LoadShaderSource(GetDx12SkyboxShaderPath());
+	if (skyboxShaderSource.empty())
+	{
+		MessageBoxW(m_hMainWnd, L"DirectX12 Skybox 셰이더 파일을 읽을 수 없습니다.", L"Shader Error", MB_OK | MB_ICONERROR);
+		return false;
+	}
+
+	ComPtr<ID3DBlob> vertexShader;
+	ComPtr<ID3DBlob> pixelShader;
+	ComPtr<ID3DBlob> errors;
+	if (FAILED(D3DCompile(skyboxShaderSource.c_str(), skyboxShaderSource.size(), nullptr, nullptr, nullptr, "VSMain", "vs_5_0", 0, 0, &vertexShader, &errors)) ||
+		FAILED(D3DCompile(skyboxShaderSource.c_str(), skyboxShaderSource.size(), nullptr, nullptr, nullptr, "PSMain", "ps_5_0", 0, 0, &pixelShader, &errors)))
+	{
+		return false;
+	}
+
+	CD3DX12_ROOT_PARAMETER rootParameters[1] = {};
+	rootParameters[0].InitAsConstants(
+		static_cast<UINT>(sizeof(Rendering::SkyboxGpuConstants) / sizeof(uint32_t)),
+		0,
+		0,
+		D3D12_SHADER_VISIBILITY_PIXEL);
+
+	CD3DX12_ROOT_SIGNATURE_DESC rootSignatureDesc;
+	rootSignatureDesc.Init(static_cast<UINT>(std::size(rootParameters)), rootParameters, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+
+	ComPtr<ID3DBlob> signature;
+	if (FAILED(D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &errors)) ||
+		FAILED(dx12Device->GetD3DDevice()->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&m_StaticMeshRenderer.Dx12.SkyboxRootSignature))))
+	{
+		return false;
+	}
+
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+	psoDesc.pRootSignature = m_StaticMeshRenderer.Dx12.SkyboxRootSignature.Get();
+	psoDesc.VS = { vertexShader->GetBufferPointer(), vertexShader->GetBufferSize() };
+	psoDesc.PS = { pixelShader->GetBufferPointer(), pixelShader->GetBufferSize() };
+	psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+	psoDesc.SampleMask = UINT_MAX;
+	psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+	psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+	psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+	psoDesc.DepthStencilState.DepthEnable = FALSE;
+	psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+	psoDesc.DepthStencilState.StencilEnable = FALSE;
+	psoDesc.InputLayout = {};
+	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	psoDesc.NumRenderTargets = 1;
+	psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+	psoDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
+	psoDesc.SampleDesc.Count = 1;
+
+	return SUCCEEDED(dx12Device->GetD3DDevice()->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_StaticMeshRenderer.Dx12.SkyboxPipelineState)));
 }
 
 bool Engine::CreateDx12DeferredResources()
@@ -6407,10 +12302,17 @@ bool Engine::EnsureDx12DeferredResources()
 void Engine::DestroyDx12TriangleResources()
 {
 	DestroyDx12DeferredResources();
+	DestroyDx12SkyboxResources();
 	DestroyDx12ShadowResources();
 	m_StaticMeshRenderer.Dx12.TransparentPipelineState.Reset();
 	m_StaticMeshRenderer.Dx12.PipelineState.Reset();
 	m_StaticMeshRenderer.Dx12.RootSignature.Reset();
+}
+
+void Engine::DestroyDx12SkyboxResources()
+{
+	m_StaticMeshRenderer.Dx12.SkyboxPipelineState.Reset();
+	m_StaticMeshRenderer.Dx12.SkyboxRootSignature.Reset();
 }
 
 void Engine::DestroyDx12DeferredResources()
@@ -6444,6 +12346,46 @@ void Engine::DestroyDx12ShadowResources()
 	shadow.PipelineState.Reset();
 	shadow.Size = 0;
 	shadow.IsValid = false;
+}
+
+void Engine::DrawDx12Skybox(const Editor::ViewportPanelState& viewport, const Camera& camera)
+{
+	if (!m_SkyboxSettings.Enabled)
+	{
+		return;
+	}
+
+	auto native = static_cast<ID3D12GraphicsCommandList*>(m_Graphics.CommandList->GetNativeResource());
+	if (!native || !m_StaticMeshRenderer.Dx12.SkyboxRootSignature || !m_StaticMeshRenderer.Dx12.SkyboxPipelineState)
+	{
+		return;
+	}
+
+	const long left = (std::max)(0L, static_cast<long>(std::floor(viewport.Left)));
+	const long top = (std::max)(0L, static_cast<long>(std::floor(viewport.Top)));
+	const long right = (std::min)(static_cast<long>(m_ClientWidth), static_cast<long>(std::ceil(viewport.Left + viewport.Width)));
+	const long bottom = (std::min)(static_cast<long>(m_ClientHeight), static_cast<long>(std::ceil(viewport.Top + viewport.Height)));
+	if (right <= left || bottom <= top)
+	{
+		return;
+	}
+
+	D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv = {};
+	backBufferRtv.ptr = reinterpret_cast<SIZE_T>(m_Graphics.Device->GetCurrentBackBufferRTV());
+	native->OMSetRenderTargets(1, &backBufferRtv, FALSE, nullptr);
+	m_Graphics.CommandList->SetViewport(static_cast<float>(left), static_cast<float>(top), static_cast<float>(right - left), static_cast<float>(bottom - top));
+	m_Graphics.CommandList->SetScissorRect(left, top, right, bottom);
+	native->SetGraphicsRootSignature(m_StaticMeshRenderer.Dx12.SkyboxRootSignature.Get());
+	native->SetPipelineState(m_StaticMeshRenderer.Dx12.SkyboxPipelineState.Get());
+	const Rendering::SkyboxGpuConstants skyboxConstants = Rendering::BuildSkyboxGpuConstants(m_SkyboxSettings, camera);
+	native->SetGraphicsRoot32BitConstants(
+		0,
+		static_cast<UINT>(sizeof(Rendering::SkyboxGpuConstants) / sizeof(uint32_t)),
+		&skyboxConstants,
+		0);
+	native->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	RecordFullscreenDraw(Rendering::DrawSubmissionKind::Fullscreen, 3, 1);
+	m_Graphics.CommandList->DrawInstanced(3, 1, 0, 0);
 }
 
 void Engine::DrawDx12ShadowDepthPass(const Camera& camera)
@@ -6480,14 +12422,15 @@ void Engine::DrawDx12ShadowDepthPass(const Camera& camera)
 	native->SetPipelineState(shadow.PipelineState.Get());
 	native->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
+	const Scene& runtimeScene = GetRuntimeScene();
 	for (EntityId entityId : m_RenderState.RenderEntities)
 	{
-		if (!m_Scene.IsMeshEnabled(entityId))
+		if (!runtimeScene.IsMeshEnabled(entityId))
 		{
 			continue;
 		}
 
-		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+		const Asset::StaticMeshAsset* meshAsset = runtimeScene.GetMeshAsset(entityId);
 		if (!meshAsset)
 		{
 			continue;
@@ -6648,14 +12591,15 @@ void Engine::DrawDx12DeferredTriangle(const Editor::ViewportPanelState& viewport
 	native->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 	const UINT descriptorSize = dx12Device->GetD3DDevice()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	const Scene& runtimeScene = GetRuntimeScene();
 	for (EntityId entityId : m_ViewportVisibleRenderEntities)
 	{
-		if (!m_Scene.IsMeshEnabled(entityId))
+		if (!runtimeScene.IsMeshEnabled(entityId))
 		{
 			continue;
 		}
 
-		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+		const Asset::StaticMeshAsset* meshAsset = runtimeScene.GetMeshAsset(entityId);
 		if (!meshAsset)
 		{
 			continue;
@@ -6781,6 +12725,7 @@ void Engine::DrawDx12DeferredTriangle(const Editor::ViewportPanelState& viewport
 	lightingConstants.ShadowViewProjection = shadowData.LightViewProjection;
 	lightingConstants.ShadowParams = shadowData.Params;
 	lightingConstants.ShadowDirection = shadowData.DirectionToLight;
+	lightingConstants.Skybox = Rendering::BuildSkyboxGpuConstants(m_SkyboxSettings, camera);
 	if (WriteDeferredLightingConstants(lightingConstants) == InvalidCameraConstantOffset())
 	{
 		return;
@@ -6796,8 +12741,8 @@ void Engine::DrawDx12DeferredTriangle(const Editor::ViewportPanelState& viewport
 	native->OMSetRenderTargets(1, &hdrRtv, FALSE, nullptr);
 	m_Graphics.CommandList->SetViewport(static_cast<float>(left), static_cast<float>(top), width, height);
 	m_Graphics.CommandList->SetScissorRect(left, top, right, bottom);
-	const float hdrClear[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-	native->ClearRenderTargetView(hdrRtv, hdrClear, 0, nullptr);
+	const std::array<float, 4> hdrClear = BuildSkyClearColor(m_SkyboxSettings);
+	native->ClearRenderTargetView(hdrRtv, hdrClear.data(), 0, nullptr);
 	native->SetGraphicsRootSignature(deferred.LightingRootSignature.Get());
 	native->SetPipelineState(deferred.LightingPipelineState.Get());
 	ID3D12DescriptorHeap* gbufferHeap[] = { deferred.GBufferSrvHeap.Get() };
@@ -6853,14 +12798,15 @@ void Engine::DrawDx12ForwardTransparentPass(const Camera& camera)
 	native->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 	const UINT descriptorSize = dx12Device->GetD3DDevice()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	const Scene& runtimeScene = GetRuntimeScene();
 	for (EntityId entityId : m_ViewportVisibleRenderEntities)
 	{
-		if (!m_Scene.IsMeshEnabled(entityId))
+		if (!runtimeScene.IsMeshEnabled(entityId))
 		{
 			continue;
 		}
 
-		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+		const Asset::StaticMeshAsset* meshAsset = runtimeScene.GetMeshAsset(entityId);
 		if (!meshAsset)
 		{
 			continue;
@@ -6949,14 +12895,15 @@ void Engine::DrawDx12Triangle(const Camera& camera)
 		native->SetPipelineState(m_StaticMeshRenderer.Dx12.PipelineState.Get());
 	}
 
+	const Scene& runtimeScene = GetRuntimeScene();
 	for (EntityId entityId : m_ViewportVisibleRenderEntities)
 	{
-		if (!m_Scene.IsMeshEnabled(entityId))
+		if (!runtimeScene.IsMeshEnabled(entityId))
 		{
 			continue;
 		}
 
-		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+		const Asset::StaticMeshAsset* meshAsset = runtimeScene.GetMeshAsset(entityId);
 		if (!meshAsset)
 		{
 			continue;
@@ -7256,7 +13203,7 @@ uint32_t Engine::UpdateDeferredLightBuffer()
 		return 0;
 	}
 
-	const std::vector<LightGpuData> lights = RenderSystem::CollectSceneLights(m_Scene, ResolveKeyLightEntity(), kUnlimitedDeferredGpuLights);
+	const std::vector<LightGpuData> lights = RenderSystem::CollectSceneLights(GetRuntimeScene(), ResolveKeyLightEntity(), kUnlimitedDeferredGpuLights);
 	const uint32_t lightCount = static_cast<uint32_t>((std::min)(lights.size(), static_cast<size_t>((std::numeric_limits<uint32_t>::max)())));
 	if (!EnsureDeferredLightBufferCapacity(lightCount))
 	{
@@ -7533,7 +13480,7 @@ uint64_t Engine::UpdateCameraBuffer(EntityId entityId)
 
 uint64_t Engine::UpdateCameraBuffer(const Camera& camera)
 {
-	return UpdateCameraBuffer(m_Scene.GetPrimaryRenderableEntity(), camera);
+	return UpdateCameraBuffer(GetRuntimeScene().GetPrimaryRenderableEntity(), camera);
 }
 
 uint64_t Engine::UpdateCameraBuffer(EntityId entityId, const Camera& camera)
@@ -7556,7 +13503,7 @@ uint64_t Engine::UpdateCameraBuffer(EntityId entityId, const Camera& camera, siz
 
 	CameraConstants cameraConstants = {};
 	if (!RenderSystem::BuildCameraConstants(
-		m_Scene,
+		GetRuntimeScene(),
 		camera,
 		entityId,
 		materialIndex,
@@ -7583,7 +13530,7 @@ uint64_t Engine::UpdateShadowCameraBuffer(EntityId entityId)
 		return InvalidCameraConstantOffset();
 	}
 
-	const TransformComponent* transform = m_Scene.GetTransformComponent(entityId);
+	const TransformComponent* transform = GetRuntimeScene().GetTransformComponent(entityId);
 	if (!transform)
 	{
 		return InvalidCameraConstantOffset();
@@ -7622,7 +13569,7 @@ void Engine::UpdateObjectPicking()
 		return;
 	}
 
-	m_Scene.SetSelectedEntity(TryPickEntity(static_cast<float>(mouseX), static_cast<float>(mouseY)));
+	GetRuntimeScene().SetSelectedEntity(TryPickEntity(static_cast<float>(mouseX), static_cast<float>(mouseY)));
 }
 
 bool Engine::TryPickSpider(float mouseX, float mouseY) const
@@ -7637,27 +13584,37 @@ EntityId Engine::TryPickEntity(float mouseX, float mouseY) const
 
 EntityId Engine::TryPickEntity(float mouseX, float mouseY, const Camera& camera, float viewportWidth, float viewportHeight) const
 {
+	const Scene& runtimeScene = GetRuntimeScene();
+	EntityId closestEntity = InvalidEntityId;
+	float closestDistance = (std::numeric_limits<float>::max)();
 	for (EntityId entityId : m_RenderState.RenderEntities)
 	{
-		if (entityId == InvalidEntityId || !m_Scene.IsMeshEnabled(entityId))
+		if (entityId == InvalidEntityId
+			|| !runtimeScene.IsMeshEnabled(entityId)
+			|| !runtimeScene.IsEntityVisibleInScene(entityId)
+			|| !runtimeScene.IsEntityPickableInScene(entityId))
 		{
 			continue;
 		}
 
+		float hitDistance = 0.0f;
 		if (PickingSystem::TryPickEntityAabb(
-			m_Scene,
+			runtimeScene,
 			entityId,
 			camera,
 			mouseX,
 			mouseY,
 			viewportWidth,
-			viewportHeight))
+			viewportHeight,
+			hitDistance)
+			&& hitDistance < closestDistance)
 		{
-			return entityId;
+			closestEntity = entityId;
+			closestDistance = hitDistance;
 		}
 	}
 
-	return InvalidEntityId;
+	return closestEntity;
 }
 
 
@@ -7685,7 +13642,7 @@ EntityId Engine::TryPickEntity(float mouseX, float mouseY, const Camera& camera,
 
 
 
-void Engine::UpdateAnimatedMesh(float deltaTime)
+void Engine::UpdateAnimatedMesh(Scene& runtimeScene, float deltaTime)
 {
 	struct AnimationTask
 	{
@@ -7700,14 +13657,14 @@ void Engine::UpdateAnimatedMesh(float deltaTime)
 	std::vector<AnimationTask> tasks;
 	for (EntityId entityId : m_RenderState.RenderEntities)
 	{
-		if (!m_Scene.IsMeshEnabled(entityId) || !m_Scene.IsAnimatorEnabled(entityId))
+		if (!runtimeScene.IsMeshEnabled(entityId) || !runtimeScene.IsAnimatorEnabled(entityId))
 		{
 			continue;
 		}
 
-		if (AnimatorComponent* animator = m_Scene.GetAnimatorComponent(entityId))
+		if (AnimatorComponent* animator = runtimeScene.GetAnimatorComponent(entityId))
 		{
-			Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+			Asset::StaticMeshAsset* meshAsset = runtimeScene.GetMeshAsset(entityId);
 			if (!meshAsset)
 			{
 				continue;
@@ -8144,6 +14101,11 @@ bool Engine::CreateVulkanTriangleResources()
 		return false;
 	}
 
+	if (!CreateVulkanSkyboxResources())
+	{
+		return false;
+	}
+
 	if (!CreateVulkanDeferredResources())
 	{
 		return false;
@@ -8151,6 +14113,133 @@ bool Engine::CreateVulkanTriangleResources()
 
 	m_StaticMeshRenderer.Vulkan.IsValid = true;
 	return true;
+}
+
+bool Engine::CreateVulkanSkyboxResources()
+{
+	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
+	if (!vulkanDevice)
+	{
+		return false;
+	}
+
+	const std::string vertexSource = ShaderUtils::LoadShaderSource(GetVulkanSkyboxVertexShaderPath());
+	const std::string fragmentSource = ShaderUtils::LoadShaderSource(GetVulkanSkyboxFragmentShaderPath());
+	if (vertexSource.empty() || fragmentSource.empty())
+	{
+		MessageBoxW(m_hMainWnd, L"Vulkan Skybox 셰이더 파일을 읽을 수 없습니다.", L"Shader Error", MB_OK | MB_ICONERROR);
+		return false;
+	}
+
+	auto createShaderModule = [vulkanDevice](const std::vector<uint32_t>& code, VkShaderModule& shaderModule)
+	{
+		if (code.empty())
+		{
+			return false;
+		}
+		const VkShaderModuleCreateInfo createInfo = {
+			.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+			.codeSize = code.size() * sizeof(uint32_t),
+			.pCode = code.data()
+		};
+		return vkCreateShaderModule(vulkanDevice->GetVkDevice(), &createInfo, nullptr, &shaderModule) == VK_SUCCESS;
+	};
+
+	if (!createShaderModule(ShaderUtils::CompileGlslToSpirv(GLSLANG_STAGE_VERTEX, vertexSource), m_StaticMeshRenderer.Vulkan.SkyboxVertexShader) ||
+		!createShaderModule(ShaderUtils::CompileGlslToSpirv(GLSLANG_STAGE_FRAGMENT, fragmentSource), m_StaticMeshRenderer.Vulkan.SkyboxFragmentShader))
+	{
+		return false;
+	}
+
+	const VkPushConstantRange pushConstantRange = {
+		.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+		.offset = 0,
+		.size = static_cast<uint32_t>(sizeof(Rendering::SkyboxGpuConstants))
+	};
+	const VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+		.pushConstantRangeCount = 1,
+		.pPushConstantRanges = &pushConstantRange
+	};
+	if (vkCreatePipelineLayout(vulkanDevice->GetVkDevice(), &pipelineLayoutCreateInfo, nullptr, &m_StaticMeshRenderer.Vulkan.SkyboxPipelineLayout) != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	const VkPipelineShaderStageCreateInfo shaderStages[] = {
+		{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+			.stage = VK_SHADER_STAGE_VERTEX_BIT,
+			.module = m_StaticMeshRenderer.Vulkan.SkyboxVertexShader,
+			.pName = "main"
+		},
+		{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+			.stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+			.module = m_StaticMeshRenderer.Vulkan.SkyboxFragmentShader,
+			.pName = "main"
+		}
+	};
+	const VkPipelineVertexInputStateCreateInfo vertexInput = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
+	};
+	const VkPipelineInputAssemblyStateCreateInfo inputAssembly = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+		.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
+	};
+	const VkPipelineViewportStateCreateInfo viewportState = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+		.viewportCount = 1,
+		.scissorCount = 1
+	};
+	const VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	const VkPipelineDynamicStateCreateInfo dynamicState = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+		.dynamicStateCount = static_cast<uint32_t>(std::size(dynamicStates)),
+		.pDynamicStates = dynamicStates
+	};
+	const VkPipelineRasterizationStateCreateInfo rasterizer = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+		.polygonMode = VK_POLYGON_MODE_FILL,
+		.cullMode = VK_CULL_MODE_NONE,
+		.frontFace = VK_FRONT_FACE_CLOCKWISE,
+		.lineWidth = 1.0f
+	};
+	const VkPipelineMultisampleStateCreateInfo multisampling = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+		.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
+	};
+	const VkPipelineDepthStencilStateCreateInfo depthStencil = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+		.depthTestEnable = VK_FALSE,
+		.depthWriteEnable = VK_FALSE
+	};
+	const VkPipelineColorBlendAttachmentState colorBlendAttachment = {
+		.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
+	};
+	const VkPipelineColorBlendStateCreateInfo colorBlending = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+		.attachmentCount = 1,
+		.pAttachments = &colorBlendAttachment
+	};
+	const VkGraphicsPipelineCreateInfo pipelineCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+		.stageCount = static_cast<uint32_t>(std::size(shaderStages)),
+		.pStages = shaderStages,
+		.pVertexInputState = &vertexInput,
+		.pInputAssemblyState = &inputAssembly,
+		.pViewportState = &viewportState,
+		.pRasterizationState = &rasterizer,
+		.pMultisampleState = &multisampling,
+		.pDepthStencilState = &depthStencil,
+		.pColorBlendState = &colorBlending,
+		.pDynamicState = &dynamicState,
+		.layout = m_StaticMeshRenderer.Vulkan.SkyboxPipelineLayout,
+		.renderPass = vulkanDevice->GetVkRenderPass(),
+		.subpass = 0
+	};
+
+	return vkCreateGraphicsPipelines(vulkanDevice->GetVkDevice(), VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr, &m_StaticMeshRenderer.Vulkan.SkyboxPipeline) == VK_SUCCESS;
 }
 
 bool Engine::CreateVulkanDeferredResources()
@@ -9329,6 +15418,7 @@ void Engine::DestroyVulkanTriangleResources()
 	}
 
 	DestroyVulkanDeferredResources();
+	DestroyVulkanSkyboxResources();
 	DestroyVulkanShadowResources();
 
 	if (m_StaticMeshRenderer.Vulkan.Pipeline != VK_NULL_HANDLE)
@@ -9389,6 +15479,83 @@ void Engine::DestroyVulkanTriangleResources()
 	m_StaticMeshRenderer.Vulkan.MaterialTextures = std::move(savedMaterialTextures);
 	m_StaticMeshRenderer.Vulkan.MaterialCount = savedMaterialCount;
 	m_StaticMeshRenderer.Vulkan.EntityMaterials = std::move(savedEntityMaterials);
+}
+
+void Engine::DestroyVulkanSkyboxResources()
+{
+	auto vulkanDevice = dynamic_cast<VulkanDevice*>(m_Graphics.Device.get());
+	if (!vulkanDevice)
+	{
+		m_StaticMeshRenderer.Vulkan.SkyboxVertexShader = VK_NULL_HANDLE;
+		m_StaticMeshRenderer.Vulkan.SkyboxFragmentShader = VK_NULL_HANDLE;
+		m_StaticMeshRenderer.Vulkan.SkyboxPipelineLayout = VK_NULL_HANDLE;
+		m_StaticMeshRenderer.Vulkan.SkyboxPipeline = VK_NULL_HANDLE;
+		return;
+	}
+
+	const VkDevice device = vulkanDevice->GetVkDevice();
+	if (m_StaticMeshRenderer.Vulkan.SkyboxPipeline != VK_NULL_HANDLE)
+	{
+		vkDestroyPipeline(device, m_StaticMeshRenderer.Vulkan.SkyboxPipeline, nullptr);
+		m_StaticMeshRenderer.Vulkan.SkyboxPipeline = VK_NULL_HANDLE;
+	}
+	if (m_StaticMeshRenderer.Vulkan.SkyboxPipelineLayout != VK_NULL_HANDLE)
+	{
+		vkDestroyPipelineLayout(device, m_StaticMeshRenderer.Vulkan.SkyboxPipelineLayout, nullptr);
+		m_StaticMeshRenderer.Vulkan.SkyboxPipelineLayout = VK_NULL_HANDLE;
+	}
+	if (m_StaticMeshRenderer.Vulkan.SkyboxVertexShader != VK_NULL_HANDLE)
+	{
+		vkDestroyShaderModule(device, m_StaticMeshRenderer.Vulkan.SkyboxVertexShader, nullptr);
+		m_StaticMeshRenderer.Vulkan.SkyboxVertexShader = VK_NULL_HANDLE;
+	}
+	if (m_StaticMeshRenderer.Vulkan.SkyboxFragmentShader != VK_NULL_HANDLE)
+	{
+		vkDestroyShaderModule(device, m_StaticMeshRenderer.Vulkan.SkyboxFragmentShader, nullptr);
+		m_StaticMeshRenderer.Vulkan.SkyboxFragmentShader = VK_NULL_HANDLE;
+	}
+}
+
+void Engine::DrawVulkanSkybox(const Editor::ViewportPanelState& viewport, const Camera& camera)
+{
+	if (!m_SkyboxSettings.Enabled)
+	{
+		return;
+	}
+
+	auto commandList = dynamic_cast<VulkanCommandList*>(m_Graphics.CommandList.get());
+	auto commandBuffer = reinterpret_cast<VkCommandBuffer>(m_Graphics.CommandList->GetNativeResource());
+	if (!commandList ||
+		commandBuffer == VK_NULL_HANDLE ||
+		m_StaticMeshRenderer.Vulkan.SkyboxPipeline == VK_NULL_HANDLE ||
+		m_StaticMeshRenderer.Vulkan.SkyboxPipelineLayout == VK_NULL_HANDLE)
+	{
+		return;
+	}
+
+	const long left = (std::max)(0L, static_cast<long>(std::floor(viewport.Left)));
+	const long top = (std::max)(0L, static_cast<long>(std::floor(viewport.Top)));
+	const long right = (std::min)(static_cast<long>(m_ClientWidth), static_cast<long>(std::ceil(viewport.Left + viewport.Width)));
+	const long bottom = (std::min)(static_cast<long>(m_ClientHeight), static_cast<long>(std::ceil(viewport.Top + viewport.Height)));
+	if (right <= left || bottom <= top)
+	{
+		return;
+	}
+
+	commandList->BeginSwapchainRenderPassForExternalCommands();
+	m_Graphics.CommandList->SetViewport(static_cast<float>(left), static_cast<float>(top), static_cast<float>(right - left), static_cast<float>(bottom - top));
+	m_Graphics.CommandList->SetScissorRect(left, top, right, bottom);
+	const Rendering::SkyboxGpuConstants skyboxConstants = Rendering::BuildSkyboxGpuConstants(m_SkyboxSettings, camera);
+	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_StaticMeshRenderer.Vulkan.SkyboxPipeline);
+	vkCmdPushConstants(
+		commandBuffer,
+		m_StaticMeshRenderer.Vulkan.SkyboxPipelineLayout,
+		VK_SHADER_STAGE_FRAGMENT_BIT,
+		0,
+		static_cast<uint32_t>(sizeof(Rendering::SkyboxGpuConstants)),
+		&skyboxConstants);
+	RecordFullscreenDraw(Rendering::DrawSubmissionKind::Fullscreen, 3, 1);
+	m_Graphics.CommandList->DrawInstanced(3, 1, 0, 0);
 }
 
 void Engine::DestroyVulkanShadowResources()
@@ -9509,14 +15676,15 @@ void Engine::DrawVulkanShadowDepthPass(const Camera& camera)
 	m_Graphics.CommandList->SetScissorRect(0, 0, static_cast<long>(shadow.Size), static_cast<long>(shadow.Size));
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow.Pipeline);
 
+	const Scene& runtimeScene = GetRuntimeScene();
 	for (EntityId entityId : m_RenderState.RenderEntities)
 	{
-		if (!m_Scene.IsMeshEnabled(entityId))
+		if (!runtimeScene.IsMeshEnabled(entityId))
 		{
 			continue;
 		}
 
-		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+		const Asset::StaticMeshAsset* meshAsset = runtimeScene.GetMeshAsset(entityId);
 		if (!meshAsset)
 		{
 			continue;
@@ -9661,13 +15829,14 @@ void Engine::DrawVulkanDeferredTriangle(const Editor::ViewportPanelState& viewpo
 	m_Graphics.CommandList->SetScissorRect(left, top, right, bottom);
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, deferred.GeometryPipeline);
 
+	const Scene& runtimeScene = GetRuntimeScene();
 	for (EntityId entityId : m_ViewportVisibleRenderEntities)
 	{
-		if (!m_Scene.IsMeshEnabled(entityId))
+		if (!runtimeScene.IsMeshEnabled(entityId))
 		{
 			continue;
 		}
-		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+		const Asset::StaticMeshAsset* meshAsset = runtimeScene.GetMeshAsset(entityId);
 		if (!meshAsset)
 		{
 			continue;
@@ -9778,16 +15947,18 @@ void Engine::DrawVulkanDeferredTriangle(const Editor::ViewportPanelState& viewpo
 	lightingConstants.ShadowViewProjection = shadowData.LightViewProjection;
 	lightingConstants.ShadowParams = shadowData.Params;
 	lightingConstants.ShadowDirection = shadowData.DirectionToLight;
+	lightingConstants.Skybox = Rendering::BuildSkyboxGpuConstants(m_SkyboxSettings, camera);
 	if (WriteDeferredLightingConstants(lightingConstants) == InvalidCameraConstantOffset())
 	{
 		return;
 	}
 
 	VkClearValue hdrClearValue = {};
-	hdrClearValue.color.float32[0] = 0.0f;
-	hdrClearValue.color.float32[1] = 0.0f;
-	hdrClearValue.color.float32[2] = 0.0f;
-	hdrClearValue.color.float32[3] = 0.0f;
+	const std::array<float, 4> hdrClear = BuildSkyClearColor(m_SkyboxSettings);
+	hdrClearValue.color.float32[0] = hdrClear[0];
+	hdrClearValue.color.float32[1] = hdrClear[1];
+	hdrClearValue.color.float32[2] = hdrClear[2];
+	hdrClearValue.color.float32[3] = hdrClear[3];
 	const VkRenderPassBeginInfo lightingBeginInfo = {
 		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
 		.renderPass = deferred.LightingRenderPass,
@@ -9842,13 +16013,14 @@ void Engine::DrawVulkanForwardTransparentPass(const Camera& camera)
 	}
 
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_StaticMeshRenderer.Vulkan.TransparentPipeline);
+	const Scene& runtimeScene = GetRuntimeScene();
 	for (EntityId entityId : m_ViewportVisibleRenderEntities)
 	{
-		if (!m_Scene.IsMeshEnabled(entityId))
+		if (!runtimeScene.IsMeshEnabled(entityId))
 		{
 			continue;
 		}
-		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+		const Asset::StaticMeshAsset* meshAsset = runtimeScene.GetMeshAsset(entityId);
 		if (!meshAsset)
 		{
 			continue;
@@ -9932,14 +16104,15 @@ void Engine::DrawVulkanTriangle(const Camera& camera)
 	// Vulkan은 현재 열린 render pass 안에서 그래픽 파이프라인을 바인딩하고 draw를 기록합니다.
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_StaticMeshRenderer.Vulkan.Pipeline);
 
+	const Scene& runtimeScene = GetRuntimeScene();
 	for (EntityId entityId : m_ViewportVisibleRenderEntities)
 	{
-		if (!m_Scene.IsMeshEnabled(entityId))
+		if (!runtimeScene.IsMeshEnabled(entityId))
 		{
 			continue;
 		}
 
-		const Asset::StaticMeshAsset* meshAsset = GetMeshAsset(entityId);
+		const Asset::StaticMeshAsset* meshAsset = runtimeScene.GetMeshAsset(entityId);
 		if (!meshAsset)
 		{
 			continue;
@@ -10064,7 +16237,7 @@ void Engine::DrawVulkanTriangle(const Camera& camera)
 
 bool Engine::CreateTriangleVertexBuffer()
 {
-	const Asset::StaticMeshAsset* spiderMesh = RenderSystem::GetPrimaryRenderableMesh(m_Scene);
+	const Asset::StaticMeshAsset* spiderMesh = RenderSystem::GetPrimaryRenderableMesh(GetRuntimeScene());
 	if (!spiderMesh || spiderMesh->Vertices.empty())
 	{
 		const BufferDesc bufferDesc = {
@@ -10100,7 +16273,7 @@ bool Engine::CreateTriangleVertexBuffer()
 
 bool Engine::CreateIndexBuffer()
 {
-	const Asset::StaticMeshAsset* spiderMesh = RenderSystem::GetPrimaryRenderableMesh(m_Scene);
+	const Asset::StaticMeshAsset* spiderMesh = RenderSystem::GetPrimaryRenderableMesh(GetRuntimeScene());
 	if (!spiderMesh || spiderMesh->Indices.empty())
 	{
 		const BufferDesc bufferDesc = {

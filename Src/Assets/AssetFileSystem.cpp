@@ -47,6 +47,12 @@ namespace Asset
 				{
 					result.SizeBytes = 0;
 				}
+				errorCode.clear();
+				result.LastWriteTimeTicks = static_cast<uint64_t>(entry.last_write_time(errorCode).time_since_epoch().count());
+				if (errorCode)
+				{
+					result.LastWriteTimeTicks = 0;
+				}
 			}
 
 			if (!IsDirectory(entry))
@@ -203,7 +209,7 @@ namespace Asset
 		{
 			return AssetFileKind::Image;
 		}
-		if (extension == ".txt" || extension == ".md" || extension == ".json")
+		if (extension == ".txt" || extension == ".md" || extension == ".json" || extension == ".scene" || extension == ".prefab" || extension == ".material" || extension == ".skybox")
 		{
 			return AssetFileKind::Text;
 		}
@@ -217,5 +223,10 @@ namespace Asset
 	bool IsModelAssetPath(const std::filesystem::path& path)
 	{
 		return ClassifyAssetPath(path) == AssetFileKind::Model;
+	}
+
+	bool IsSkyboxAssetPath(const std::filesystem::path& path)
+	{
+		return ToLower(path.extension().string()) == ".skybox";
 	}
 }
